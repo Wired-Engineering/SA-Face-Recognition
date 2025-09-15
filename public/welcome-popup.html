@@ -1,0 +1,564 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Face Recognition - Welcome Screen</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+            overflow: hidden;
+            height: 100vh;
+            width: 100vw;
+        }
+
+        .welcome-container {
+            width: 100%;
+            height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 40px;
+            position: relative;
+            background-color: var(--bg-color, #E1EBFF);
+        }
+
+        .connection-status {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-size: 14px;
+            font-weight: 500;
+        }
+
+        .connection-status.connected {
+            background-color: rgba(81, 207, 102, 0.1);
+            border: 1px solid #51cf66;
+            color: #51cf66;
+        }
+
+        .connection-status.disconnected {
+            background-color: rgba(255, 107, 107, 0.1);
+            border: 1px solid #ff6b6b;
+            color: #ff6b6b;
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+        }
+
+        .status-dot.connected {
+            background-color: #51cf66;
+        }
+
+        .status-dot.disconnected {
+            background-color: #ff6b6b;
+        }
+
+        .welcome-card {
+            background: white;
+            border-radius: 16px;
+            padding: 40px;
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.1);
+            border: 3px solid var(--font-color, #00243D);
+            min-width: 500px;
+            text-align: center;
+        }
+
+        .success-icon {
+            width: 80px;
+            height: 80px;
+            border-radius: 50%;
+            background-color: #51cf66;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 auto 30px;
+        }
+
+        .welcome-title {
+            color: var(--font-color, #00243D);
+            font-size: 3rem;
+            font-weight: bold;
+            margin: 0 0 30px 0;
+        }
+
+        .user-avatar {
+            width: 120px;
+            height: 120px;
+            border-radius: 50%;
+            border: 4px solid var(--font-color, #00243D);
+            margin: 20px auto;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            overflow: hidden;
+            background-color: #f8f9fa;
+        }
+
+        .user-avatar img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+        .user-name {
+            color: var(--font-color, #00243D);
+            font-size: 2.2rem;
+            font-weight: normal;
+            line-height: 1.2;
+            margin: 20px 0 10px 0;
+        }
+
+        .user-id {
+            color: var(--font-color, #00243D);
+            font-size: 1.3rem;
+            opacity: 0.8;
+            margin: 10px 0;
+        }
+
+        .user-department {
+            color: var(--font-color, #00243D);
+            font-size: 1.1rem;
+            opacity: 0.7;
+            margin: 10px 0;
+        }
+
+        .confidence-score {
+            color: var(--font-color, #00243D);
+            font-size: 0.9rem;
+            opacity: 0.6;
+            margin: 15px 0;
+        }
+
+        .timer-text {
+            color: var(--font-color, #00243D);
+            font-size: 0.9rem;
+            opacity: 0.6;
+            margin-top: 30px;
+        }
+
+        .waiting-state {
+            padding: 40px 0;
+        }
+
+        .loader {
+            width: 50px;
+            height: 50px;
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid var(--font-color, #00243D);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 30px;
+        }
+
+        .waiting-title {
+            color: var(--font-color, #00243D);
+            font-size: 1.8rem;
+            margin: 20px 0;
+        }
+
+        .waiting-subtitle {
+            color: var(--font-color, #00243D);
+            opacity: 0.7;
+            font-size: 1rem;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .hidden {
+            display: none;
+        }
+
+        /* Icons */
+        .icon-check {
+            width: 48px;
+            height: 48px;
+            fill: white;
+        }
+
+        .icon-user {
+            width: 60px;
+            height: 60px;
+            fill: var(--font-color, #00243D);
+            opacity: 0.5;
+        }
+    </style>
+</head>
+<body>
+    <div class="welcome-container">
+        <!-- Connection Status -->
+        <div id="connectionStatus" class="connection-status disconnected">
+            <div class="status-dot disconnected"></div>
+            <span>Offline</span>
+        </div>
+
+        <!-- Welcome Card -->
+        <div class="welcome-card">
+            <!-- User Recognized State -->
+            <div id="recognizedState" class="hidden">
+                <div class="success-icon">
+                    <svg class="icon-check" viewBox="0 0 24 24">
+                        <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41L9 16.17z"/>
+                    </svg>
+                </div>
+
+                <h1 class="welcome-title">Welcome</h1>
+
+                <div class="user-avatar">
+                    <img id="userPhoto" src="" alt="User Photo" class="hidden">
+                    <svg id="userIcon" class="icon-user" viewBox="0 0 24 24">
+                        <path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/>
+                    </svg>
+                </div>
+
+                <div id="userName" class="user-name">Unknown User</div>
+                <div id="userId" class="user-id hidden"></div>
+                <div id="userDepartment" class="user-department hidden"></div>
+                <div id="confidenceScore" class="confidence-score hidden"></div>
+                <div id="timerText" class="timer-text hidden"></div>
+            </div>
+
+            <!-- Waiting State -->
+            <div id="waitingState" class="waiting-state">
+                <div class="loader"></div>
+                <h2 class="waiting-title">Waiting for face recognition...</h2>
+                <p class="waiting-subtitle">Position yourself in front of the camera</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Socket.IO Client Library -->
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+
+    <script>
+        class WelcomeScreenPopup {
+            constructor() {
+                this.socket = null;
+                this.isConnected = false;
+                this.currentUser = null;
+                this.userQueue = [];  // Queue of users to cycle through
+                this.settings = {
+                    backgroundColor: '#E1EBFF',
+                    fontColor: '#00243D',
+                    timer: 5
+                };
+                this.timeLeft = 0;
+                this.timerInterval = null;
+                this.isPersistent = false;
+
+                this.loadSettings();
+                this.applySettings();
+                this.connectSocketIO();
+                this.setupFallbackPolling();
+                this.setupMessageListener();
+
+                // Close window on escape key (only if not persistent)
+                document.addEventListener('keydown', (e) => {
+                    if (e.key === 'Escape' && !this.isPersistent) {
+                        window.close();
+                    }
+                });
+            }
+
+            loadSettings() {
+                // Try to get settings from URL parameters
+                const urlParams = new URLSearchParams(window.location.search);
+                if (urlParams.has('backgroundColor')) {
+                    this.settings.backgroundColor = urlParams.get('backgroundColor');
+                }
+                if (urlParams.has('fontColor')) {
+                    this.settings.fontColor = urlParams.get('fontColor');
+                }
+                if (urlParams.has('timer')) {
+                    this.settings.timer = parseInt(urlParams.get('timer')) || 5;
+                }
+                if (urlParams.has('persistent')) {
+                    this.isPersistent = urlParams.get('persistent') === 'true';
+                }
+
+                // Try to load from localStorage as fallback
+                const savedSettings = localStorage.getItem('faceRecognitionDisplaySettings');
+                if (savedSettings) {
+                    try {
+                        const parsed = JSON.parse(savedSettings);
+                        this.settings = { ...this.settings, ...parsed };
+                    } catch (e) {
+                        console.warn('Failed to parse saved settings:', e);
+                    }
+                }
+            }
+
+            setupMessageListener() {
+                // Listen for messages from parent window
+                window.addEventListener('message', (event) => {
+                    if (event.origin !== window.location.origin) return;
+
+                    if (event.data.type === 'settings_update') {
+                        this.settings = { ...this.settings, ...event.data.settings };
+                        this.applySettings();
+                        console.log('📝 Settings updated from parent window');
+                    }
+                });
+            }
+
+            applySettings() {
+                document.documentElement.style.setProperty('--bg-color', this.settings.backgroundColor);
+                document.documentElement.style.setProperty('--font-color', this.settings.fontColor);
+            }
+
+            connectSocketIO() {
+                try {
+                    this.socket = io('http://localhost:8000');
+
+                    this.socket.on('connect', () => {
+                        console.log('✅ Connected to SocketIO server');
+                        this.updateConnectionStatus(true);
+
+                        // Register this popup as a welcome screen
+                        this.socket.emit('register_welcome_screen', {});
+                    });
+
+                    this.socket.on('disconnect', () => {
+                        console.log('❌ SocketIO connection closed');
+                        this.updateConnectionStatus(false);
+                    });
+
+                    this.socket.on('recognition_result', (data) => {
+                        console.log('🎯 Recognition result received:', data);
+                        if (data.type === 'recognition' && data.user) {
+                            this.addUserToQueue(data.user);
+                        }
+                    });
+
+                    this.socket.on('welcome_screen_registered', (data) => {
+                        console.log('📺 Welcome screen registered successfully');
+                    });
+
+                    this.socket.on('connect_error', (error) => {
+                        console.error('SocketIO connection error:', error);
+                        this.updateConnectionStatus(false);
+                    });
+
+                } catch (error) {
+                    console.error('Failed to connect to SocketIO:', error);
+                    this.updateConnectionStatus(false);
+                }
+            }
+
+            setupFallbackPolling() {
+                setInterval(async () => {
+                    if (this.isConnected) return; // Skip if SocketIO is working
+
+                    try {
+                        const response = await fetch('http://localhost:8000/api/recognition/latest');
+                        if (response.ok) {
+                            const data = await response.json();
+                            if (data.user && data.timestamp) {
+                                this.addUserToQueue(data.user);
+                            }
+                        }
+                    } catch (error) {
+                        console.error('Failed to poll recognition data:', error);
+                    }
+                }, 1000);
+            }
+
+            updateConnectionStatus(connected) {
+                this.isConnected = connected;
+                const statusEl = document.getElementById('connectionStatus');
+                const dotEl = statusEl.querySelector('.status-dot');
+                const textEl = statusEl.querySelector('span');
+
+                if (connected) {
+                    statusEl.className = 'connection-status connected';
+                    dotEl.className = 'status-dot connected';
+                    textEl.textContent = 'Live';
+                } else {
+                    statusEl.className = 'connection-status disconnected';
+                    dotEl.className = 'status-dot disconnected';
+                    textEl.textContent = 'Offline';
+                }
+            }
+
+            addUserToQueue(user) {
+                // Check if user is already in queue (prevent duplicates)
+                const userId = user.student_id || user.studentId;
+                const existingIndex = this.userQueue.findIndex(u =>
+                    (u.student_id || u.studentId) === userId
+                );
+
+                if (existingIndex !== -1) {
+                    // Update existing user in queue
+                    this.userQueue[existingIndex] = user;
+                    console.log(`🔄 Updated ${user.name || user.student_name} in queue`);
+                } else {
+                    // Add new user to queue
+                    this.userQueue.push(user);
+                    console.log(`➕ Added ${user.name || user.student_name} to queue`);
+                }
+
+                // If no user is currently displayed, show the first user
+                if (!this.currentUser) {
+                    this.showNextUser();
+                }
+            }
+
+            showNextUser() {
+                if (this.userQueue.length === 0) {
+                    this.showWaitingState();
+                    return;
+                }
+
+                // Get the next user from queue
+                const user = this.userQueue.shift();
+                this.showUser(user);
+            }
+
+            showUser(user) {
+                this.currentUser = user;
+                this.timeLeft = this.settings.timer;
+
+                // Hide waiting state, show recognized state
+                document.getElementById('waitingState').classList.add('hidden');
+                document.getElementById('recognizedState').classList.remove('hidden');
+
+                // Update user information
+                const userNameEl = document.getElementById('userName');
+                const userIdEl = document.getElementById('userId');
+                const userDepartmentEl = document.getElementById('userDepartment');
+                const confidenceEl = document.getElementById('confidenceScore');
+                const userPhotoEl = document.getElementById('userPhoto');
+                const userIconEl = document.getElementById('userIcon');
+
+                // Set user name
+                userNameEl.textContent = user.name || user.student_name || 'Unknown User';
+
+                // Set user ID
+                if (user.studentId || user.student_id) {
+                    userIdEl.textContent = `ID: ${user.studentId || user.student_id}`;
+                    userIdEl.classList.remove('hidden');
+                } else {
+                    userIdEl.classList.add('hidden');
+                }
+
+                // Set department
+                if (user.department) {
+                    userDepartmentEl.textContent = user.department;
+                    userDepartmentEl.classList.remove('hidden');
+                } else {
+                    userDepartmentEl.classList.add('hidden');
+                }
+
+                // Set confidence score
+                if (user.confidence) {
+                    confidenceEl.textContent = `Confidence: ${Math.round(user.confidence * 100)}%`;
+                    confidenceEl.classList.remove('hidden');
+                } else {
+                    confidenceEl.classList.add('hidden');
+                }
+
+                // Set user photo
+                if (user.photo) {
+                    userPhotoEl.src = user.photo;
+                    userPhotoEl.classList.remove('hidden');
+                    userIconEl.classList.add('hidden');
+                } else {
+                    userPhotoEl.classList.add('hidden');
+                    userIconEl.classList.remove('hidden');
+                }
+
+                // Start countdown timer
+                this.startTimer();
+                console.log(`👋 Showing ${user.name || user.student_name} for ${this.settings.timer} seconds`);
+            }
+
+            showWaitingState() {
+                this.currentUser = null;
+
+                // Show waiting state, hide recognized state
+                document.getElementById('recognizedState').classList.add('hidden');
+                document.getElementById('waitingState').classList.remove('hidden');
+
+                console.log('⏳ Showing waiting state - no users in queue');
+            }
+
+            startTimer() {
+                const timerEl = document.getElementById('timerText');
+
+                if (this.isPersistent) {
+                    // In persistent mode, show next user after timer
+                    timerEl.classList.remove('hidden');
+                    timerEl.textContent = `Next in ${this.timeLeft} seconds...`;
+
+                    if (this.timerInterval) {
+                        clearInterval(this.timerInterval);
+                    }
+
+                    this.timerInterval = setInterval(() => {
+                        if (this.timeLeft > 0) {
+                            timerEl.textContent = `Next in ${this.timeLeft} seconds...`;
+                            this.timeLeft--;
+                        } else {
+                            this.showNextUser();
+                        }
+                    }, 1000);
+                } else {
+                    // Legacy mode - close window
+                    timerEl.classList.remove('hidden');
+                    timerEl.textContent = `Closing in ${this.timeLeft} seconds...`;
+
+                    if (this.timerInterval) {
+                        clearInterval(this.timerInterval);
+                    }
+
+                    this.timerInterval = setInterval(() => {
+                        if (this.timeLeft > 0) {
+                            timerEl.textContent = `Closing in ${this.timeLeft} seconds...`;
+                            this.timeLeft--;
+                        } else {
+                            this.closeWindow();
+                        }
+                    }, 1000);
+                }
+            }
+
+            closeWindow() {
+                if (this.timerInterval) {
+                    clearInterval(this.timerInterval);
+                }
+                if (this.socket) {
+                    this.socket.emit('unregister_welcome_screen', {});
+                    this.socket.disconnect();
+                }
+
+                // Small delay before closing to show the final state
+                setTimeout(() => {
+                    window.close();
+                }, 500);
+            }
+        }
+
+        // Initialize when page loads
+        document.addEventListener('DOMContentLoaded', () => {
+            new WelcomeScreenPopup();
+        });
+    </script>
+</body>
+</html>
