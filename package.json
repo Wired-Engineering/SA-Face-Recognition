@@ -10,8 +10,11 @@
     "preview": "vite preview",
     "server": "node server.js",
     "python-api": "cd src/python && python3 api.py",
-    "dev:all": "concurrently \"pnpm python-api\" \"pnpm server\" \"pnpm  dev\"",
-    "start": "pnpm dev:all"
+    "server-delayed": "sleep 3 && pnpm server",
+    "dev:all": "concurrently \"pnpm python-api\" \"pnpm server-delayed\" \"pnpm dev\"",
+    "start": "pnpm dev:all",
+    "cleanup": "bash cleanup.sh",
+    "force-stop": "bash cleanup.sh"
   },
   "dependencies": {
     "@mantine/core": "^8.3.1",

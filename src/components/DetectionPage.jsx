@@ -19,7 +19,7 @@ import {
   IconAlertCircle,
   IconHome,
 } from '@tabler/icons-react';
-import apiService, { webcamUtils } from '../services/api';
+import apiService from '../services/api';
 import { io } from 'socket.io-client';
 import { openWelcomePopup } from '../services/welcomePopup';
 
@@ -31,395 +31,15 @@ export function DetectionPage({ onDetection }) {
   const [detectionHistory, setDetectionHistory] = useState([]);
   const [videoStatus, setVideoStatus] = useState('Stopped');
   const [error, setError] = useState(null);
-  const [isRtspSource, setIsRtspSource] = useState(false);
-  const videoRef = useRef(null);
+  const [actualCameraSource, setActualCameraSource] = useState('default');
   const rtspImageRef = useRef(null);
-  const canvasRef = useRef(null);
-  const streamRef = useRef(null);
   const socketRef = useRef(null);
   const frameProcessingIntervalRef = useRef(null);
   const isDetectingRef = useRef(false);
   const [connectionState, setConnectionState] = useState('disconnected');
 
-
-  const handleStartVideo = async () => {
-    try {
-      setError(null);
-      setVideoStatus('Connecting...');
-      console.log('🎥 Starting video...');
-
-      // Load saved camera settings
-      const cameraSettings = await apiService.getCameraSettings();
-      console.log('📷 Loaded camera settings:', cameraSettings);
-
-      let constraints = {
-        video: {
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
-          frameRate: { ideal: 30 }
-        },
-        audio: false
-      };
-
-      // Apply saved camera settings
-      if (cameraSettings.success || cameraSettings.source) {
-        if (cameraSettings.source === 'rtsp') {
-          // RTSP camera - use HTTP video stream with overlays from backend
-          console.log('📡 RTSP camera selected, using ffmpeg stream with overlays');
-
-          // Set RTSP mode
-          setIsRtspSource(true);
-
-          // Set video source to ffmpeg stream with overlays endpoint
-          setIsVideoStarted(true);
-          setVideoStatus('Connecting to RTSP...');
-
-          // Set up RTSP image stream with overlays after state update
-          setTimeout(() => {
-            if (rtspImageRef.current) {
-              rtspImageRef.current.src = '/api/rtsp/stream-with-overlay';
-              console.log('📡 RTSP stream source set to /api/rtsp/stream-with-overlay');
-            }
-          }, 100);
-
-          // Use existing Socket.IO connection for welcome screen recognition events only
-          await setupSocketIOConnection();
-          return; // Skip getUserMedia for RTSP
-        } else if (cameraSettings.device_id && cameraSettings.source === 'device') {
-          // Specific camera device
-          constraints.video.deviceId = { exact: cameraSettings.device_id };
-          console.log('📹 Using specific camera:', cameraSettings.device_id);
-          setIsRtspSource(false);
-        } else {
-          setIsRtspSource(false);
-        }
-        // Otherwise use default camera
-      } else {
-        setIsRtspSource(false);
-      }
-
-      console.log('📹 Requesting camera with constraints:', constraints);
-      const stream = await navigator.mediaDevices.getUserMedia(constraints);
-      console.log('✅ Camera stream acquired:', {
-        active: stream.active,
-        id: stream.id,
-        tracks: stream.getVideoTracks().length
-      });
-
-      // Validate stream
-      const videoTracks = stream.getVideoTracks();
-      if (videoTracks.length === 0) {
-        throw new Error('No video tracks in stream');
-      }
-
-      const videoTrack = videoTracks[0];
-      console.log('📺 Video track:', {
-        enabled: videoTrack.enabled,
-        readyState: videoTrack.readyState,
-        settings: videoTrack.getSettings()
-      });
-
-      streamRef.current = stream;
-
-      // First, update state to render the video element
-      setIsVideoStarted(true);
-      setVideoStatus('Connected');
-      console.log('✅ Video setup complete, rendering video element...');
-
-      // Set up video element after state update (when component re-renders)
-      setTimeout(async () => {
-        if (videoRef.current && streamRef.current) {
-          console.log('📺 Setting up video after render...');
-
-          // Add event listeners for debugging
-          videoRef.current.onloadstart = () => console.log('📺 Video loadstart');
-          videoRef.current.onloadedmetadata = () => console.log('📺 Video metadata loaded');
-          videoRef.current.oncanplay = () => console.log('📺 Video can play');
-          videoRef.current.onplay = () => console.log('📺 Video started playing');
-          videoRef.current.onplaying = () => console.log('📺 Video is playing');
-          videoRef.current.onerror = (e) => console.error('📺 Video error:', e);
-
-          // Set the stream
-          videoRef.current.srcObject = streamRef.current;
-
-          console.log('📺 Stream attached to video element:', {
-            streamId: streamRef.current.id,
-            streamActive: streamRef.current.active,
-            videoElementExists: !!videoRef.current
-          });
-
-          try {
-            await videoRef.current.play();
-            console.log('📺 Video started playing successfully!');
-          } catch (e) {
-            console.log('📺 Video play failed:', e.message);
-          }
-
-          // Final status check
-          setTimeout(() => {
-            if (videoRef.current) {
-              console.log('📺 Final video status check:', {
-                readyState: videoRef.current.readyState,
-                paused: videoRef.current.paused,
-                videoWidth: videoRef.current.videoWidth,
-                videoHeight: videoRef.current.videoHeight,
-                currentTime: videoRef.current.currentTime,
-                srcObject: !!videoRef.current.srcObject,
-                srcObjectId: videoRef.current.srcObject?.id,
-                stream: !!streamRef.current,
-                streamId: streamRef.current?.id,
-                streamActive: streamRef.current?.active,
-                streamsMatch: videoRef.current.srcObject?.id === streamRef.current?.id
-              });
-            }
-          }, 500);
-        } else {
-          console.error('❌ Video element or stream not available after render');
-        }
-      }, 100);
-
-      // Set up SocketIO connection
-      await setupSocketIOConnection();
-
-    } catch (err) {
-      console.error('❌ Error starting video:', err);
-      setError(`Failed to access camera: ${err.message}`);
-      setVideoStatus('Error');
-
-      // Cleanup on error
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach(track => track.stop());
-        streamRef.current = null;
-      }
-      setIsVideoStarted(false);
-    }
-  };
-
-  const handleStopVideo = useCallback(async () => {
-    // console.log('🛑 handleStopVideo called');
-    // console.trace('🛑 Stop video called from:');
-
-    // Stop detection if active
-    if (isDetectingRef.current) {
-      handleStopDetection();
-    }
-
-    // Stop RTSP streams if using RTSP
-    if (isRtspSource) {
-      try {
-        console.log('🛑 Stopping RTSP streams...');
-        await apiService.stopRtspStreams();
-        console.log('✅ RTSP streams stopped');
-      } catch (error) {
-        console.error('❌ Error stopping RTSP streams:', error);
-      }
-    }
-
-    // Close SocketIO connection
-    if (socketRef.current) {
-      console.log('🔌 Closing SocketIO connection...');
-      socketRef.current.disconnect();
-      socketRef.current = null;
-    }
-
-    // Stop frame processing
-    if (frameProcessingIntervalRef.current) {
-      console.log('🖼️ Stopping frame processing...');
-      clearInterval(frameProcessingIntervalRef.current);
-      frameProcessingIntervalRef.current = null;
-    }
-
-    // Stop video stream
-    if (streamRef.current) {
-      webcamUtils.stopStream(streamRef.current);
-      streamRef.current = null;
-    }
-
-    // Reset video element
-    if (videoRef.current) {
-      videoRef.current.srcObject = null;
-    }
-
-    setIsVideoStarted(false);
-    setIsDetecting(false);
-    setVideoStatus('Stopped');
-    setDetectedPerson(null);
-    setError(null);
-    setConnectionState('disconnected');
-  }, []);
-
-  // Pure SocketIO setup for frame processing
-  const setupSocketIOConnection = async () => {
-    console.log('🔌 Setting up SocketIO connection...');
-
-    try {
-      // Connect to SocketIO server
-      const socket = io('http://localhost:8000');
-      socketRef.current = socket;
-
-      console.log('🔌 SocketIO client created, waiting for connection...');
-
-      // Handle SocketIO events
-      socket.on('connect', () => {
-        console.log('🔌 Connected to SocketIO server:', socket.id);
-        setConnectionState('connected');
-
-        // Start detection (works for both webcam and RTSP)
-        console.log('🎯 Emitting start_detection...');
-        socket.emit('start_detection', {});
-
-        console.log('🎯 Setting isDetecting to true...');
-        setIsDetecting(true);
-        isDetectingRef.current = true;
-
-        // Start frame processing (only for webcam, RTSP handles detection and overlays on backend)
-        // Check camera source dynamically since Socket.IO connects before RTSP state is set
-        apiService.getCameraSettings().then(currentCameraSettings => {
-          if (currentCameraSettings.source !== 'rtsp') {
-            console.log('🖼️ Starting frame processing for webcam...');
-            startFrameProcessing();
-          } else {
-            console.log('📡 RTSP mode - backend handles detection and overlays, skipping frontend frame processing');
-          }
-        }).catch(error => {
-          console.error('Error checking camera settings:', error);
-          // Default to starting frame processing if we can't check
-          startFrameProcessing();
-        });
-      });
-
-      socket.on('disconnect', () => {
-        console.log('🔌 Disconnected from SocketIO server');
-        setConnectionState('disconnected');
-
-        // Stop frame processing
-        if (frameProcessingIntervalRef.current) {
-          clearInterval(frameProcessingIntervalRef.current);
-          frameProcessingIntervalRef.current = null;
-        }
-      });
-
-      // Handle face detection results from SocketIO
-      socket.on('face_detection_result', (data) => {
-        // console.log('🔍 Received face detection results:', data);
-        handleDetectionResult(data);
-      });
-
-
-      socket.on('detection_started', (data) => {
-        console.log('🎯 Detection started:', data);
-      });
-
-      socket.on('detection_stopped', (data) => {
-        console.log('🛑 Detection stopped:', data);
-      });
-
-      socket.on('detection_error', (error) => {
-        console.error('❌ Detection error:', error);
-        setError(`Detection error: ${error.error}`);
-      });
-
-      socket.on('connect_error', (error) => {
-        console.error('🔌 SocketIO connection error:', error);
-        setError(`Connection error: ${error.message}`);
-        setConnectionState('error');
-      });
-
-      socket.on('error', (error) => {
-        console.error('🔌 SocketIO error:', error);
-      });
-
-      console.log('🔌 SocketIO setup complete');
-    } catch (error) {
-      console.error('🔌 Failed to setup SocketIO:', error);
-      setError(`Connection setup failed: ${error.message}`);
-    }
-  };
-
-  // Start processing frames from video element
-  const startFrameProcessing = () => {
-    if (frameProcessingIntervalRef.current) {
-      clearInterval(frameProcessingIntervalRef.current);
-    }
-
-    console.log('🖼️ Starting frame processing...');
-
-    frameProcessingIntervalRef.current = setInterval(() => {
-      // console.log('⏰ Frame processing interval tick:', {
-      //   videoExists: !!videoRef.current,
-      //   socketExists: !!socketRef.current,
-      //   isDetecting: isDetectingRef.current,
-      //   videoReadyState: videoRef.current?.readyState
-      // });
-
-      if (videoRef.current && socketRef.current && isDetectingRef.current) {
-        captureAndSendFrame();
-      }
-    }, 33); // Process ~30 frames per second for better responsiveness
-  };
-
-  // Capture frame from video element or RTSP image and send via SocketIO
-  const captureAndSendFrame = () => {
-    try {
-      let sourceElement;
-      let width, height;
-
-      if (isRtspSource) {
-        sourceElement = rtspImageRef.current;
-        if (!sourceElement || !sourceElement.complete || sourceElement.naturalWidth === 0) {
-          console.log('📹 RTSP image not ready for frame capture:', {
-            exists: !!sourceElement,
-            complete: sourceElement?.complete,
-            naturalWidth: sourceElement?.naturalWidth,
-            src: sourceElement?.src
-          });
-          return;
-        }
-        width = sourceElement.naturalWidth || 640;
-        height = sourceElement.naturalHeight || 480;
-      } else {
-        sourceElement = videoRef.current;
-        if (!sourceElement || sourceElement.readyState !== 4) {
-          console.log('📹 Video not ready for frame capture:', {
-            exists: !!sourceElement,
-            readyState: sourceElement?.readyState
-          });
-          return;
-        }
-        width = sourceElement.videoWidth || 640;
-        height = sourceElement.videoHeight || 480;
-      }
-
-      // Create canvas to capture frame
-      const canvas = document.createElement('canvas');
-      canvas.width = width;
-      canvas.height = height;
-      const ctx = canvas.getContext('2d');
-
-      // Draw current frame to canvas
-      ctx.drawImage(sourceElement, 0, 0, canvas.width, canvas.height);
-
-      // Convert to base64
-      const frameData = canvas.toDataURL('image/jpeg', 0.8);
-
-      // console.log('📤 Sending frame for processing:', {
-      //   width: canvas.width,
-      //   height: canvas.height,
-      //   dataLength: frameData.length
-      // });
-
-      // Send frame to backend for processing
-      socketRef.current.emit('process_frame', {
-        frame: frameData
-      });
-
-    } catch (error) {
-      console.error('🖼️ Error capturing frame:', error);
-    }
-  };
-
   // Handle detection results for UI updates
-  const handleDetectionResult = (data) => {
+  const handleDetectionResult = useCallback((data) => {
     // console.log('🔍 Received detection results:', data);
 
     // Update UI state for both RTSP and webcam modes
@@ -435,6 +55,7 @@ export function DetectionPage({ onDetection }) {
         const detectedPerson = {
           id: bestMatch.person_id,
           name: bestMatch.person_name,
+          title: bestMatch.person_title,
           confidence: Math.round(bestMatch.match_confidence * 100),
           bbox: bestMatch.bbox
         };
@@ -473,120 +94,254 @@ export function DetectionPage({ onDetection }) {
     } else {
       setDetectedPerson(null);
     }
+  }, [onDetection]);
 
-    // Draw detection overlays on canvas ONLY for webcam (RTSP has overlays from backend)
-    if (!isRtspSource) {
-      drawDetectionOverlays(data.faces || [], data.frame_size);
-    }
-  };
+  // Pure SocketIO setup for frame processing
+  const setupSocketIOConnection = useCallback(async () => {
+    console.log('🔌 Setting up SocketIO connection...');
 
-  // Draw detection overlays using canvas
-  const drawDetectionOverlays = (faces, frameSize) => {
-    // Skip canvas drawing for RTSP mode - overlays are handled by backend
-    if (isRtspSource) {
-      return;
-    }
+    try {
+      // Check if socket already exists and is connected
+      if (socketRef.current && socketRef.current.connected) {
+        console.log('🔌 Socket already connected, reusing existing connection');
 
-    if (!canvasRef.current) {
-      console.log('🎨 Canvas not available for drawing');
-      return;
-    }
+        // Start detection immediately
+        console.log('🎯 Emitting start_detection...');
+        socketRef.current.emit('start_detection', {});
 
-    const canvas = canvasRef.current;
-    const ctx = canvas.getContext('2d');
-
-    // Set canvas size to match the displayed image size (not natural size)
-    if (isRtspSource && rtspImageRef.current) {
-      const rtspImage = rtspImageRef.current;
-      canvas.width = rtspImage.clientWidth || 640;
-      canvas.height = rtspImage.clientHeight || 480;
-    } else if (videoRef.current) {
-      const video = videoRef.current;
-      canvas.width = video.videoWidth || video.clientWidth || 640;
-      canvas.height = video.videoHeight || video.clientHeight || 480;
-    } else {
-      console.log('🎨 No video or RTSP image available for drawing');
-      return;
-    }
-
-    // console.log('🎨 Drawing overlays:', {
-    //   facesCount: faces.length,
-    //   canvasSize: { width: canvas.width, height: canvas.height },
-    //   frameSize: frameSize,
-    //   isRtspSource: isRtspSource
-    // });
-
-    // Clear previous overlays
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-    // Draw bounding boxes and labels
-    faces.forEach((face) => {
-      //console.log(`🎨 Drawing face ${index}:`, face);
-
-      const [x1, y1, x2, y2] = face.bbox;
-      const width = x2 - x1;
-      const height = y2 - y1;
-
-      // Scale coordinates from backend frame size to displayed canvas size
-      let scaleX = 1;
-      let scaleY = 1;
-
-      if (isRtspSource && frameSize) {
-        // For RTSP, scale from backend frame size to displayed size
-        scaleX = canvas.width / frameSize.width;
-        scaleY = canvas.height / frameSize.height;
-        // console.log('🎨 RTSP scaling:', {
-        //   canvasSize: { width: canvas.width, height: canvas.height },
-        //   frameSize: frameSize,
-        //   scale: { x: scaleX, y: scaleY }
-        // });
-      } else if (videoRef.current) {
-        // For webcam, use video dimensions
-        const video = videoRef.current;
-        scaleX = canvas.width / (video.videoWidth || video.clientWidth || 640);
-        scaleY = canvas.height / (video.videoHeight || video.clientHeight || 480);
+        setIsDetecting(true);
+        isDetectingRef.current = true;
+        setConnectionState('connected');
+        return;
       }
 
-      const scaledX = x1 * scaleX;
-      const scaledY = y1 * scaleY;
-      const scaledWidth = width * scaleX;
-      const scaledHeight = height * scaleY;
-
-      // console.log(`🎨 Drawing box at:`, {
-      //   original: { x1, y1, x2, y2, width, height },
-      //   scaled: { x: scaledX, y: scaledY, width: scaledWidth, height: scaledHeight }
-      // });
-
-      // Draw bounding box
-      ctx.strokeStyle = face.recognized ? '#00ff00' : '#ff0000';
-      ctx.lineWidth = 3;
-      ctx.strokeRect(scaledX, scaledY, scaledWidth, scaledHeight);
-
-      // Draw label background
-      if (face.recognized) {
-        const label = face.person_name;
-        const confidence = Math.round(face.match_confidence * 100);
-
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
-        ctx.fillRect(scaledX, scaledY - 30, scaledWidth, 25);
-
-        // Draw text
-        ctx.fillStyle = '#ffffff';
-        ctx.font = '24px Arial';
-        ctx.fillText(`${label} (${confidence}%)`, scaledX + 5, scaledY - 10);
-      } else {
-        // Draw "Unknown" label for unrecognized faces
-        ctx.fillStyle = 'rgba(255, 0, 0, 0.7)';
-        ctx.fillRect(scaledX, scaledY - 30, scaledWidth, 25);
-
-        ctx.fillStyle = '#ffffff';
-        ctx.font = '14px Arial';
-        ctx.fillText('Unknown', scaledX + 5, scaledY - 10);
+      // Clean up any existing disconnected socket
+      if (socketRef.current) {
+        socketRef.current.disconnect();
+        socketRef.current = null;
       }
-    });
-  };
 
-  const handleStopDetection = () => {
+      // Connect to SocketIO server
+      const socket = io('http://localhost:8000');
+      socketRef.current = socket;
+
+      console.log('🔌 SocketIO client created, waiting for connection...');
+
+      // Wait for connection with Promise
+      await new Promise((resolve, reject) => {
+        socket.on('connect', () => {
+          console.log('🔌 Connected to SocketIO server:', socket.id);
+          setConnectionState('connected');
+          resolve();
+        });
+
+        socket.on('connect_error', (error) => {
+          console.error('🔌 SocketIO connection error:', error);
+          setConnectionState('error');
+          reject(error);
+        });
+
+        // Timeout after 10 seconds (increased for more reliable connection)
+        setTimeout(() => {
+          if (!socket.connected) {
+            reject(new Error('Socket connection timeout'));
+          }
+        }, 10000);
+      });
+
+      // Start detection after successful connection
+      console.log('🎯 Emitting start_detection...');
+      socket.emit('start_detection', {});
+
+      console.log('🎯 Setting isDetecting to true...');
+      setIsDetecting(true);
+      isDetectingRef.current = true;
+
+      // Set up socket event handlers
+      socket.on('disconnect', () => {
+        console.log('🔌 Disconnected from SocketIO server');
+        setConnectionState('disconnected');
+
+        // Stop frame processing
+        if (frameProcessingIntervalRef.current) {
+          clearInterval(frameProcessingIntervalRef.current);
+          frameProcessingIntervalRef.current = null;
+        }
+      });
+
+      // Handle face detection results from SocketIO (for welcome screen events)
+      socket.on('face_detection_result', (data) => {
+        // console.log('🔍 Received face detection results:', data);
+        handleDetectionResult(data);
+      });
+
+      console.log('📡 Streaming mode - backend handles everything, no frame processing needed');
+
+
+      socket.on('detection_started', (data) => {
+        console.log('🎯 Detection started:', data);
+      });
+
+      socket.on('detection_stopped', (data) => {
+        console.log('🛑 Detection stopped:', data);
+      });
+
+      socket.on('detection_error', (error) => {
+        console.error('❌ Detection error:', error);
+        setError(`Detection error: ${error.error}`);
+      });
+
+      socket.on('error', (error) => {
+        console.error('🔌 SocketIO error:', error);
+      });
+
+      console.log('🔌 SocketIO setup complete');
+    } catch (error) {
+      console.error('🔌 Failed to setup SocketIO:', error);
+      setError(`Connection setup failed: ${error.message}`);
+    }
+  }, [handleDetectionResult]);
+
+  const handleStartVideo = useCallback(async () => {
+    try {
+      setError(null);
+      setVideoStatus('Connecting...');
+      console.log('🎥 Starting video...');
+
+      // Load saved camera settings
+      const cameraSettings = await apiService.getCameraSettings();
+      console.log('📷 Loaded camera settings:', cameraSettings);
+      console.log('📷 cameraSettings.source value:', cameraSettings.source);
+      console.log('📷 cameraSettings.source type:', typeof cameraSettings.source);
+
+
+      // Apply saved camera settings
+      if (cameraSettings.success || cameraSettings.source) {
+        if (cameraSettings.source === 'rtsp') {
+          // RTSP camera - use HTTP video stream with overlays from backend
+          console.log('📡 RTSP camera selected, using ffmpeg stream with overlays');
+
+          // Set RTSP mode
+          setActualCameraSource('rtsp');
+
+          // Set video source to ffmpeg stream with overlays endpoint
+          setIsVideoStarted(true);
+          setVideoStatus('Connecting to RTSP...');
+
+          // Set up RTSP image stream with overlays after state update
+          setTimeout(() => {
+            if (rtspImageRef.current) {
+              rtspImageRef.current.src = '/api/rtsp/stream-with-overlay';
+              console.log('📡 RTSP stream source set to /api/rtsp/stream-with-overlay');
+            }
+          }, 100);
+
+          // Use existing Socket.IO connection for welcome screen recognition events only
+          await setupSocketIOConnection();
+          return; // Skip getUserMedia for RTSP
+        } else if (cameraSettings.source === 'webcam' || cameraSettings.source === 'device' || cameraSettings.source === 'default') {
+          // Webcam/Device/Default - use HTTP video stream with overlays from backend (just like RTSP)
+          console.log('📹 Webcam/Device/Default selected, using backend stream with overlays');
+          console.log('📹 Setting actualCameraSource to:', cameraSettings.source);
+          if (cameraSettings.device_id) {
+            console.log('📹 Using webcam device:', cameraSettings.device_id);
+          }
+
+          // Set webcam streaming mode
+          setActualCameraSource(cameraSettings.source);
+          setIsVideoStarted(true);
+          setVideoStatus('Connecting to webcam...');
+
+          // Set up webcam stream with overlays after state update
+          setTimeout(() => {
+            if (rtspImageRef.current) {
+              rtspImageRef.current.src = '/api/webcam/stream-with-overlay';
+              console.log('📹 Webcam stream source set to /api/webcam/stream-with-overlay');
+
+              // Set status once stream loads
+              rtspImageRef.current.onload = () => {
+                setVideoStatus('Webcam Active');
+              };
+              rtspImageRef.current.onerror = () => {
+                setVideoStatus('Webcam Error');
+                setError('Failed to connect to webcam stream');
+              };
+            }
+          }, 100);
+
+          // Use Socket.IO only for welcome screen events
+          await setupSocketIOConnection();
+          return; // Skip getUserMedia for webcam streaming
+        }
+        // If source is not rtsp, webcam, device, or default, fall through to legacy getUserMedia
+      }
+
+      // This should not happen with current streaming architecture
+      console.error('🚨 Unexpected fallthrough to legacy getUserMedia path');
+      throw new Error('Unsupported camera configuration');
+
+    } catch (err) {
+      console.error('❌ Error starting video:', err);
+      setError(`Failed to start camera: ${err.message}`);
+      setVideoStatus('Error');
+      setIsVideoStarted(false);
+    }
+  }, [setupSocketIOConnection]);
+
+  const handleStopVideo = useCallback(async () => {
+    // console.log('🛑 handleStopVideo called');
+    // console.trace('🛑 Stop video called from:');
+
+    // Stop detection if active (admin explicit stop)
+    if (isDetectingRef.current) {
+      handleStopDetection(true);
+    }
+
+    // Stop backend streams for both device and RTSP sources
+    console.log('🔍 Debug stop - actualCameraSource:', actualCameraSource);
+    try {
+      if (actualCameraSource === 'rtsp') {
+        console.log('🛑 Stopping RTSP streams...');
+        await apiService.stopRtspStreams();
+        console.log('✅ RTSP streams stopped');
+      } else if (actualCameraSource === 'device' || actualCameraSource === 'webcam' || actualCameraSource === 'default') {
+        console.log('🛑 Stopping device streams...');
+        await apiService.stopWebcamStreams();
+        console.log('✅ Device streams stopped');
+      }
+    } catch (error) {
+      console.error('❌ Error stopping streams:', error);
+    }
+
+    // Close SocketIO connection
+    if (socketRef.current) {
+      console.log('🔌 Closing SocketIO connection...');
+      socketRef.current.disconnect();
+      socketRef.current = null;
+    }
+
+    // Stop frame processing
+    if (frameProcessingIntervalRef.current) {
+      console.log('🖼️ Stopping frame processing...');
+      clearInterval(frameProcessingIntervalRef.current);
+      frameProcessingIntervalRef.current = null;
+    }
+
+    // Clear the stream image source to prevent stale frames
+    if (rtspImageRef.current) {
+      rtspImageRef.current.src = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7'; // 1x1 transparent GIF
+    }
+
+    setIsVideoStarted(false);
+    setIsDetecting(false);
+    setVideoStatus('Stopped');
+    setDetectedPerson(null);
+    setError(null);
+    setConnectionState('disconnected');
+  }, [actualCameraSource]);
+
+
+  const handleStopDetection = (adminStop = false) => {
     setIsDetecting(false);
     isDetectingRef.current = false;
     setDetectedPerson(null);
@@ -599,36 +354,49 @@ export function DetectionPage({ onDetection }) {
 
     // Tell backend to stop detection
     if (socketRef.current) {
-      socketRef.current.emit('stop_detection', {});
+      socketRef.current.emit('stop_detection', { admin_stop: adminStop });
     }
   };
 
 
-  // Cleanup on unmount
+  // Check for persistent detection state on mount
   useEffect(() => {
-    return () => {
-      console.log('🧹 Component cleanup triggered');
-      handleStopVideo();
-    };
-  }, [handleStopVideo]);
-
-  // Cleanup RTSP streams on page unload
-  useEffect(() => {
-    const handleBeforeUnload = async () => {
-      if (isRtspSource) {
-        try {
-          await apiService.stopRtspStreams();
-        } catch (error) {
-          console.error('Error stopping RTSP streams on page unload:', error);
+    const checkAutoStart = async () => {
+      try {
+        const response = await fetch('http://localhost:8000/api/system/detection-status');
+        if (response.ok) {
+          const status = await response.json();
+          if (status.should_auto_start && !isVideoStarted) {
+            console.log('🔄 Auto-starting detection from persistent state');
+            await handleStartVideo();
+          }
         }
+      } catch (error) {
+        console.error('❌ Error checking auto-start status:', error);
       }
     };
 
-    window.addEventListener('beforeunload', handleBeforeUnload);
+    checkAutoStart();
+  }, [handleStartVideo, isVideoStarted]); // Include dependencies
+
+  // Cleanup on unmount
+  useEffect(() => {
     return () => {
-      window.removeEventListener('beforeunload', handleBeforeUnload);
+      console.log('🧹 Component cleanup triggered - preserving detection state');
+      // Only disconnect socket, do NOT send stop_detection to preserve detection for welcome screens
+      if (socketRef.current) {
+        socketRef.current.disconnect();
+        socketRef.current = null;
+      }
+      setIsVideoStarted(false);
+      setIsDetecting(false);
+      setConnectionState('disconnected');
     };
-  }, [isRtspSource]);
+  }, []); // Empty dependency array - only run on mount/unmount
+
+  // Note: Removed automatic stream cleanup on page unload to preserve detection state
+  // Detection should persist across admin page refreshes for welcome screens
+  // Only explicit admin "Stop Video" should stop detection
 
   return (
     <Box style={{ width: '100%', minHeight: '100%' }}>
@@ -688,68 +456,28 @@ export function DetectionPage({ onDetection }) {
                   </Group>
                 ) : (
                   <Box style={{ position: 'relative', width: '100%', height: '100%' }}>
-                    {/* HTML5 video stream for webcam */}
-                    <video
-                      ref={videoRef}
-                      autoPlay
-                      muted
-                      playsInline
+                    {/* MJPEG stream with backend overlays for both device and RTSP sources */}
+                    <img
+                      ref={rtspImageRef}
+                      alt="Camera Stream"
                       style={{
                         width: '100%',
                         height: '100%',
                         objectFit: 'cover',
                         borderRadius: '6px',
-                        display: isRtspSource ? 'none' : 'block'
+                        display: 'block'
+                      }}
+                      onLoad={() => {
+                        console.log('📡 Camera stream loaded successfully');
+                        setVideoStatus('Connected');
+                        setError(null);
+                      }}
+                      onError={(e) => {
+                        console.error('📡 Camera stream error:', e);
+                        setError('Camera stream failed to load. Check camera connection.');
+                        setVideoStatus('Connection Failed');
                       }}
                     />
-
-                    {/* MJPEG image stream for RTSP */}
-                    {isRtspSource && (
-                      <img
-                        ref={rtspImageRef}
-                        alt="RTSP Stream"
-                        style={{
-                          width: '100%',
-                          height: '100%',
-                          objectFit: 'cover',
-                          borderRadius: '6px',
-                          display: 'block'
-                        }}
-                        onLoad={() => {
-                          console.log('📡 RTSP stream loaded successfully');
-                          console.log('📡 RTSP image dimensions:', {
-                            naturalWidth: rtspImageRef.current?.naturalWidth,
-                            naturalHeight: rtspImageRef.current?.naturalHeight,
-                            complete: rtspImageRef.current?.complete
-                          });
-                          setVideoStatus('Connected');
-                          setError(null); // Clear any previous errors
-                        }}
-                        onError={(e) => {
-                          console.error('📡 RTSP stream error:', e);
-                          console.error('📡 RTSP stream src:', rtspImageRef.current?.src);
-                          setError('RTSP stream failed to load. Check the RTSP URL and network connection.');
-                          setVideoStatus('Connection Failed');
-                        }}
-                      />
-                    )}
-
-                    {/* Canvas overlay for detection boxes (only for webcam, RTSP has overlays from backend) */}
-                    {!isRtspSource && (
-                      <canvas
-                        ref={canvasRef}
-                        style={{
-                          width: '100%',
-                          height: '100%',
-                          borderRadius: '6px',
-                          position: 'absolute',
-                          top: 0,
-                          left: 0,
-                          zIndex: 2,
-                          pointerEvents: 'none'
-                        }}
-                      />
-                    )}
 
                     {/* Detection Overlay */}
                     {isDetecting && detectedPerson && (
@@ -770,6 +498,11 @@ export function DetectionPage({ onDetection }) {
                         <Text size="sm" fw={700}>
                           {detectedPerson.name}
                         </Text>
+                        {detectedPerson.title && (
+                          <Text size="xs">
+                            {detectedPerson.title}
+                          </Text>
+                        )}
                         <Text size="xs">
                           Confidence: {detectedPerson.confidence}%
                         </Text>
@@ -854,6 +587,12 @@ export function DetectionPage({ onDetection }) {
                     <Text fw={600}>ID:</Text>
                     <Text>{detectedPerson.id}</Text>
                   </Group>
+                  {detectedPerson.title && (
+                    <Group justify="space-between">
+                      <Text fw={600}>Title:</Text>
+                      <Text>{detectedPerson.title}</Text>
+                    </Group>
+                  )}
                   <Group justify="space-between">
                     <Text fw={600}>Confidence:</Text>
                     <Badge
@@ -889,6 +628,11 @@ export function DetectionPage({ onDetection }) {
                           <Text size="sm" fw={600}>
                             {detection.name}
                           </Text>
+                          {detection.title && (
+                            <Text size="xs" style={{ opacity: 0.8 }}>
+                              {detection.title}
+                            </Text>
+                          )}
                           <Text size="xs">
                             {detection.timestamp}
                           </Text>

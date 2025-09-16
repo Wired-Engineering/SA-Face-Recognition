@@ -41,6 +41,12 @@ async def lifespan(app: FastAPI):
     os.makedirs("images", exist_ok=True)
     os.makedirs("system", exist_ok=True)
 
+    # Load persistent detection state
+    if get_independent_detection_active():
+        print(f"🔄 Restored detection state: active (persistent from config)")
+    else:
+        print(f"🔄 Detection state: inactive")
+
     yield
 
     # Shutdown - Cleanup SocketIO connections
@@ -78,7 +84,7 @@ db = MySqlite3Manager()
 # Load recognition settings from config
 recognition_config = config_manager.get_recognition_config()
 face_recognizer = FaceRecognizer(
-    thresold=recognition_config.get('threshold', 0.5),
+    thresold=recognition_config.get('threshold', 0.45),
     draw=recognition_config.get('draw_boxes', True)
 )
 
@@ -88,6 +94,23 @@ welcome_screens: Dict[str, bool] = {}  # Track welcome screen connections
 latest_recognition: Dict = {}  # Store latest recognition result
 rtsp_streams: Dict[str, bool] = {}  # Track active RTSP streams
 ffmpeg_streams: Dict[str, bool] = {}  # Track active ffmpeg streams with overlays
+webcam_streams: Dict[str, bool] = {}  # Track active webcam streams
+
+# Independent detection system - load state from config on startup
+detection_session_id = None  # Track the current detection session
+
+def get_independent_detection_active():
+    """Get detection state from persistent config"""
+    return config_manager.is_detection_active()
+
+def set_independent_detection_active(active: bool):
+    """Set detection state and persist to config"""
+    return config_manager.set_detection_active(active)
+
+# Recognition timing globals (inspired by original PyQt5 implementation)
+last_detected_name = ""
+last_recognition_time = 0.0
+recognition_cooldown = 3.0  # Seconds - prevents rapid flickering between different people
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -99,6 +122,8 @@ async def connect(sid, environ):
 
 @sio.event
 async def disconnect(sid):
+    global detection_session_id
+
     print(f"🔌 Client disconnected: {sid}")
     # Cleanup detection state for this client
     if sid in detection_active:
@@ -106,25 +131,52 @@ async def disconnect(sid):
     # Cleanup welcome screen state
     if sid in welcome_screens:
         del welcome_screens[sid]
-    # Stop any RTSP and FFmpeg streams when clients disconnect
-    if rtsp_streams or ffmpeg_streams:
-        rtsp_count = len(rtsp_streams)
-        ffmpeg_count = len(ffmpeg_streams)
-        print(f"🛑 Stopping {rtsp_count} RTSP streams and {ffmpeg_count} FFmpeg streams due to client disconnect")
-        rtsp_streams.clear()
-        ffmpeg_streams.clear()
+
+    # Detection state is controlled by persistent config and explicit admin actions only
+    # Client disconnections should NOT automatically stop detection
+    print(f"🔄 Client disconnected - detection state remains unchanged (controlled by admin only)")
 
 @sio.event
 async def start_detection(sid, data):
     """Start face detection for a client"""
+    global detection_session_id
+
     print(f"🔍 Starting face detection for client {sid}")
     detection_active[sid] = True
 
-    # Check if RTSP is configured - note: RTSP detection is now handled by ffmpeg overlay stream
-    camera_config = config_manager.get_camera_config()
-    if camera_config.get('source') == 'rtsp' and camera_config.get('rtsp_url'):
-        print(f"📡 RTSP detected - detection will be handled by ffmpeg overlay stream, not SocketIO")
-        # Don't start the old RTSP processing since overlays are handled by /api/rtsp/stream-with-overlay
+    # Start independent detection if not already active
+    if not get_independent_detection_active():
+        set_independent_detection_active(True)
+        detection_session_id = f"session_{int(time.time())}"
+        print(f"🎯 Starting independent detection session: {detection_session_id}")
+
+        # Reset recognition cooldown when starting new detection session
+        global last_detected_name, last_recognition_time
+        last_detected_name = ""
+        last_recognition_time = 0.0
+        print(f"🔄 Reset recognition cooldown for new detection session")
+
+        # Start background stream processing for recognition if camera is configured
+        camera_config = config_manager.get_camera_config()
+        print(f"🔍 Camera config: source={camera_config.get('source')}, rtsp_url={camera_config.get('rtsp_url')}")
+
+        if camera_config.get('source') == 'rtsp' and camera_config.get('rtsp_url'):
+            # Start background RTSP processing for welcome screens
+            if not any('welcome_screen_bg' in stream_id for stream_id in ffmpeg_streams.keys()):
+                print(f"🎬 Starting background RTSP stream for recognition")
+                asyncio.create_task(start_background_rtsp_for_welcome_screens())
+            else:
+                print(f"🎬 Background RTSP stream already running")
+        elif camera_config.get('source') in ['webcam', 'device', 'default']:
+            # Start background webcam processing for welcome screens
+            if not any('welcome_screen_bg' in stream_id for stream_id in webcam_streams.keys()):
+                print(f"📹 Starting background webcam stream for recognition")
+                print(f"📹 Current webcam streams: {list(webcam_streams.keys())}")
+                asyncio.create_task(start_background_webcam_for_welcome_screens())
+            else:
+                print(f"📹 Background webcam stream already running: {list(webcam_streams.keys())}")
+        else:
+            print(f"❌ Unsupported camera source for background recognition: {camera_config.get('source')}")
 
     await sio.emit('detection_started', {'status': 'started'}, to=sid)
 
@@ -139,8 +191,40 @@ async def start_video_stream(sid, data):
 @sio.event
 async def stop_detection(sid, data):
     """Stop face detection for a client"""
-    print(f"🛑 Stopping face detection for client {sid}")
-    detection_active[sid] = False
+    global detection_session_id
+
+    # Check if this is an explicit admin stop request
+    is_admin_stop = data and data.get('admin_stop', False)
+
+    print(f"🛑 Stopping face detection for client {sid} (admin_stop: {is_admin_stop})")
+    if sid in detection_active:
+        del detection_active[sid]
+
+    # Only stop independent detection if explicitly requested by admin
+    # OR if no welcome screens AND no admin clients are connected AND not a page refresh
+    if is_admin_stop:
+        set_independent_detection_active(False)
+        detection_session_id = None
+        print(f"🛑 Admin explicitly stopped detection - setting detection.active = false")
+
+        # Stop background streams when admin explicitly stops detection
+        background_streams_to_stop = [sid for sid in list(ffmpeg_streams.keys()) if 'welcome_screen_bg' in sid]
+        for stream_id in background_streams_to_stop:
+            del ffmpeg_streams[stream_id]
+            print(f"🛑 Stopped background stream: {stream_id}")
+
+        background_webcam_streams_to_stop = [sid for sid in list(webcam_streams.keys()) if 'welcome_screen_bg' in sid]
+        for stream_id in background_webcam_streams_to_stop:
+            del webcam_streams[stream_id]
+            print(f"🛑 Stopped background webcam stream: {stream_id}")
+
+    elif len(welcome_screens) == 0 and len(detection_active) == 0:
+        # Only auto-stop if no welcome screens are waiting for recognition events
+        print(f"🔄 No connected clients, but keeping detection active for potential welcome screens")
+        # Detection remains active in config - welcome screens can still connect and receive events
+    else:
+        print(f"🔄 Keeping independent detection active - {len(welcome_screens)} welcome screens, {len(detection_active)} admin clients")
+
     await sio.emit('detection_stopped', {'status': 'stopped'}, to=sid)
 
 @sio.event
@@ -148,6 +232,11 @@ async def register_welcome_screen(sid, data):
     """Register a welcome screen popup"""
     print(f"📺 Welcome screen registered: {sid}")
     welcome_screens[sid] = True
+
+    # Welcome screens should NOT auto-start detection
+    # Detection should only be started explicitly by admin users
+    print(f"📋 Welcome screen registered - detection must be started manually by admin")
+
     await sio.emit('welcome_screen_registered', {'status': 'registered'}, to=sid)
 
 @sio.event
@@ -156,6 +245,11 @@ async def unregister_welcome_screen(sid, data):
     print(f"📺 Welcome screen unregistered: {sid}")
     if sid in welcome_screens:
         del welcome_screens[sid]
+
+    # Welcome screen disconnection should NOT auto-stop detection
+    # Detection should only be stopped explicitly by admin users
+    print(f"📋 Welcome screen disconnected - detection state unchanged (admin controlled)")
+
     await sio.emit('welcome_screen_unregistered', {'status': 'unregistered'}, to=sid)
 
 @sio.event
@@ -197,13 +291,20 @@ async def request_background_image(sid, data):
 
 @sio.event
 async def process_frame(sid, data):
-    """Process a single video frame for face detection"""
+    """
+    LEGACY: Process video frame via base64 - kept for backwards compatibility
+    Modern approach uses streaming endpoints for both webcam and RTSP
+    """
+    # This handler is now deprecated in favor of streaming endpoints
+    # which eliminate base64 overhead and provide better performance
+    print(f"⚠️ Legacy frame processing called by {sid} - consider using streaming endpoints")
+
     try:
         # Check if detection is active for this client
         if not detection_active.get(sid, False):
             return
 
-        # Decode base64 image
+        # Decode base64 image (SLOW - adds 20-30ms latency)
         image_data = data['frame']
         if image_data.startswith('data:image'):
             image_data = image_data.split(',')[1]
@@ -239,9 +340,11 @@ async def process_frame(sid, data):
                         if score > face_recognizer.thresold and score > highest_score:
                             highest_score = score
                             person_name = db.get_person_name(person_id)
+                            person_title = db.get_person_title(person_id)
                             best_match = {
                                 'person_id': person_id,
                                 'person_name': person_name,
+                                'person_title': person_title,
                                 'confidence': float(score)
                             }
 
@@ -260,8 +363,9 @@ async def process_frame(sid, data):
                                 'person_id': best_match['person_id'],
                                 'person_name': best_match['person_name'],
                                 'name': best_match['person_name'],
+                                'userTitle': best_match['person_title'],
                                 'confidence': best_match['confidence'],
-                                'photo': None  # Could add photo path here if needed
+                                'photo': None
                             },
                             'timestamp': time.time()
                         }
@@ -337,8 +441,10 @@ async def process_rtsp_with_ffmpeg_overlay(rtsp_url, output_queue, stop_event):
     print(f"🎬 Starting ffmpeg RTSP processing: {rtsp_url}")
 
     try:
-        cap = cv2.VideoCapture(rtsp_url)
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        # Initialize capture in thread to avoid blocking
+        loop = asyncio.get_event_loop()
+        cap = await loop.run_in_executor(None, cv2.VideoCapture, rtsp_url)
+        await loop.run_in_executor(None, cap.set, cv2.CAP_PROP_BUFFERSIZE, 1)
 
         if not cap.isOpened():
             print(f"❌ Failed to open RTSP stream for ffmpeg: {rtsp_url}")
@@ -354,8 +460,9 @@ async def process_rtsp_with_ffmpeg_overlay(rtsp_url, output_queue, stop_event):
         frame_count = 0
         detection_results_cache = []
 
-        while not stop_event.is_set():
-            ret, frame = cap.read()
+        while not stop_event.is_set() and (get_independent_detection_active() or len(welcome_screens) > 0):
+            # Read frame in thread to avoid blocking
+            ret, frame = await loop.run_in_executor(None, cap.read)
             if not ret:
                 print("⚠️ Failed to read frame from RTSP stream")
                 await asyncio.sleep(0.01)  # Reduced delay
@@ -363,20 +470,35 @@ async def process_rtsp_with_ffmpeg_overlay(rtsp_url, output_queue, stop_event):
 
             frame_count += 1
 
-            # Run face detection every frame for lower latency
-            if frame_count % 1 == 0:  # Detect every frame
+            # Run face detection every frame for higher frame rate
+            # RTSP streams need more responsive detection for better user experience
+            if True:  # Process every frame
                 try:
-                    frame_features, faces = face_recognizer.recognize_face(frame)
+                    # Resize frame to consistent size like original PyQt5 implementation (800x600)
+                    # This ensures proper bounding box positioning and consistent performance
+                    display_frame = cv2.resize(frame, (800, 600))
+                    frame_features, faces = face_recognizer.recognize_face(display_frame)
 
                     # Process detection results
                     detection_results_cache = []
                     if faces is not None and len(faces) > 0:
+                        # Calculate scaling factors from display frame (800x600) back to original frame
+                        original_height, original_width = frame.shape[:2]
+                        scale_x = original_width / 800.0
+                        scale_y = original_height / 600.0
+
                         for i, face in enumerate(faces):
                             x1, y1, w, h = face[:4].astype(int)
                             x2, y2 = x1 + w, y1 + h
 
+                            # Scale bounding box back to original frame size
+                            x1_scaled = int(x1 * scale_x)
+                            y1_scaled = int(y1 * scale_y)
+                            x2_scaled = int(x2 * scale_x)
+                            y2_scaled = int(y2 * scale_y)
+
                             result = {
-                                'bbox': [int(x1), int(y1), int(x2), int(y2)],
+                                'bbox': [x1_scaled, y1_scaled, x2_scaled, y2_scaled],
                                 'confidence': float(face[14]) if len(face) > 14 else 0.0,
                                 'recognized': False,
                                 'person_name': 'Unknown',
@@ -395,9 +517,11 @@ async def process_rtsp_with_ffmpeg_overlay(rtsp_url, output_queue, stop_event):
                                     if score > face_recognizer.thresold and score > highest_score:
                                         highest_score = score
                                         person_name = db.get_person_name(person_id)
+                                        person_title = db.get_person_title(person_id)
                                         best_match = {
                                             'person_id': person_id,
                                             'person_name': person_name,
+                                            'person_title': person_title,
                                             'confidence': float(score)
                                         }
 
@@ -409,29 +533,46 @@ async def process_rtsp_with_ffmpeg_overlay(rtsp_url, output_queue, stop_event):
                                         'recognized': True
                                     })
 
-                                    # Store latest recognition and broadcast to welcome screens
-                                    recognition_data = {
-                                        'type': 'recognition',
-                                        'user': {
-                                            'person_id': best_match['person_id'],
-                                            'person_name': best_match['person_name'],
-                                            'name': best_match['person_name'],
-                                            'confidence': best_match['confidence'],
-                                            'photo': None
-                                        },
-                                        'timestamp': time.time()
-                                    }
+                                    # Recognition cooldown timer logic (inspired by original PyQt5)
+                                    global last_detected_name, last_recognition_time
+                                    current_time = time.time()
+                                    person_name = best_match['person_name']
 
-                                    latest_recognition.update(recognition_data)
+                                    # Only broadcast if enough time has passed since last recognition
+                                    # or if it's a different person (prevents rapid flickering)
+                                    time_since_last = current_time - last_recognition_time
+                                    if (person_name != last_detected_name and time_since_last > recognition_cooldown) or last_detected_name == "":
+                                        # Store latest recognition and broadcast to welcome screens
+                                        recognition_data = {
+                                            'type': 'recognition',
+                                            'user': {
+                                                'person_id': best_match['person_id'],
+                                                'person_name': person_name,
+                                                'name': person_name,
+                                                'userTitle': best_match['person_title'],
+                                                'confidence': best_match['confidence'],
+                                                'photo': None
+                                            },
+                                            'timestamp': current_time
+                                        }
 
-                                    # Broadcast to welcome screens via SocketIO
-                                    for welcome_screen_sid in welcome_screens.keys():
-                                        asyncio.create_task(sio.emit('recognition_result', recognition_data, to=welcome_screen_sid))
+                                        latest_recognition.update(recognition_data)
+                                        last_detected_name = person_name
+                                        last_recognition_time = current_time
+
+                                        # Broadcast to welcome screens via SocketIO
+                                        print(f"🎯 Broadcasting recognition to {len(welcome_screens)} welcome screens: {person_name}")
+                                        # Create tasks for broadcasting to avoid blocking the detection loop
+                                        for welcome_screen_sid in list(welcome_screens.keys()):
+                                            print(f"📺 Sending recognition_result to welcome screen {welcome_screen_sid}")
+                                            asyncio.create_task(
+                                                sio.emit('recognition_result', recognition_data, to=welcome_screen_sid)
+                                            )
 
                             detection_results_cache.append(result)
 
-                    # Send detection results to frontend for UI updates (sidebar panels)
-                    if detection_results_cache:
+                    # Send detection results to frontend for UI updates (sidebar panels) only if independent detection is active
+                    if detection_results_cache and get_independent_detection_active():
                         for sid in detection_active.keys():
                             asyncio.create_task(sio.emit('face_detection_result', {
                                 "faces": detection_results_cache,
@@ -449,6 +590,10 @@ async def process_rtsp_with_ffmpeg_overlay(rtsp_url, output_queue, stop_event):
             # Encode frame as JPEG
             _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
 
+            # Frame rate limiting for RTSP performance balance
+            # Reduced sleep for higher frame rate - targeting 15-20 FPS
+            await asyncio.sleep(0.02)
+
             # Put frame in output queue
             if not output_queue.full():
                 try:
@@ -456,8 +601,7 @@ async def process_rtsp_with_ffmpeg_overlay(rtsp_url, output_queue, stop_event):
                 except queue.Full:
                     pass  # Skip frame if queue is full
 
-            # Minimal delay for better responsiveness
-            await asyncio.sleep(0.01)  # 10ms instead of fps-based delay
+            # NO DELAY for successful frames - only sleep on failures above
 
         cap.release()
         print("🛑 FFmpeg RTSP processing stopped")
@@ -509,6 +653,7 @@ class LoginRequest(BaseModel):
 class personRegistration(BaseModel):
     person_id: str
     person_name: str
+    person_title: str
     image_data: str
 
 class AdminPasswordChange(BaseModel):
@@ -519,8 +664,8 @@ class AdminPasswordChange(BaseModel):
     confirm_password: str
 
 class CameraSettings(BaseModel):
-    source: Optional[str] = "default"
-    device_id: Optional[str] = None
+    source: Optional[str] = "default"  # default, webcam, device, and rtsp supported
+    device_id: Optional[str] = None  # For webcam/device: device index (0, 1, 2...) or device ID string
     rtsp_url: Optional[str] = None
 
 class DisplaySettings(BaseModel):
@@ -538,6 +683,7 @@ class FaceDetectionRequest(BaseModel):
 # SocketIO Models
 class FrameData(BaseModel):
     frame: str  # base64 encoded image
+
 
 # Authentication endpoints
 @app.post("/api/auth/login")
@@ -642,7 +788,7 @@ async def register_person(request: personRegistration):
             }
 
         # Save person to database
-        db_result = db.insert_into_person(request.person_id, request.person_name)
+        db_result = db.insert_into_person(request.person_id, request.person_name, request.person_title)
 
         if 'already exist' in db_result:
             return {
@@ -662,7 +808,8 @@ async def register_person(request: personRegistration):
             'success': True,
             'message': 'person registered successfully',
             'person_id': request.person_id,
-            'person_name': request.person_name
+            'person_name': request.person_name,
+            'person_title': request.person_title
         }
 
     except Exception as e:
@@ -733,9 +880,11 @@ async def detect_faces(request: FaceDetectionRequest):
                         if score > face_recognizer.thresold and score > highest_score:
                             highest_score = score
                             person_name = db.get_person_name(person_id)
+                            person_title = db.get_person_title(person_id)
                             best_match = {
                                 'person_id': person_id,
                                 'person_name': person_name,
+                                'person_title': person_title,
                                 'confidence': float(score)
                             }
 
@@ -743,6 +892,7 @@ async def detect_faces(request: FaceDetectionRequest):
                         result.update({
                             'person_id': best_match['person_id'],
                             'person_name': best_match['person_name'],
+                            'person_title': best_match['person_title'],
                             'match_confidence': best_match['confidence'],
                             'recognized': True
                         })
@@ -803,14 +953,14 @@ async def get_latest_recognition():
 @app.get("/api/camera/settings")
 async def get_camera_settings():
     """Get current camera settings"""
+    # Config updated to use webcam source
     try:
         camera_config = config_manager.get_camera_config()
         return {
             'success': True,
-            'source': camera_config.get('source', 'default'),
+            'source': camera_config.get('source', 'webcam'),
             'device_id': camera_config.get('device_id'),
-            'rtsp_url': camera_config.get('rtsp_url'),
-            'use_webcam': camera_config.get('source') != 'rtsp'
+            'rtsp_url': camera_config.get('rtsp_url')
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -845,13 +995,68 @@ async def update_camera_settings(request: CameraSettings):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
+@app.get("/api/camera/devices")
+async def get_camera_devices():
+    """List available camera devices with enhanced macOS support"""
+    try:
+        devices = []
+        print("🔍 Enumerating camera devices...")
+
+        # Try to detect camera devices (0-9)
+        for i in range(10):
+            try:
+                cap = cv2.VideoCapture(i, cv2.CAP_AVFOUNDATION)
+                if cap.isOpened():
+                    # Try to read a frame to verify it's working
+                    ret, _ = cap.read()
+                    if ret:
+                        # Get device name if possible
+                        device_name = f"Camera {i}"
+
+                        # Try to get more device info for macOS
+                        try:
+                            # Get backend name
+                            backend_name = cap.getBackendName()
+                            device_name = f"Camera {i} ({backend_name})"
+                        except:
+                            pass
+
+                        devices.append({
+                            'device_id': str(i),
+                            'name': device_name,
+                            'index': i,
+                            'compatible': True
+                        })
+                        print(f"✅ Found camera device: {i} - {device_name}")
+                    cap.release()
+            except Exception as e:
+                print(f"❌ Error checking camera {i}: {e}")
+
+        # If we found devices, also add a note about macOS device IDs
+        if devices:
+            devices.append({
+                'device_id': 'help',
+                'name': 'Note: macOS long device IDs will map to available camera indices',
+                'index': -1,
+                'compatible': False
+            })
+
+        return {
+            'success': True,
+            'devices': devices
+        }
+    except Exception as e:
+        print(f"❌ Error enumerating devices: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/api/camera/test")
 async def test_camera(request: CameraSettings):
     """Test camera connection"""
     try:
-        print(f"🔍 Testing camera - source: {request.source}, device_id: {request.device_id}, rtsp_url: {request.rtsp_url}")
+        print(f"🔍 Testing camera - source: {request.source}, rtsp_url: {request.rtsp_url}")
 
-        # Determine the video source based on settings
+        # Support webcam, rtsp, and legacy device sources
         if request.source == 'rtsp':
             if not request.rtsp_url:
                 return {
@@ -860,28 +1065,36 @@ async def test_camera(request: CameraSettings):
                 }
             source = request.rtsp_url
             print(f"📡 Testing RTSP camera: {request.rtsp_url}")
-        elif request.source == 'default':
-            source = 0
-            print(f"📷 Testing default camera (index 0)")
-        elif request.source == 'device' and request.device_id:
-            print(f"📷 Testing device with ID: {request.device_id}")
+        elif request.source in ['webcam', 'device', 'default']:
+            # Use device_id if specified, otherwise default to 0
+            if request.device_id:
+                try:
+                    source = int(request.device_id)  # Try to convert to int for device index
+                    print(f"📹 Testing webcam device index: {source}")
+                except ValueError:
+                    # Use the working device mapping from before
+                    if request.device_id.startswith('d16a9c26'):
+                        source = 0  # Logitech BRIO → OpenCV index 0
+                        print(f"📹 Detected Logitech BRIO → using camera index 0")
+                    elif request.device_id.startswith('883bf618'):
+                        source = 1  # MacBook Air → OpenCV index 1
+                        print(f"📹 Detected MacBook Air Camera → using camera index 1")
+                    else:
+                        # For other devices, use a simple hash to map to different indices
+                        import hashlib
+                        device_hash = int(hashlib.md5(request.device_id.encode()).hexdigest()[:8], 16)
+                        source = device_hash % 3  # Map to 0, 1, or 2
+                        print(f"📹 Unknown device → hash mapping to camera index {source}")
 
-            if request.device_id.startswith('d16a9c26'):
-                source = 0  # Logitech BRIO → OpenCV index 0
-                print(f"📷 Detected Logitech BRIO → using camera index 0")
-            elif request.device_id.startswith('883bf618'):
-                source = 1  # MacBook Air → OpenCV index 1
-                print(f"📷 Detected MacBook Air Camera → using camera index 1")
+                    print(f"📹 Device {request.device_id[:12]}... → camera index: {source}")
             else:
-                # For other devices, use a simple hash to map to different indices
-                import hashlib
-                device_hash = int(hashlib.md5(request.device_id.encode()).hexdigest()[:8], 16)
-                source = device_hash % 3  # Map to 0, 1, or 2
-                print(f"📷 Unknown device → hash mapping to camera index {source}")
-
-            print(f"📷 Device {request.device_id[:12]}... → camera index: {source}")
+                source = 0  # Default webcam
+                print(f"📹 Testing default webcam (index 0)")
         else:
-            source = 0
+            return {
+                'success': False,
+                'message': f'Unsupported camera source: {request.source}. Only webcam, device, default, and rtsp are supported.'
+            }
 
         # Test the camera
         cap = cv2.VideoCapture(source)
@@ -1102,6 +1315,69 @@ async def health_check():
     """Health check endpoint"""
     return {"status": "healthy", "timestamp": get_current_datetime_other_format()}
 
+@app.get("/api/system/detection-status")
+async def get_detection_status():
+    """Get current detection status"""
+    return {
+        "detection_active": get_independent_detection_active(),
+        "welcome_screens_connected": len(welcome_screens),
+        "admin_clients_connected": len(detection_active),
+        "detection_session_id": detection_session_id,
+        "should_auto_start": get_independent_detection_active(),  # Frontend should auto-start if backend is active
+        "timestamp": get_current_datetime_other_format()
+    }
+
+@app.post("/api/test/trigger-recognition")
+async def trigger_test_recognition():
+    """Test endpoint to manually trigger a recognition event"""
+    print(f"🧪 Manual recognition test triggered")
+    print(f"📺 Connected welcome screens: {list(welcome_screens.keys())}")
+
+    if not welcome_screens:
+        return {
+            "success": False,
+            "message": "No welcome screens connected"
+        }
+
+    # Create test recognition data
+    test_recognition_data = {
+        'type': 'recognition',
+        'user': {
+            'person_id': 'TEST_ID',
+            'person_name': 'Test User',
+            'name': 'Test User',
+            'userTitle': 'Test Title',
+            'confidence': 0.95,
+            'photo': None
+        },
+        'timestamp': time.time()
+    }
+
+    # Broadcast to all welcome screens using tasks to avoid blocking
+    tasks = []
+    for welcome_screen_sid in list(welcome_screens.keys()):
+        print(f"📺 Sending TEST recognition_result to welcome screen {welcome_screen_sid}")
+        task = asyncio.create_task(
+            sio.emit('recognition_result', test_recognition_data, to=welcome_screen_sid)
+        )
+        tasks.append(task)
+
+    # Wait for all tasks to complete with timeout
+    try:
+        await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=5.0)
+        print(f"✅ Successfully broadcasted to all welcome screens")
+    except asyncio.TimeoutError:
+        print(f"⚠️ Broadcast timed out after 5 seconds")
+    except Exception as e:
+        print(f"❌ Error during broadcast: {e}")
+
+    return {
+        "success": True,
+        "message": f"Test recognition sent to {len(welcome_screens)} welcome screens",
+        "welcome_screens": list(welcome_screens.keys()),
+        "test_data": test_recognition_data
+    }
+
 @app.get("/api/rtsp/stream-with-overlay")
 async def rtsp_stream_with_overlay(request: Request):
     """Stream RTSP video feed with face detection overlays as HTTP MJPEG stream"""
@@ -1120,7 +1396,7 @@ async def rtsp_stream_with_overlay(request: Request):
 
     # Create a queue for frame data
     frame_queue = queue.Queue(maxsize=10)
-    stop_event = threading.Event()
+    stop_event = asyncio.Event()
 
     # Start the background processing thread
     asyncio.create_task(
@@ -1129,10 +1405,10 @@ async def rtsp_stream_with_overlay(request: Request):
 
     def generate_frames():
         try:
-            while ffmpeg_streams.get(stream_id, False):
+            while ffmpeg_streams.get(stream_id, False) and (get_independent_detection_active() or len(welcome_screens) > 0):
                 try:
-                    # Get frame from queue with shorter timeout for responsiveness
-                    frame_data = frame_queue.get(timeout=0.1)
+                    # Get frame from queue with minimal timeout for responsiveness
+                    frame_data = frame_queue.get(timeout=0.01)
 
                     # Yield frame in multipart format
                     yield (b'--frame\r\n'
@@ -1156,6 +1432,308 @@ async def rtsp_stream_with_overlay(request: Request):
         generate_frames(),
         media_type="multipart/x-mixed-replace; boundary=frame"
     )
+
+@app.get("/api/webcam/stream-with-overlay")
+async def webcam_stream_with_overlay(request: Request):
+    """Stream webcam video with face detection overlays - no base64 needed"""
+
+    # Create unique stream ID
+    stream_id = f"webcam_{id(request)}"
+
+    # Check if webcam, device, or default is configured
+    camera_config = config_manager.get_camera_config()
+    source = camera_config.get('source')
+    if source not in ['webcam', 'device', 'default']:
+        raise HTTPException(status_code=400, detail="Webcam, device, or default not configured as source")
+
+    # Create queue for frames
+    frame_queue = queue.Queue(maxsize=10)
+
+    # Mark stream as active
+    webcam_streams[stream_id] = True
+    print(f"📹 Starting webcam stream with overlay {stream_id}")
+
+    # Start the background processing thread
+    asyncio.create_task(
+        process_webcam_with_overlay(frame_queue, stream_id)
+    )
+
+    def generate_frames():
+        try:
+            while webcam_streams.get(stream_id, False) and (get_independent_detection_active() or len(welcome_screens) > 0):
+                try:
+                    # Get frame from queue with minimal timeout
+                    frame_data = frame_queue.get(timeout=0.01)
+
+                    # Yield frame in multipart format
+                    yield (b'--frame\r\n'
+                           b'Content-Type: image/jpeg\r\n\r\n' + frame_data + b'\r\n')
+
+                except queue.Empty:
+                    continue
+                except Exception as e:
+                    print(f"❌ Error in webcam frame generation: {e}")
+                    break
+
+        finally:
+            # Cleanup
+            if stream_id in webcam_streams:
+                del webcam_streams[stream_id]
+            print(f"🛑 Webcam stream {stream_id} closed")
+
+    return StreamingResponse(
+        generate_frames(),
+        media_type="multipart/x-mixed-replace; boundary=frame"
+    )
+
+async def process_webcam_with_overlay(output_queue, stream_id):
+    """Process webcam stream with face detection overlays"""
+    print(f"🎥 Starting webcam processing with overlays")
+
+    try:
+        # Get device_id from config
+        camera_config = config_manager.get_camera_config()
+        device_id = camera_config.get('device_id')
+
+        # Use device_id if specified, otherwise default to 0
+        if device_id:
+            try:
+                camera_index = int(device_id)  # Try to convert to int for device index
+                print(f"📹 Using webcam device index: {camera_index}")
+            except ValueError:
+                # Use the working device mapping from before
+                if device_id.startswith('d16a9c26'):
+                    camera_index = 0  # Logitech BRIO → OpenCV index 0
+                    print(f"📹 Detected Logitech BRIO → using camera index 0")
+                elif device_id.startswith('883bf618'):
+                    camera_index = 1  # MacBook Air → OpenCV index 1
+                    print(f"📹 Detected MacBook Air Camera → using camera index 1")
+                else:
+                    # For other devices, use a simple hash to map to different indices
+                    import hashlib
+                    device_hash = int(hashlib.md5(device_id.encode()).hexdigest()[:8], 16)
+                    camera_index = device_hash % 3  # Map to 0, 1, or 2
+                    print(f"📹 Unknown device → hash mapping to camera index {camera_index}")
+
+                print(f"📹 Device {device_id[:12]}... → camera index: {camera_index}")
+        else:
+            camera_index = 0  # Default webcam
+            print(f"📹 Using default webcam (index 0)")
+
+        # Initialize capture in thread to avoid blocking
+        # Use AVFoundation backend for better macOS compatibility (like original PyQt5)
+        loop = asyncio.get_event_loop()
+        cap = await loop.run_in_executor(None, cv2.VideoCapture, camera_index, cv2.CAP_AVFOUNDATION)
+        await loop.run_in_executor(None, cap.set, cv2.CAP_PROP_BUFFERSIZE, 1)
+        await loop.run_in_executor(None, cap.set, cv2.CAP_PROP_FRAME_WIDTH, 640)
+        await loop.run_in_executor(None, cap.set, cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        await loop.run_in_executor(None, cap.set, cv2.CAP_PROP_FPS, 30)
+
+        if not cap.isOpened():
+            print(f"❌ Failed to open webcam")
+            return
+
+        # Get video properties
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30
+
+        print(f"📺 Webcam properties: {width}x{height} @ {fps}fps")
+
+        detection_results_cache = []
+        frame_count = 0
+
+        while webcam_streams.get(stream_id, False) and (get_independent_detection_active() or len(welcome_screens) > 0):
+            # Read frame in thread to avoid blocking
+            ret, frame = await loop.run_in_executor(None, cap.read)
+            if not ret:
+                # Only sleep on failure
+                await asyncio.sleep(0.01)
+                continue
+
+            frame_count += 1
+
+            try:
+                # Resize frame to consistent size like original PyQt5 implementation (800x600)
+                # This ensures proper bounding box positioning and consistent performance
+                display_frame = cv2.resize(frame, (800, 600))
+
+                # Run face detection every frame for webcam (maximum responsiveness)
+                # Webcam is typically local and lower resolution, so can handle full FPS detection
+                frame_features, faces = face_recognizer.recognize_face(display_frame)
+
+                # Process detection results
+                detection_results_cache = []
+                if faces is not None and len(faces) > 0:
+                   # print(f"🔍 BACKGROUND WEBCAM: Detected {len(faces)} faces in frame {frame_count}")
+                    # Calculate scaling factors from display frame (800x600) back to original frame
+                    original_height, original_width = frame.shape[:2]
+                    scale_x = original_width / 800.0
+                    scale_y = original_height / 600.0
+
+                    for i, face in enumerate(faces):
+                        x1, y1, w, h = face[:4].astype(int)
+                        x2, y2 = x1 + w, y1 + h
+
+                        # Scale bounding box back to original frame size
+                        x1_scaled = int(x1 * scale_x)
+                        y1_scaled = int(y1 * scale_y)
+                        x2_scaled = int(x2 * scale_x)
+                        y2_scaled = int(y2 * scale_y)
+
+                        result = {
+                            'bbox': [x1_scaled, y1_scaled, x2_scaled, y2_scaled],
+                            'confidence': float(face[14]) if len(face) > 14 else 0.0,
+                            'recognized': False,
+                            'person_name': 'Unknown',
+                            'match_confidence': 0.0
+                        }
+
+                        # Check for face recognition match
+                        if i < len(frame_features) and face_recognizer.dictionary:
+                            feature = frame_features[i]
+                            best_match = None
+                            highest_score = 0
+
+                            for person_id, ref_feature in face_recognizer.dictionary.items():
+                                score = face_recognizer.face_recognizer.match(feature, ref_feature)
+
+                                if score > face_recognizer.thresold and score > highest_score:
+                                    highest_score = score
+                                    person_name = db.get_person_name(person_id)
+                                    person_title = db.get_person_title(person_id)
+                                    best_match = {
+                                        'person_id': person_id,
+                                        'person_name': person_name,
+                                        'person_title': person_title,
+                                        'confidence': float(score)
+                                    }
+
+                            if best_match:
+                                result.update({
+                                    'person_id': best_match['person_id'],
+                                    'person_name': best_match['person_name'],
+                                    'match_confidence': best_match['confidence'],
+                                    'recognized': True
+                                })
+
+                                # Recognition cooldown timer logic (inspired by original PyQt5)
+                                global last_detected_name, last_recognition_time
+                                current_time = time.time()
+                                person_name = best_match['person_name']
+
+                                # Only broadcast if enough time has passed since last recognition
+                                # or if it's a different person (prevents rapid flickering)
+                                time_since_last = current_time - last_recognition_time
+                                if (person_name != last_detected_name and time_since_last > recognition_cooldown) or last_detected_name == "":
+                                    # Store latest recognition and broadcast to welcome screens
+                                    recognition_data = {
+                                        'type': 'recognition',
+                                        'user': {
+                                            'person_id': best_match['person_id'],
+                                            'person_name': person_name,
+                                            'name': person_name,
+                                            'userTitle': best_match['person_title'],
+                                            'confidence': best_match['confidence'],
+                                            'photo': None
+                                        },
+                                        'timestamp': current_time
+                                    }
+
+                                    latest_recognition.update(recognition_data)
+                                    last_detected_name = person_name
+                                    last_recognition_time = current_time
+
+                                    # Broadcast to welcome screens
+                                    print(f"🎯 BACKGROUND WEBCAM: Broadcasting recognition to {len(welcome_screens)} welcome screens: {person_name}")
+                                    print(f"🎯 BACKGROUND WEBCAM: Recognition data: {recognition_data}")
+                                    # Create tasks for broadcasting to avoid blocking the detection loop
+                                    for welcome_screen_sid in list(welcome_screens.keys()):
+                                        print(f"📺 BACKGROUND WEBCAM: Sending recognition_result to welcome screen {welcome_screen_sid}")
+                                        asyncio.create_task(
+                                            sio.emit('recognition_result', recognition_data, to=welcome_screen_sid)
+                                        )
+
+                        detection_results_cache.append(result)
+
+                # Send detection results to any connected Socket.IO clients for UI updates only if independent detection is active
+                if detection_results_cache and get_independent_detection_active():
+                    for sid in detection_active.keys():
+                        asyncio.create_task(sio.emit('face_detection_result', {
+                            "faces": detection_results_cache,
+                            "timestamp": time.time(),
+                            "frame_size": {"width": frame.shape[1], "height": frame.shape[0]}
+                        }, to=sid))
+
+            except Exception as e:
+                print(f"❌ Error in webcam face detection: {e}")
+
+            # Draw overlays on frame
+            if detection_results_cache:
+                frame = draw_detection_overlays_on_frame(frame, detection_results_cache)
+
+            # Encode frame as JPEG
+            _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+
+            # Put frame in output queue
+            if not output_queue.full():
+                try:
+                    output_queue.put_nowait(buffer.tobytes())
+                except queue.Full:
+                    pass  # Skip frame if queue is full
+
+            # Frame rate limiting for performance balance (inspired by original PyQt5 timing)
+            # Original used 200ms timer (5 FPS), we use 33ms for 30 FPS webcam responsiveness
+            await asyncio.sleep(0.033)
+
+        cap.release()
+        print("🛑 Webcam processing stopped")
+
+    except Exception as e:
+        print(f"❌ Error in webcam stream processing: {e}")
+        import traceback
+        traceback.print_exc()
+
+        # Ensure camera is released even on exception
+        try:
+            cap.release()
+        except:
+            pass
+
+@app.get("/api/webcam/test")
+async def test_webcam():
+    """Test webcam connection without streaming"""
+    camera_config = config_manager.get_camera_config()
+
+    if camera_config.get('source') != 'webcam':
+        return {"success": False, "error": "Webcam not configured as source"}
+
+    print(f"📹 Testing webcam connection")
+
+    try:
+        cap = cv2.VideoCapture(0)
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
+        if not cap.isOpened():
+            cap.release()
+            return {"success": False, "error": "Failed to open webcam"}
+
+        # Try to read one frame
+        ret, frame = cap.read()
+        cap.release()
+
+        if not ret or frame is None:
+            return {"success": False, "error": "Failed to read frame from webcam"}
+
+        height, width = frame.shape[:2]
+        return {
+            "success": True,
+            "message": "Webcam connection successful",
+            "frame_size": {"width": int(width), "height": int(height)}
+        }
+
+    except Exception as e:
+        return {"success": False, "error": f"Webcam test failed: {str(e)}"}
 
 @app.get("/api/rtsp/test")
 async def test_rtsp():
@@ -1194,31 +1772,145 @@ async def test_rtsp():
     except Exception as e:
         return {"success": False, "error": f"RTSP test failed: {str(e)}"}
 
+@app.post("/api/webcam/stop")
+async def stop_webcam_streams():
+    """Stop webcam streams - admin has full control regardless of welcome screen connections"""
+    webcam_stream_count = len(webcam_streams)
+
+    # Always stop streams when admin requests it
+    webcam_streams.clear()
+
+    # Update persistent detection state
+    set_independent_detection_active(False)
+    print(f"🛑 Stopped {webcam_stream_count} webcam streams - detection state set to inactive")
+
+    return {
+        "success": True,
+        "stopped_webcam_streams": webcam_stream_count,
+        "message": "Webcam streams stopped"
+    }
+
 @app.post("/api/rtsp/stop")
 async def stop_rtsp_streams():
-    """Stop all active RTSP streams"""
+    """Stop RTSP streams - admin has full control regardless of welcome screen connections"""
     rtsp_stream_count = len(rtsp_streams)
     ffmpeg_stream_count = len(ffmpeg_streams)
 
+    # Always stop streams when admin requests it
     rtsp_streams.clear()
     ffmpeg_streams.clear()
-
     total_stopped = rtsp_stream_count + ffmpeg_stream_count
-    print(f"🛑 Stopped {rtsp_stream_count} RTSP streams and {ffmpeg_stream_count} FFmpeg streams")
+
+    # Update persistent detection state
+    set_independent_detection_active(False)
+    print(f"🛑 Stopped {rtsp_stream_count} RTSP streams and {ffmpeg_stream_count} FFmpeg streams - detection state set to inactive")
 
     return {
         "success": True,
         "stopped_rtsp_streams": rtsp_stream_count,
         "stopped_ffmpeg_streams": ffmpeg_stream_count,
-        "total_stopped": total_stopped
+        "total_stopped": total_stopped,
+        "message": "RTSP streams stopped"
     }
 
+def cleanup_on_exit():
+    """Clean up resources on server shutdown"""
+    print("🧹 Cleaning up resources...")
+
+    # Stop all active streams
+    rtsp_streams.clear()
+    ffmpeg_streams.clear()
+    webcam_streams.clear()
+
+    # Clear detection state
+    detection_active.clear()
+    welcome_screens.clear()
+
+    print("✅ Cleanup complete")
+
+async def start_background_rtsp_for_welcome_screens():
+    """Start background RTSP processing specifically for welcome screen recognition"""
+    camera_config = config_manager.get_camera_config()
+    rtsp_url = camera_config.get('rtsp_url')
+
+    if not rtsp_url:
+        print("❌ No RTSP URL configured for background processing")
+        return
+
+    stream_id = "welcome_screen_bg_rtsp"
+    ffmpeg_streams[stream_id] = True
+
+    print(f"🎬 Starting background RTSP processing for welcome screens: {rtsp_url}")
+
+    # Create a dummy queue since we don't need video output, just recognition events
+    dummy_queue = queue.Queue(maxsize=1)  # Small queue since we're not outputting video
+    stop_event = asyncio.Event()
+
+    try:
+        await process_rtsp_with_ffmpeg_overlay(rtsp_url, dummy_queue, stop_event)
+    except Exception as e:
+        print(f"❌ Background RTSP processing error: {e}")
+    finally:
+        if stream_id in ffmpeg_streams:
+            del ffmpeg_streams[stream_id]
+        print("🛑 Background RTSP processing stopped")
+
+async def start_background_webcam_for_welcome_screens():
+    """Start background webcam processing specifically for welcome screen recognition"""
+    stream_id = "welcome_screen_bg_webcam"
+    webcam_streams[stream_id] = True
+
+    print(f"📹 Starting background webcam processing for welcome screens")
+
+    # Create a dummy queue since we don't need video output, just recognition events
+    dummy_queue = queue.Queue(maxsize=1)  # Small queue since we're not outputting video
+
+    try:
+        await process_webcam_with_overlay(dummy_queue, stream_id)
+    except Exception as e:
+        print(f"❌ Background webcam processing error: {e}")
+    finally:
+        if stream_id in webcam_streams:
+            del webcam_streams[stream_id]
+        print("🛑 Background webcam processing stopped")
+
+def signal_handler(signum, _):
+    """Handle shutdown signals gracefully"""
+    print(f"\n🛑 Received signal {signum}, shutting down gracefully...")
+    cleanup_on_exit()
+    import sys
+    sys.exit(0)
+
 if __name__ == "__main__":
-    # Run the server with SocketIO
-    uvicorn.run(
-        "api:socket_app",  # Use the SocketIO app instead of FastAPI app directly
-        host="0.0.0.0",
-        port=8000,
-        reload=True,
-        log_level="info"
-    )
+    import signal
+    import atexit
+
+    # Register signal handlers for graceful shutdown
+    signal.signal(signal.SIGINT, signal_handler)   # Ctrl+C
+    signal.signal(signal.SIGTERM, signal_handler)  # Kill command
+
+    # Register cleanup function to run on normal exit
+    atexit.register(cleanup_on_exit)
+
+    print("🚀 Face Recognition API starting...")
+    print("📊 Database initialized")
+    print("🤖 AI models loaded")
+    print("📷 Camera system ready")
+    print("✅ API ready at http://localhost:8000")
+    print("📚 API docs available at http://localhost:8000/docs")
+
+    try:
+        # Run the server with SocketIO
+        uvicorn.run(
+            "api:socket_app",  # Use the SocketIO app instead of FastAPI app directly
+            host="0.0.0.0",
+            port=8000,
+            reload=True,
+            log_level="info"
+        )
+    except KeyboardInterrupt:
+        print("\n🛑 Server interrupted by user")
+        cleanup_on_exit()
+    except Exception as e:
+        print(f"❌ Server error: {e}")
+        cleanup_on_exit()

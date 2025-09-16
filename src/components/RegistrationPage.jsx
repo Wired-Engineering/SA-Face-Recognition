@@ -19,6 +19,7 @@ import apiService, { imageUtils, webcamUtils } from '../services/api';
 export function RegistrationPage({ onRegister }) {
   const [personId, setpersonId] = useState('');
   const [personName, setpersonName] = useState('');
+  const [personTitle, setpersonTitle] = useState('');
   const [photoFile, setPhotoFile] = useState(null);
   const [capturedPhoto, setCapturedPhoto] = useState(null);
   const [isCapturing] = useState(false);
@@ -105,7 +106,7 @@ export function RegistrationPage({ onRegister }) {
   };
 
   const handleRegister = async () => {
-    if (!personId || !personName || (!photoFile && !capturedPhoto)) {
+    if (!personId || !personName || !personTitle || (!photoFile && !capturedPhoto)) {
       setError('Please fill in all fields and provide a photo');
       return;
     }
@@ -125,13 +126,14 @@ export function RegistrationPage({ onRegister }) {
         imageData = capturedPhoto;
       }
 
-      const result = await apiService.registerperson(personId, personName, imageData);
+      const result = await apiService.registerperson(personId, personName, personTitle, imageData);
 
       if (result.success) {
         setSuccess(`person ${personName} registered successfully!`);
         // Reset form
         setpersonId('');
         setpersonName('');
+        setpersonTitle('');
         setPhotoFile(null);
         setCapturedPhoto(null);
 
@@ -139,6 +141,7 @@ export function RegistrationPage({ onRegister }) {
         onRegister?.({
           id: personId,
           name: personName,
+          title: personTitle,
           photo: imageData,
         });
       } else {
@@ -216,6 +219,27 @@ export function RegistrationPage({ onRegister }) {
                 },
               }}
             />
+
+            <TextInput
+              leftSection={<IconUser size={16} />}
+              label="Title"
+              placeholder="Enter title here"
+              value={personTitle}
+              onChange={(event) => setpersonTitle(event.currentTarget.value)}
+              required
+              styles={{
+                input: {
+                  backgroundColor: 'white',
+                  border: '1px solid rgb(206, 212, 218)',
+                  '&:focus': {
+                    borderColor: 'rgb(0, 36, 61)',
+                    outline: '2px solid rgb(0, 36, 61)',
+                    outlineOffset: '2px',
+                  },
+                },
+              }}
+            />
+
 
             {/* Photo Section */}
             <Box>
@@ -362,7 +386,7 @@ export function RegistrationPage({ onRegister }) {
             )}
 
             {/* Validation Alert */}
-            {!error && !success && (!personId || !personName || (!photoFile && !capturedPhoto)) && (
+            {!error && !success && (!personId || !personName || !personTitle || (!photoFile && !capturedPhoto)) && (
               <Alert
                 icon={<IconAlertCircle size={16} />}
                 color="orange"
@@ -380,7 +404,7 @@ export function RegistrationPage({ onRegister }) {
               fullWidth
               color="signature"
               style={{ marginTop: '1rem' }}
-              disabled={!personId || !personName || (!photoFile && !capturedPhoto) || loading}
+              disabled={!personId || !personName || !personTitle || (!photoFile && !capturedPhoto) || loading}
             >
               {loading ? 'Registering...' : 'Register'}
             </Button>

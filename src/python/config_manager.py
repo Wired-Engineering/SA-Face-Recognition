@@ -80,9 +80,8 @@ class ConfigManager:
         """Get camera configuration"""
         return self.config.get('camera', {})
 
-    def set_camera_config(self, source: str, device_id: Optional[str] = None,
-                         rtsp_url: Optional[str] = None) -> bool:
-        """Set camera configuration"""
+    def set_camera_config(self, source: str, device_id: Optional[str] = None, rtsp_url: Optional[str] = None) -> bool:
+        """Set camera configuration - default, webcam, device, and rtsp supported"""
         camera_config = {
             'source': source,
             'device_id': device_id,
@@ -119,6 +118,18 @@ class ConfigManager:
         """Get face recognition configuration"""
         return self.config.get('recognition', {})
 
+    def get_detection_config(self) -> Dict[str, Any]:
+        """Get detection system configuration"""
+        return self.config.get('detection', {})
+
+    def set_detection_active(self, active: bool) -> bool:
+        """Set detection active state and persist to config"""
+        return self.set('detection.active', active)
+
+    def is_detection_active(self) -> bool:
+        """Get detection active state from config"""
+        return self.get('detection.active', False)
+
     def get_default_config(self) -> Dict[str, Any]:
         """Get default configuration"""
         return {
@@ -139,6 +150,9 @@ class ConfigManager:
             'recognition': {
                 'threshold': 0.5,
                 'draw_boxes': True
+            },
+            'detection': {
+                'active': False
             },
             'system': {
                 'database_path': 'system/Attendance.db',

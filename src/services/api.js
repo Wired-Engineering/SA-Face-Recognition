@@ -71,12 +71,13 @@ class ApiService {
     return this.request('/api/people');
   }
 
-  async registerperson(personId, personName, imageData) {
+  async registerperson(personId, personName, personTitle, imageData) {
     return this.request('/api/people/register', {
       method: 'POST',
       body: JSON.stringify({
         person_id: personId,
         person_name: personName,
+        person_title: personTitle,
         image_data: imageData,
       }),
     });
@@ -138,6 +139,12 @@ class ApiService {
 
   async stopRtspStreams() {
     return this.request('/api/rtsp/stop', {
+      method: 'POST',
+    });
+  }
+
+  async stopWebcamStreams() {
+    return this.request('/api/webcam/stop', {
       method: 'POST',
     });
   }

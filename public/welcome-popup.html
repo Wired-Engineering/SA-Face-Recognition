@@ -226,24 +226,12 @@
         <div class="welcome-card">
             <!-- User Recognized State -->
             <div id="recognizedState" class="hidden">
-                <div class="success-icon">
-                    <svg class="icon-check" viewBox="0 0 24 24">
-                        <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41L9 16.17z"/>
-                    </svg>
-                </div>
 
                 <h1 class="welcome-title">Welcome</h1>
 
-                <div class="user-avatar">
-                    <img id="userPhoto" src="" alt="User Photo" class="hidden">
-                    <svg id="userIcon" class="icon-user" viewBox="0 0 24 24">
-                        <path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/>
-                    </svg>
-                </div>
-
                 <div id="userName" class="user-name">Unknown User</div>
                 <div id="userId" class="user-id hidden"></div>
-                <div id="userDepartment" class="user-department hidden"></div>
+                <div id="userTitle" class="user-department hidden"></div>
                 <div id="confidenceScore" class="confidence-score hidden"></div>
                 <div id="timerText" class="timer-text hidden"></div>
             </div>
@@ -421,8 +409,12 @@
 
                     this.socket.on('recognition_result', (data) => {
                         console.log('🎯 Recognition result received:', data);
+                        console.log('📊 Event data details:', JSON.stringify(data, null, 2));
                         if (data.type === 'recognition' && data.user) {
+                            console.log('✅ Valid recognition data, adding to queue:', data.user.name || data.user.person_name);
                             this.addUserToQueue(data.user);
+                        } else {
+                            console.warn('⚠️ Invalid recognition data format:', data);
                         }
                     });
 
@@ -529,6 +521,7 @@
             }
 
             showUser(user) {
+                console.log('🔍 showUser called with user data:', JSON.stringify(user, null, 2));
                 this.currentUser = user;
                 this.timeLeft = this.settings.timer;
 
@@ -539,7 +532,7 @@
                 // Update user information
                 const userNameEl = document.getElementById('userName');
                 const userIdEl = document.getElementById('userId');
-                const userDepartmentEl = document.getElementById('userDepartment');
+                const userTitleEl = document.getElementById('userTitle');
                 const confidenceEl = document.getElementById('confidenceScore');
                 const userPhotoEl = document.getElementById('userPhoto');
                 const userIconEl = document.getElementById('userIcon');
@@ -555,12 +548,15 @@
                     userIdEl.classList.add('hidden');
                 }
 
-                // Set department
-                if (user.department) {
-                    userDepartmentEl.textContent = user.department;
-                    userDepartmentEl.classList.remove('hidden');
+                // Set title
+                console.log('🏷️ Checking userTitle:', user.userTitle);
+                if (user.userTitle) {
+                    console.log('✅ Setting userTitle:', user.userTitle);
+                    userTitleEl.textContent = user.userTitle;
+                    userTitleEl.classList.remove('hidden');
                 } else {
-                    userDepartmentEl.classList.add('hidden');
+                    console.log('❌ No userTitle found, hiding element');
+                    userTitleEl.classList.add('hidden');
                 }
 
                 // Set confidence score
@@ -571,12 +567,12 @@
                     confidenceEl.classList.add('hidden');
                 }
 
-                // Set user photo
-                if (user.photo) {
+                // Set user photo (with null checks for missing elements)
+                if (user.photo && userPhotoEl && userIconEl) {
                     userPhotoEl.src = user.photo;
                     userPhotoEl.classList.remove('hidden');
                     userIconEl.classList.add('hidden');
-                } else {
+                } else if (userPhotoEl && userIconEl) {
                     userPhotoEl.classList.add('hidden');
                     userIconEl.classList.remove('hidden');
                 }
@@ -598,11 +594,14 @@
 
             startTimer() {
                 const timerEl = document.getElementById('timerText');
+                console.log('⏰ Starting timer - isPersistent:', this.isPersistent, 'timeLeft:', this.timeLeft, 'timerEl:', timerEl);
 
                 if (this.isPersistent) {
                     // In persistent mode, show next user after timer
-                    timerEl.classList.remove('hidden');
-                    timerEl.textContent = `Next in ${this.timeLeft} seconds...`;
+                    if (timerEl) {
+                        timerEl.classList.remove('hidden');
+                        timerEl.textContent = `Next in ${this.timeLeft} seconds...`;
+                    }
 
                     if (this.timerInterval) {
                         clearInterval(this.timerInterval);
@@ -610,16 +609,22 @@
 
                     this.timerInterval = setInterval(() => {
                         if (this.timeLeft > 0) {
-                            timerEl.textContent = `Next in ${this.timeLeft} seconds...`;
+                            if (timerEl) {
+                                timerEl.textContent = `Next in ${this.timeLeft} seconds...`;
+                            }
                             this.timeLeft--;
                         } else {
+                            console.log('⏰ Timer expired, showing next user');
+                            clearInterval(this.timerInterval);
                             this.showNextUser();
                         }
                     }, 1000);
                 } else {
                     // Legacy mode - close window
-                    timerEl.classList.remove('hidden');
-                    timerEl.textContent = `Closing in ${this.timeLeft} seconds...`;
+                    if (timerEl) {
+                        timerEl.classList.remove('hidden');
+                        timerEl.textContent = `Closing in ${this.timeLeft} seconds...`;
+                    }
 
                     if (this.timerInterval) {
                         clearInterval(this.timerInterval);
@@ -627,7 +632,9 @@
 
                     this.timerInterval = setInterval(() => {
                         if (this.timeLeft > 0) {
-                            timerEl.textContent = `Closing in ${this.timeLeft} seconds...`;
+                            if (timerEl) {
+                                timerEl.textContent = `Closing in ${this.timeLeft} seconds...`;
+                            }
                             this.timeLeft--;
                         } else {
                             this.closeWindow();
