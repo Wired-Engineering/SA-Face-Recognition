@@ -216,8 +216,8 @@ class ApiService {
     });
   }
 
-  async getBackgroundImage() {
-    return `${this.baseURL}/api/display/background-image`;
+  getBackgroundImage() {
+    return '/api/display/background-image';
   }
 }
 

@@ -12,6 +12,7 @@ import {
   Alert,
   Grid,
   useMantineTheme,
+  LoadingOverlay,
 } from '@mantine/core';
 import {
   IconVideo,
@@ -37,6 +38,7 @@ export function DetectionPage({ onDetection }) {
   const frameProcessingIntervalRef = useRef(null);
   const isDetectingRef = useRef(false);
   const [connectionState, setConnectionState] = useState('disconnected');
+  const [isStreamLoading, setIsStreamLoading] = useState(false);
 
   // Handle detection results for UI updates
   const handleDetectionResult = useCallback((data) => {
@@ -227,6 +229,7 @@ export function DetectionPage({ onDetection }) {
           // Set video source to ffmpeg stream with overlays endpoint
           setIsVideoStarted(true);
           setVideoStatus('Connecting to RTSP...');
+          setIsStreamLoading(true); // Start loading state
 
           // Set up RTSP image stream with overlays after state update
           setTimeout(() => {
@@ -251,6 +254,7 @@ export function DetectionPage({ onDetection }) {
           setActualCameraSource(cameraSettings.source);
           setIsVideoStarted(true);
           setVideoStatus('Connecting to webcam...');
+          setIsStreamLoading(true); // Start loading state
 
           // Set up webcam stream with overlays after state update
           setTimeout(() => {
@@ -261,10 +265,12 @@ export function DetectionPage({ onDetection }) {
               // Set status once stream loads
               rtspImageRef.current.onload = () => {
                 setVideoStatus('Webcam Active');
+                setIsStreamLoading(false); // Stop loading when loaded
               };
               rtspImageRef.current.onerror = () => {
                 setVideoStatus('Webcam Error');
                 setError('Failed to connect to webcam stream');
+                setIsStreamLoading(false); // Stop loading on error
               };
             }
           }, 100);
@@ -338,6 +344,7 @@ export function DetectionPage({ onDetection }) {
     setDetectedPerson(null);
     setError(null);
     setConnectionState('disconnected');
+    setIsStreamLoading(false);
   }, [actualCameraSource]);
 
 
@@ -456,6 +463,7 @@ export function DetectionPage({ onDetection }) {
                   </Group>
                 ) : (
                   <Box style={{ position: 'relative', width: '100%', height: '100%' }}>
+                    <LoadingOverlay visible={isStreamLoading} loaderProps={{ size: 'lg' }} />
                     {/* MJPEG stream with backend overlays for both device and RTSP sources */}
                     <img
                       ref={rtspImageRef}
@@ -471,11 +479,13 @@ export function DetectionPage({ onDetection }) {
                         console.log('📡 Camera stream loaded successfully');
                         setVideoStatus('Connected');
                         setError(null);
+                        setIsStreamLoading(false); // Stop loading when stream loads
                       }}
                       onError={(e) => {
                         console.error('📡 Camera stream error:', e);
                         setError('Camera stream failed to load. Check camera connection.');
                         setVideoStatus('Connection Failed');
+                        setIsStreamLoading(false); // Stop loading on error
                       }}
                     />
 
@@ -520,8 +530,13 @@ export function DetectionPage({ onDetection }) {
                 <Button
                   leftSection={<IconVideo size={20} />}
                   onClick={handleStartVideo}
-                  disabled={isVideoStarted}
+                  disabled={Boolean(isVideoStarted || isStreamLoading)}
+                  loading={isStreamLoading && !isVideoStarted}
                   color="signature"
+                  style={{
+                    opacity: (isVideoStarted || isStreamLoading) ? 0.6 : 1,
+                    pointerEvents: (isVideoStarted || isStreamLoading) ? 'none' : 'auto'
+                  }}
                 >
                   Start Camera & Detection
                 </Button>
@@ -529,7 +544,7 @@ export function DetectionPage({ onDetection }) {
                 <Button
                   leftSection={<IconVideoOff size={20} />}
                   onClick={handleStopVideo}
-                  disabled={!isVideoStarted}
+                  disabled={!isVideoStarted || isStreamLoading}
                   color="red"
                   variant="filled"
                 >
@@ -564,6 +579,7 @@ export function DetectionPage({ onDetection }) {
                   Welcome Canvas
                 </Button>
               </Group>
+
             </Stack>
           </Card>
         </Grid.Col>

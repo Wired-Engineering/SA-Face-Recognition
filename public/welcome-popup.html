@@ -75,6 +75,40 @@
             background-color: #ff6b6b;
         }
 
+        /* Kiosk Mode Button */
+        .kiosk-btn {
+            position: absolute;
+            top: 60px;  /* Positioned below the connection status */
+            right: 20px;  /* Aligned with connection status */
+            background: rgba(255, 255, 255, 0.1);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            border-radius: 8px;
+            padding: 8px 12px;
+            font-size: 14px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            backdrop-filter: blur(10px);
+            color: white;
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+
+        .kiosk-btn:hover {
+            background: rgba(100, 100, 100, 0.15);
+            border-color: rgba(100, 100, 100, 0.3);
+            transform: translateX(-2px);
+        }
+
+        .kiosk-btn:active {
+            transform: translateX(0);
+        }
+
+        /* Hide kiosk button when already in kiosk mode */
+        .kiosk-mode .kiosk-btn {
+            display: none;
+        }
+
         .welcome-card {
             background: white;
             border-radius: 16px;
@@ -132,14 +166,6 @@
             font-family: var(--font-family, 'Inter'), sans-serif;
         }
 
-        .user-id {
-            color: var(--font-color, #00243D);
-            font-size: var(--info-font-size, 1.3rem);
-            opacity: 0.8;
-            margin: 10px 0;
-            font-family: var(--font-family, 'Inter'), sans-serif;
-        }
-
         .user-department {
             color: var(--font-color, #00243D);
             font-size: var(--info-font-size, 1.1rem);
@@ -148,18 +174,60 @@
             font-family: var(--font-family, 'Inter'), sans-serif;
         }
 
-        .confidence-score {
-            color: var(--font-color, #00243D);
-            font-size: 0.9rem;
-            opacity: 0.6;
-            margin: 15px 0;
-        }
-
         .timer-text {
             color: var(--font-color, #00243D);
             font-size: 0.9rem;
             opacity: 0.6;
             margin-top: 30px;
+        }
+
+        /* Kiosk Mode Enhancements */
+        .kiosk-mode {
+            cursor: none;
+            overflow: hidden;
+        }
+
+        .kiosk-mode body {
+            margin: 0;
+            padding: 0;
+            width: 100vw;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        .kiosk-mode .container {
+            width: 100vw;
+            height: 100vh;
+            max-width: none;
+            max-height: none;
+            border-radius: 0;
+        }
+
+        /* Hide cursor after inactivity in kiosk mode */
+        .kiosk-mode.hide-cursor {
+            cursor: none !important;
+        }
+
+        .kiosk-mode.hide-cursor * {
+            cursor: none !important;
+        }
+
+        /* Fullscreen optimizations */
+        @media (display-mode: fullscreen) {
+            body {
+                overflow: hidden;
+            }
+            .container {
+                border-radius: 0;
+            }
+        }
+
+        /* Prevent text selection in kiosk mode */
+        .kiosk-mode {
+            -webkit-user-select: none;
+            -moz-user-select: none;
+            -ms-user-select: none;
+            user-select: none;
         }
 
         .waiting-state {
@@ -222,6 +290,12 @@
             <span>Offline</span>
         </div>
 
+        <!-- Kiosk Mode Button -->
+        <button id="kioskModeBtn" class="kiosk-btn" onclick="window.welcomePopup.toggleKioskMode()" title="Enter Kiosk Mode (Fullscreen)">
+            <span>🖥️</span>
+            <span>Kiosk Mode</span>
+        </button>
+
         <!-- Welcome Card -->
         <div class="welcome-card">
             <!-- User Recognized State -->
@@ -230,9 +304,7 @@
                 <h1 class="welcome-title">Welcome</h1>
 
                 <div id="userName" class="user-name">Unknown User</div>
-                <div id="userId" class="user-id hidden"></div>
                 <div id="userTitle" class="user-department hidden"></div>
-                <div id="confidenceScore" class="confidence-score hidden"></div>
                 <div id="timerText" class="timer-text hidden"></div>
             </div>
 
@@ -255,6 +327,7 @@
                 this.isConnected = false;
                 this.currentUser = null;
                 this.userQueue = [];  // Queue of users to cycle through
+                this.apiBase = this.detectApiBase();
                 this.settings = {
                     backgroundColor: '#E1EBFF',
                     fontColor: '#00243D',
@@ -267,9 +340,11 @@
                 this.timeLeft = 0;
                 this.timerInterval = null;
                 this.isPersistent = false;
+                this.isKioskMode = false;
 
                 this.loadSettings();
                 this.applySettings();
+                this.setupKioskMode();
                 this.connectSocketIO();
                 this.setupFallbackPolling();
                 this.setupMessageListener();
@@ -280,6 +355,23 @@
                         window.close();
                     }
                 });
+            }
+
+            // Dynamically detect API base URL for deployment flexibility
+            detectApiBase() {
+                const urlParams = new URLSearchParams(window.location.search);
+
+                // First priority: explicit apiBase parameter passed from opener
+                if (urlParams.has('apiBase')) {
+                    const apiBase = urlParams.get('apiBase');
+                    console.log('🌐 Using explicit API base from URL params:', apiBase);
+                    return apiBase;
+                }
+
+                // Second priority: derive from current window location
+                const origin = window.location.origin;
+                console.log('🌐 Using current window origin as API base:', origin);
+                return origin;
             }
 
             loadSettings() {
@@ -296,6 +388,10 @@
                 }
                 if (urlParams.has('persistent')) {
                     this.isPersistent = urlParams.get('persistent') === 'true';
+                }
+                if (urlParams.has('kiosk')) {
+                    this.isKioskMode = urlParams.get('kiosk') === 'true';
+                    console.log('🖥️ Kiosk mode:', this.isKioskMode);
                 }
                 if (urlParams.has('useBackgroundImage')) {
                     this.settings.useBackgroundImage = urlParams.get('useBackgroundImage') === 'true';
@@ -329,8 +425,108 @@
                         this.settings = { ...this.settings, ...event.data.settings };
                         this.applySettings();
                         console.log('📝 Settings updated from parent window');
+                    } else if (event.data.type === 'enable_kiosk_mode') {
+                        this.enableKioskMode();
+                        console.log('🖥️ Kiosk mode enabled from parent window');
                     }
                 });
+            }
+
+            setupKioskMode() {
+                if (this.isKioskMode) {
+                    console.log('🖥️ Initializing kiosk mode from URL parameter');
+                    this.setupKioskModeEnhancements();
+                }
+            }
+
+            setupCursorHiding() {
+                let cursorTimer;
+                const hideCursorDelay = 3000; // Hide cursor after 3 seconds of inactivity
+
+                const showCursor = () => {
+                    document.body.classList.remove('hide-cursor');
+                    clearTimeout(cursorTimer);
+                    cursorTimer = setTimeout(() => {
+                        document.body.classList.add('hide-cursor');
+                    }, hideCursorDelay);
+                };
+
+                // Show cursor on mouse movement
+                document.addEventListener('mousemove', showCursor);
+                document.addEventListener('mousedown', showCursor);
+
+                // Start the timer
+                showCursor();
+            }
+
+            attemptFullscreen() {
+                try {
+                    const element = document.documentElement;
+                    if (element.requestFullscreen) {
+                        element.requestFullscreen();
+                    } else if (element.webkitRequestFullscreen) {
+                        element.webkitRequestFullscreen();
+                    } else if (element.msRequestFullscreen) {
+                        element.msRequestFullscreen();
+                    } else if (element.mozRequestFullScreen) {
+                        element.mozRequestFullScreen();
+                    }
+                    console.log('📺 Attempted to enter fullscreen mode');
+
+                    // Show instructions if fullscreen didn't work
+                    setTimeout(() => {
+                        if (!document.fullscreenElement && !document.webkitFullscreenElement) {
+                            this.showFullscreenInstructions();
+                        }
+                    }, 1000);
+                } catch (error) {
+                    console.log('ℹ️ Fullscreen API not available:', error.message);
+                    this.showFullscreenInstructions();
+                }
+            }
+
+            showFullscreenInstructions() {
+                // Create a temporary notification
+                const notification = document.createElement('div');
+                notification.style.cssText = `
+                    position: fixed;
+                    top: 50%;
+                    left: 50%;
+                    transform: translate(-50%, -50%);
+                    background: rgba(0, 0, 0, 0.9);
+                    color: white;
+                    padding: 20px;
+                    border-radius: 10px;
+                    text-align: center;
+                    z-index: 10000;
+                    font-family: Arial, sans-serif;
+                    max-width: 400px;
+                `;
+
+                notification.innerHTML = `
+                    <h3>🖥️ True Kiosk Mode</h3>
+                    <p>For full kiosk experience without URL bar:</p>
+                    <ul style="text-align: left; margin: 15px 0;">
+                        <li><strong>Chrome:</strong> Press <kbd>F11</kbd> for fullscreen</li>
+                        <li><strong>Alternative:</strong> Launch with <code>--kiosk</code> flag</li>
+                        <li><strong>Browser:</strong> Right-click → "Open in new window"</li>
+                    </ul>
+                    <button onclick="this.parentElement.remove()"
+                            style="background: #4CAF50; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer;">
+                        Got it!
+                    </button>
+                `;
+
+                document.body.appendChild(notification);
+
+                // Auto-remove after 10 seconds
+                setTimeout(() => {
+                    if (notification.parentElement) {
+                        notification.remove();
+                    }
+                }, 10000);
+
+                console.log('💡 Showed fullscreen instructions to user');
             }
 
             applySettings() {
@@ -392,7 +588,10 @@
 
             connectSocketIO() {
                 try {
-                    this.socket = io('http://localhost:8000');
+                    // Use dynamic API base with port 8000 for Socket.IO
+                    const socketUrl = this.apiBase.replace(/:\d+$/, '') + ':8000';
+                    console.log('🔌 Connecting to Socket.IO at:', socketUrl);
+                    this.socket = io(socketUrl);
 
                     this.socket.on('connect', () => {
                         console.log('✅ Connected to SocketIO server');
@@ -456,7 +655,9 @@
                     if (this.isConnected) return; // Skip if SocketIO is working
 
                     try {
-                        const response = await fetch('http://localhost:8000/api/recognition/latest');
+                        // Use dynamic API base with port 8000 for HTTP API
+                        const apiUrl = this.apiBase.replace(/:\d+$/, '') + ':8000/api/recognition/latest';
+                        const response = await fetch(apiUrl);
                         if (response.ok) {
                             const data = await response.json();
                             if (data.user && data.timestamp) {
@@ -531,22 +732,12 @@
 
                 // Update user information
                 const userNameEl = document.getElementById('userName');
-                const userIdEl = document.getElementById('userId');
                 const userTitleEl = document.getElementById('userTitle');
-                const confidenceEl = document.getElementById('confidenceScore');
                 const userPhotoEl = document.getElementById('userPhoto');
                 const userIconEl = document.getElementById('userIcon');
 
                 // Set user name
                 userNameEl.textContent = user.name || user.person_name || 'Unknown User';
-
-                // Set user ID
-                if (user.personId || user.person_id) {
-                    userIdEl.textContent = `ID: ${user.personId || user.person_id}`;
-                    userIdEl.classList.remove('hidden');
-                } else {
-                    userIdEl.classList.add('hidden');
-                }
 
                 // Set title
                 console.log('🏷️ Checking userTitle:', user.userTitle);
@@ -557,14 +748,6 @@
                 } else {
                     console.log('❌ No userTitle found, hiding element');
                     userTitleEl.classList.add('hidden');
-                }
-
-                // Set confidence score
-                if (user.confidence) {
-                    confidenceEl.textContent = `Confidence: ${Math.round(user.confidence * 100)}%`;
-                    confidenceEl.classList.remove('hidden');
-                } else {
-                    confidenceEl.classList.add('hidden');
                 }
 
                 // Set user photo (with null checks for missing elements)
@@ -657,11 +840,75 @@
                     window.close();
                 }, 500);
             }
+
+            // Toggle kiosk mode (called from button)
+            toggleKioskMode() {
+                if (!this.isKioskMode) {
+                    this.enableKioskMode();
+                } else {
+                    console.log('ℹ️ Already in kiosk mode');
+                }
+            }
+
+            // Enable kiosk mode dynamically
+            enableKioskMode() {
+                if (this.isKioskMode) {
+                    console.log('ℹ️ Kiosk mode already enabled');
+                    return;
+                }
+
+                console.log('🖥️ Enabling kiosk mode dynamically');
+                this.isKioskMode = true;
+
+                // Apply kiosk mode enhancements
+                this.setupKioskModeEnhancements();
+            }
+
+            // Apply kiosk mode enhancements (separated from setupKioskMode for dynamic use)
+            setupKioskModeEnhancements() {
+                // Apply kiosk CSS class
+                document.documentElement.classList.add('kiosk-mode');
+                document.body.classList.add('kiosk-mode');
+
+                // Setup cursor hiding after inactivity
+                this.setupCursorHiding();
+
+                // Try to enter fullscreen
+                this.attemptFullscreen();
+
+                // Disable context menu
+                document.addEventListener('contextmenu', (e) => {
+                    e.preventDefault();
+                    return false;
+                });
+
+                // Disable text selection
+                document.addEventListener('selectstart', (e) => {
+                    e.preventDefault();
+                    return false;
+                });
+
+                // Disable drag and drop
+                document.addEventListener('dragstart', (e) => {
+                    e.preventDefault();
+                    return false;
+                });
+
+                // Prevent zoom with keyboard shortcuts
+                document.addEventListener('keydown', (e) => {
+                    if ((e.ctrlKey || e.metaKey) && (e.key === '+' || e.key === '-' || e.key === '0')) {
+                        e.preventDefault();
+                        return false;
+                    }
+                });
+
+                console.log('✅ Kiosk mode enhancements applied dynamically');
+            }
         }
 
         // Initialize when page loads
         document.addEventListener('DOMContentLoaded', () => {
-            new WelcomeScreenPopup();
+            window.welcomePopup = new WelcomeScreenPopup();
         });
     </script>
 </body>

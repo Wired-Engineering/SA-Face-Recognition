@@ -190,7 +190,7 @@ export const theme = createTheme({
           borderColor: 'var(--mantine-color-signature-5)',
           borderWidth: '2px',
           boxShadow: '0 4px 16px rgba(19, 36, 67, 0.15)',
-          '& .mantine-Card-section': {
+          '& .mantineCardSection': {
             borderColor: 'var(--mantine-color-signature-3)',
           },
         },
@@ -199,17 +199,17 @@ export const theme = createTheme({
     Tabs: {
       styles: {
         root: {
-          '& .mantine-Tabs-list': {
+          '& .mantineTabsList': {
             backgroundColor: 'white',
             borderRadius: '8px',
             padding: '4px',
             boxShadow: '0 2px 8px rgba(19, 36, 67, 0.1)',
           },
-          '& .mantine-Tabs-tab': {
+          '& .mantineTabsTab': {
             borderRadius: '6px',
             fontWeight: 'bold',
             color: '#000000', // True black text for tabs
-            '&[data-active]': {
+            '&[dataActive]': {
               backgroundColor: 'var(--mantine-color-signature-6)',
               color: 'white',
             },
@@ -222,7 +222,7 @@ export const theme = createTheme({
         tab: {
           color: '#000000', // Ensure tab text is black
           fontWeight: 'bold',
-          '&[data-active]': {
+          '&[dataActive]': {
             color: 'white',
           },
         },

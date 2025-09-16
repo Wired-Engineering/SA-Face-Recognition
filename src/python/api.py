@@ -1236,7 +1236,7 @@ async def upload_background_image(file: UploadFile = File(...)):
         return {
             'success': True,
             'message': 'Background image uploaded successfully',
-            'image_url': image_data_url
+            'image_url': '/api/display/background-image'
         }
     except Exception as e:
         print(f"❌ Upload error: {e}")
@@ -1279,12 +1279,26 @@ async def delete_background_image():
 async def get_background_image():
     """Get the current background image if it exists"""
     try:
-        backgrounds_dir = "backgrounds"
+        backgrounds_dir = os.path.join("images", "backgrounds")
         if os.path.exists(backgrounds_dir):
             for file in os.listdir(backgrounds_dir):
                 if file.startswith("welcome_background"):
                     file_path = os.path.join(backgrounds_dir, file)
-                    return FileResponse(file_path)
+                    # Determine MIME type based on file extension
+                    mime_type = "image/jpeg"
+                    if file.lower().endswith('.png'):
+                        mime_type = "image/png"
+                    elif file.lower().endswith('.gif'):
+                        mime_type = "image/gif"
+
+                    return FileResponse(
+                        file_path,
+                        media_type=mime_type,
+                        headers={
+                            "Cache-Control": "public, max-age=3600",
+                            "Access-Control-Allow-Origin": "*"
+                        }
+                    )
 
         raise HTTPException(status_code=404, detail="No background image found")
     except Exception as e:

@@ -176,10 +176,10 @@ export function RegistrationPage({ onRegister }) {
         >
           <Stack gap="md">
             <Title order={3} ta="center" mb="md">
-              Register New person
+              Register New Person
             </Title>
 
-            {/* person Information */}
+            {/* Person Information */}
             <TextInput
               leftSection={<IconId size={16} />}
               label="person ID"
@@ -259,16 +259,6 @@ export function RegistrationPage({ onRegister }) {
                       backgroundColor: 'white',
                       border: '1px solid rgb(206, 212, 218)',
                       '&:focus': {
-                        borderColor: 'rgb(0, 36, 61)',
-                        outline: '2px solid rgb(0, 36, 61)',
-                        outlineOffset: '2px',
-                      },
-                      '&:focus-within': {
-                        borderColor: 'rgb(0, 36, 61)',
-                        outline: '2px solid rgb(0, 36, 61)',
-                        outlineOffset: '2px',
-                      },
-                      '&[data-with-focus]': {
                         borderColor: 'rgb(0, 36, 61)',
                         outline: '2px solid rgb(0, 36, 61)',
                         outlineOffset: '2px',

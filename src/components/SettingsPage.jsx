@@ -109,9 +109,11 @@ export function SettingsPage({ onSaveSettings }) {
           setFontFamily(displaySettings.font_family || 'Inter');
           setFontSize(displaySettings.font_size || 'medium');
 
-          // If there's a background image on the server, show placeholder preview
+          // If there's a background image on the server, show the actual image URL
           if (displaySettings.has_background_image) {
-            setBackgroundImagePreview('background-exists'); // Placeholder to show delete button
+            // Get the actual image URL from the API
+            const imageUrl = apiService.getBackgroundImage();
+            setBackgroundImagePreview(imageUrl);
           }
         }
       } catch (error) {
@@ -588,6 +590,9 @@ export function SettingsPage({ onSaveSettings }) {
                 checked={useBackgroundImage}
                 onChange={(event) => setUseBackgroundImage(event.currentTarget.checked)}
                 description="Toggle between solid color and custom image background"
+                styles={{
+                  label: { color: 'black' }
+                }}
               />
 
               {useBackgroundImage ? (
@@ -632,25 +637,12 @@ export function SettingsPage({ onSaveSettings }) {
                           border: '2px solid #dee2e6',
                           borderRadius: '8px',
                           overflow: 'hidden',
-                          backgroundImage: backgroundImagePreview === 'background-exists'
-                            ? 'none'
-                            : `url(${backgroundImagePreview})`,
+                          backgroundImage: `url(${backgroundImagePreview})`,
                           backgroundSize: 'cover',
                           backgroundPosition: 'center',
-                          backgroundColor: backgroundImagePreview === 'background-exists'
-                            ? '#f8f9fa'
-                            : 'transparent',
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'center',
+                          backgroundColor: 'transparent',
                         }}
-                      >
-                        {backgroundImagePreview === 'background-exists' && (
-                          <Text size="sm" c="dimmed">
-                            Background image stored on server
-                          </Text>
-                        )}
-                      </Box>
+                      />
                     </Box>
                   )}
                 </Stack>
