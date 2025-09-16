@@ -1,6 +1,5 @@
 """Configuration manager for the Face Recognition System"""
 import yaml
-import os
 from typing import Any, Dict, Optional
 from pathlib import Path
 

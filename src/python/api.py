@@ -15,7 +15,6 @@ import time
 import logging
 import asyncio
 from contextlib import asynccontextmanager
-import ffmpeg
 import threading
 import queue
 
@@ -297,141 +296,6 @@ async def process_frame(sid, data):
         await sio.emit('detection_error', {"error": str(e)}, to=sid)
 
 
-async def process_rtsp_with_detection(sid, rtsp_url):
-    """Process RTSP stream with face detection - no frontend frame processing needed"""
-    import asyncio
-
-    print(f"📡 Starting RTSP detection processing for {sid}: {rtsp_url}")
-
-    try:
-        cap = cv2.VideoCapture(rtsp_url)
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-
-        if not cap.isOpened():
-            print(f"❌ Failed to open RTSP stream: {rtsp_url}")
-            await sio.emit('detection_error', {"error": f"Failed to connect to RTSP stream: {rtsp_url}"}, to=sid)
-            return
-
-        print(f"✅ RTSP detection stream opened successfully: {rtsp_url}")
-        frame_count = 0
-
-        while detection_active.get(sid, False):
-            ret, frame = cap.read()
-            if not ret:
-                print(f"⚠️ Failed to read frame from RTSP detection stream")
-                await asyncio.sleep(0.01)  # Reduced delay from 100ms to 10ms
-                continue
-
-            frame_count += 1
-
-            try:
-                # Run face detection on backend
-                frame_features, faces = face_recognizer.recognize_face(frame)
-
-                # Debug logging for face recognition
-                if frame_count % 10 == 0:  # Log every 10 frames
-                    print(f"🔍 RTSP Frame {frame_count}: Found {len(faces) if faces is not None else 0} faces")
-                    print(f"🧠 Face dictionary loaded: {len(face_recognizer.dictionary) if face_recognizer.dictionary else 0} people")
-                    if face_recognizer.dictionary:
-                        print(f"🧑 Registered people: {list(face_recognizer.dictionary.keys())}")
-                        print(f"🎯 Recognition threshold: {face_recognizer.thresold}")
-                    else:
-                        print("⚠️ No face dictionary loaded - check if people are registered")
-
-                # Process detection results
-                detection_results = []
-                if faces is not None and len(faces) > 0:
-                    for i, face in enumerate(faces):
-                        x1, y1, w, h = face[:4].astype(int)
-                        x2, y2 = x1 + w, y1 + h
-
-                        result = {
-                            'bbox': [int(x1), int(y1), int(x2), int(y2)],
-                            'confidence': float(face[14]) if len(face) > 14 else 0.0
-                        }
-
-                        # Check for face recognition match
-                        if i < len(frame_features) and face_recognizer.dictionary:
-                            feature = frame_features[i]
-                            best_match = None
-                            highest_score = 0
-
-                            for person_id, ref_feature in face_recognizer.dictionary.items():
-                                score = face_recognizer.face_recognizer.match(feature, ref_feature)
-
-                                # Debug logging for recognition scores
-                                person_name = db.get_person_name(person_id)
-                                print(f"🔍 RTSP Recognition: {person_name} -> Score: {score:.3f} (threshold: {face_recognizer.thresold})")
-
-                                if score > face_recognizer.thresold and score > highest_score:
-                                    highest_score = score
-                                    best_match = {
-                                        'person_id': person_id,
-                                        'person_name': person_name,
-                                        'confidence': float(score)
-                                    }
-
-                            if best_match:
-                                result.update({
-                                    'person_id': best_match['person_id'],
-                                    'person_name': best_match['person_name'],
-                                    'match_confidence': best_match['confidence'],
-                                    'recognized': True
-                                })
-
-                                # Store latest recognition for polling endpoints
-                                recognition_data = {
-                                    'type': 'recognition',
-                                    'user': {
-                                        'person_id': best_match['person_id'],
-                                        'person_name': best_match['person_name'],
-                                        'name': best_match['person_name'],
-                                        'confidence': best_match['confidence'],
-                                        'photo': None
-                                    },
-                                    'timestamp': time.time()
-                                }
-
-                                latest_recognition.update(recognition_data)
-
-                                # Broadcast recognition to all welcome screens
-                                for welcome_screen_sid in welcome_screens.keys():
-                                    await sio.emit('recognition_result', recognition_data, to=welcome_screen_sid)
-
-                            else:
-                                result.update({
-                                    'person_id': 'UNKNOWN',
-                                    'person_name': 'Unknown Person',
-                                    'match_confidence': 0.0,
-                                    'recognized': False
-                                })
-
-                        detection_results.append(result)
-
-                # Send detection results to frontend
-                await sio.emit('face_detection_result', {
-                    "faces": detection_results,
-                    "timestamp": time.time(),
-                    "frame_size": {"width": frame.shape[1], "height": frame.shape[0]}
-                }, to=sid)
-
-                if len(detection_results) > 0:
-                    print(f"🔍 RTSP Detection: Sent {len(detection_results)} results to {sid}")
-
-            except Exception as e:
-                print(f"❌ Error in RTSP detection processing: {e}")
-
-            # Minimal delay for better responsiveness
-            await asyncio.sleep(0.01)
-
-        print(f"🛑 RTSP detection processing stopped for {sid}")
-        cap.release()
-
-    except Exception as e:
-        print(f"❌ Error in RTSP detection stream: {e}")
-        await sio.emit('detection_error', {"error": f"RTSP detection error: {str(e)}"}, to=sid)
-
-
 def draw_detection_overlays_on_frame(frame, faces):
     """Draw detection overlays directly on video frame"""
     overlay_frame = frame.copy()
@@ -604,46 +468,6 @@ async def process_rtsp_with_ffmpeg_overlay(rtsp_url, output_queue, stop_event):
 
 
 
-# Camera utility functions
-def get_camera_index_from_device_id(device_id):
-    """
-    Map a device ID to an OpenCV camera index.
-    This is a best-effort approach since OpenCV doesn't directly support device IDs.
-    """
-    try:
-        import platform
-        import subprocess
-
-        if platform.system() == "Darwin":  # macOS
-            # For macOS, try to enumerate cameras and match
-            for i in range(10):  # Check first 10 indices
-                cap = cv2.VideoCapture(i)
-                if cap.isOpened():
-                    ret, frame = cap.read()
-                    cap.release()
-                    if ret and frame is not None:
-                        # This camera works, but we can't easily match device IDs
-                        # For now, return the index order they appear in
-                        return i
-                else:
-                    cap.release()
-        else:
-            # For other systems, try indices in order
-            for i in range(10):
-                cap = cv2.VideoCapture(i)
-                if cap.isOpened():
-                    ret, frame = cap.read()
-                    cap.release()
-                    if ret and frame is not None:
-                        return i
-                else:
-                    cap.release()
-
-        return None
-    except Exception as e:
-        print(f"Error mapping device ID to camera index: {e}")
-        return None
-
 # Simple camera testing without enumeration
 def test_single_camera(index):
     """Test a single camera index"""
@@ -803,7 +627,7 @@ async def register_person(request: personRegistration):
         image_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
 
         # Use the face recognizer to detect faces
-        features, faces = face_recognizer.recognize_face(image_cv, f"{request.person_id}.png")
+        _, faces = face_recognizer.recognize_face(image_cv, f"{request.person_id}.png")
 
         if faces is None or len(faces) == 0:
             return {
@@ -1042,11 +866,6 @@ async def test_camera(request: CameraSettings):
         elif request.source == 'device' and request.device_id:
             print(f"📷 Testing device with ID: {request.device_id}")
 
-            # Simple mapping based on device ID patterns
-            # Based on testing: BRIO is at OpenCV index 0, MacBook Air is at index 1
-            # Logitech BRIO device ID starts with 'd16a9c26...' → camera index 0
-            # MacBook Air device ID starts with '883bf618...' → camera index 1
-
             if request.device_id.startswith('d16a9c26'):
                 source = 0  # Logitech BRIO → OpenCV index 0
                 print(f"📷 Detected Logitech BRIO → using camera index 0")
@@ -1283,57 +1102,6 @@ async def health_check():
     """Health check endpoint"""
     return {"status": "healthy", "timestamp": get_current_datetime_other_format()}
 
-@app.get("/api/rtsp/stream")
-async def rtsp_stream(request: Request):
-    """Stream RTSP video feed as HTTP MJPEG stream"""
-    camera_config = config_manager.get_camera_config()
-
-    if camera_config.get('source') != 'rtsp' or not camera_config.get('rtsp_url'):
-        raise HTTPException(status_code=400, detail="RTSP not configured")
-
-    rtsp_url = camera_config['rtsp_url']
-
-    # Create unique stream ID for this request
-    stream_id = f"rtsp_{id(request)}"
-    rtsp_streams[stream_id] = True
-
-    print(f"📡 Starting RTSP stream {stream_id} from: {rtsp_url}")
-
-    def generate_frames():
-        cap = cv2.VideoCapture(rtsp_url)
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Reduce latency
-
-        if not cap.isOpened():
-            print(f"❌ Failed to open RTSP stream: {rtsp_url}")
-            return
-
-        print(f"✅ RTSP stream {stream_id} opened successfully")
-
-        try:
-            while rtsp_streams.get(stream_id, False):  # Check if stream should continue
-                ret, frame = cap.read()
-                if not ret:
-                    break
-
-                # Encode frame as JPEG
-                _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
-
-                # Yield frame in multipart format
-                yield (b'--frame\r\n'
-                       b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
-
-        finally:
-            cap.release()
-            if stream_id in rtsp_streams:
-                del rtsp_streams[stream_id]
-            print(f"🛑 RTSP stream {stream_id} closed")
-
-    return StreamingResponse(
-        generate_frames(),
-        media_type="multipart/x-mixed-replace; boundary=frame"
-    )
-
-
 @app.get("/api/rtsp/stream-with-overlay")
 async def rtsp_stream_with_overlay(request: Request):
     """Stream RTSP video feed with face detection overlays as HTTP MJPEG stream"""
@@ -1355,7 +1123,7 @@ async def rtsp_stream_with_overlay(request: Request):
     stop_event = threading.Event()
 
     # Start the background processing thread
-    processing_task = asyncio.create_task(
+    asyncio.create_task(
         process_rtsp_with_ffmpeg_overlay(rtsp_url, frame_queue, stop_event)
     )
 
