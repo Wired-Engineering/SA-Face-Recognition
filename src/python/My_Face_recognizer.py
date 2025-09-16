@@ -15,16 +15,41 @@ class FaceRecognizer:
         self.create_features()
     def create_features(self):
         self.dictionary = {}
-        files=os.listdir("images")
+        # Get the directory where this script is located
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        images_dir = os.path.join(script_dir, "images")
+
+        # Check if images directory exists
+        if not os.path.exists(images_dir):
+            print(f"Warning: Images directory not found at {images_dir}")
+            return
+
+        files=os.listdir(images_dir)
         files = list(set(files))
         for file in files:
-            image = cv2.imread("images/"+file)
+            # Skip hidden files and non-image files
+            if file.startswith('.') or file.lower().endswith(('.txt', '.pickle', '.pkl')):
+                continue
+
+            image_path = os.path.join(images_dir, file)
+            image = cv2.imread(image_path)
+
+            # Skip if image couldn't be loaded
+            if image is None:
+                print(f"Warning: Could not load image {file}")
+                continue
+
             feats, faces = self.recognize_face(image, file)
             if faces is None:
                 continue
             user_id = os.path.splitext(os.path.basename(file))[0]
             self.dictionary[user_id] = feats[0]
     def recognize_face(self,image,file_name=None):
+        # Check if image is None or empty
+        if image is None:
+            print(f"Error: Image is None for file {file_name}")
+            return None, None
+
         channels = 1 if len(image.shape) == 2 else image.shape[2]
         if channels == 1:
             image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)

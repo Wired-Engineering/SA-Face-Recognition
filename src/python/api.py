@@ -1,5 +1,6 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, File, UploadFile, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 import uvicorn
 import base64
@@ -12,6 +13,7 @@ from typing import Optional, Dict
 import pickle
 import time
 import logging
+import asyncio
 from contextlib import asynccontextmanager
 
 # SocketIO imports
@@ -20,6 +22,7 @@ import socketio
 from DatabaseManager import MySqlite3Manager
 from utils import get_current_datetime_other_format
 from My_Face_recognizer import FaceRecognizer
+from config_manager import config_manager
 
 # Lifespan manager for startup and shutdown
 @asynccontextmanager
@@ -51,7 +54,7 @@ sio = socketio.AsyncServer(
 
 app = FastAPI(
     title="Signature Aviation Face Recognition API",
-    description="Face recognition system for student attendance",
+    description="Face recognition system for person attendance",
     version="1.0.0",
     lifespan=lifespan
 )
@@ -70,12 +73,18 @@ socket_app = socketio.ASGIApp(sio, app)
 
 # Initialize components
 db = MySqlite3Manager()
-face_recognizer = FaceRecognizer(thresold=0.5, draw=True)
+# Load recognition settings from config
+recognition_config = config_manager.get_recognition_config()
+face_recognizer = FaceRecognizer(
+    thresold=recognition_config.get('threshold', 0.5),
+    draw=recognition_config.get('draw_boxes', True)
+)
 
 # SocketIO globals
 detection_active: Dict[str, bool] = {}
 welcome_screens: Dict[str, bool] = {}  # Track welcome screen connections
 latest_recognition: Dict = {}  # Store latest recognition result
+rtsp_streams: Dict[str, bool] = {}  # Track active RTSP streams
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -94,13 +103,26 @@ async def disconnect(sid):
     # Cleanup welcome screen state
     if sid in welcome_screens:
         del welcome_screens[sid]
+    # Stop any RTSP streams when clients disconnect
+    if rtsp_streams:
+        print(f"🛑 Stopping {len(rtsp_streams)} RTSP streams due to client disconnect")
+        rtsp_streams.clear()
 
 @sio.event
 async def start_detection(sid, data):
     """Start face detection for a client"""
     print(f"🔍 Starting face detection for client {sid}")
     detection_active[sid] = True
+
+    # Check if RTSP is configured and start RTSP processing
+    camera_config = config_manager.get_camera_config()
+    if camera_config.get('source') == 'rtsp' and camera_config.get('rtsp_url'):
+        # Start RTSP stream processing with detection in background
+        import asyncio
+        asyncio.create_task(process_rtsp_with_detection(sid, camera_config['rtsp_url']))
+
     await sio.emit('detection_started', {'status': 'started'}, to=sid)
+
 
 @sio.event
 async def start_video_stream(sid, data):
@@ -130,6 +152,43 @@ async def unregister_welcome_screen(sid, data):
     if sid in welcome_screens:
         del welcome_screens[sid]
     await sio.emit('welcome_screen_unregistered', {'status': 'unregistered'}, to=sid)
+
+@sio.event
+async def request_background_image(sid, data):
+    """Send background image data to welcome screen"""
+    print(f"🖼️ Background image requested by welcome screen: {sid}")
+    try:
+        display_config = config_manager.get_display_config()
+        background_image_path = display_config.get('background_image')
+        use_background_image = display_config.get('use_background_image', False)
+
+        if background_image_path and use_background_image and os.path.exists(background_image_path):
+            # Read file and convert to base64
+            with open(background_image_path, 'rb') as f:
+                contents = f.read()
+
+            # Determine MIME type from file extension
+            file_extension = background_image_path.split('.')[-1].lower()
+            mime_type_map = {
+                'png': 'image/png',
+                'jpg': 'image/jpeg',
+                'jpeg': 'image/jpeg',
+                'webp': 'image/webp'
+            }
+            mime_type = mime_type_map.get(file_extension, 'image/jpeg')
+
+            image_base64 = base64.b64encode(contents).decode('utf-8')
+            image_data_url = f"data:{mime_type};base64,{image_base64}"
+
+            await sio.emit('background_image_data', {
+                'backgroundImage': image_data_url,
+                'useBackgroundImage': True
+            }, to=sid)
+            print(f"✅ Sent background image data to {sid}")
+        else:
+            print(f"ℹ️ No background image available for {sid}")
+    except Exception as e:
+        print(f"❌ Error sending background image to {sid}: {e}")
 
 @sio.event
 async def process_frame(sid, data):
@@ -170,21 +229,21 @@ async def process_frame(sid, data):
                     best_match = None
                     highest_score = 0
 
-                    for student_id, ref_feature in face_recognizer.dictionary.items():
+                    for person_id, ref_feature in face_recognizer.dictionary.items():
                         score = face_recognizer.face_recognizer.match(feature, ref_feature)
                         if score > face_recognizer.thresold and score > highest_score:
                             highest_score = score
-                            student_name = db.get_student_name(student_id)
+                            person_name = db.get_person_name(person_id)
                             best_match = {
-                                'student_id': student_id,
-                                'student_name': student_name,
+                                'person_id': person_id,
+                                'person_name': person_name,
                                 'confidence': float(score)
                             }
 
                     if best_match:
                         result.update({
-                            'student_id': best_match['student_id'],
-                            'student_name': best_match['student_name'],
+                            'person_id': best_match['person_id'],
+                            'person_name': best_match['person_name'],
                             'match_confidence': best_match['confidence'],
                             'recognized': True
                         })
@@ -193,9 +252,9 @@ async def process_frame(sid, data):
                         recognition_data = {
                             'type': 'recognition',
                             'user': {
-                                'student_id': best_match['student_id'],
-                                'student_name': best_match['student_name'],
-                                'name': best_match['student_name'],
+                                'person_id': best_match['person_id'],
+                                'person_name': best_match['person_name'],
+                                'name': best_match['person_name'],
                                 'confidence': best_match['confidence'],
                                 'photo': None  # Could add photo path here if needed
                             },
@@ -209,8 +268,8 @@ async def process_frame(sid, data):
 
                     else:
                         result.update({
-                            'student_id': 'UNKNOWN',
-                            'student_name': 'Unknown Person',
+                            'person_id': 'UNKNOWN',
+                            'person_name': 'Unknown Person',
                             'match_confidence': 0.0,
                             'recognized': False
                         })
@@ -230,6 +289,198 @@ async def process_frame(sid, data):
     except Exception as e:
         print(f"❌ Error processing frame for {sid}: {e}")
         await sio.emit('detection_error', {"error": str(e)}, to=sid)
+
+
+async def process_rtsp_with_detection(sid, rtsp_url):
+    """Process RTSP stream with face detection - no frontend frame processing needed"""
+    import asyncio
+
+    print(f"📡 Starting RTSP detection processing for {sid}: {rtsp_url}")
+
+    try:
+        cap = cv2.VideoCapture(rtsp_url)
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
+        if not cap.isOpened():
+            print(f"❌ Failed to open RTSP stream: {rtsp_url}")
+            await sio.emit('detection_error', {"error": f"Failed to connect to RTSP stream: {rtsp_url}"}, to=sid)
+            return
+
+        print(f"✅ RTSP detection stream opened successfully: {rtsp_url}")
+        frame_count = 0
+
+        while detection_active.get(sid, False):
+            ret, frame = cap.read()
+            if not ret:
+                print(f"⚠️ Failed to read frame from RTSP detection stream")
+                await asyncio.sleep(0.1)
+                continue
+
+            frame_count += 1
+
+            try:
+                # Run face detection on backend
+                frame_features, faces = face_recognizer.recognize_face(frame)
+
+                # Debug logging for face recognition
+                if frame_count % 10 == 0:  # Log every 10 frames
+                    print(f"🔍 RTSP Frame {frame_count}: Found {len(faces) if faces is not None else 0} faces")
+                    print(f"🧠 Face dictionary loaded: {len(face_recognizer.dictionary) if face_recognizer.dictionary else 0} people")
+                    if face_recognizer.dictionary:
+                        print(f"🧑 Registered people: {list(face_recognizer.dictionary.keys())}")
+                        print(f"🎯 Recognition threshold: {face_recognizer.thresold}")
+                    else:
+                        print("⚠️ No face dictionary loaded - check if people are registered")
+
+                # Process detection results
+                detection_results = []
+                if faces is not None and len(faces) > 0:
+                    for i, face in enumerate(faces):
+                        x1, y1, w, h = face[:4].astype(int)
+                        x2, y2 = x1 + w, y1 + h
+
+                        result = {
+                            'bbox': [int(x1), int(y1), int(x2), int(y2)],
+                            'confidence': float(face[14]) if len(face) > 14 else 0.0
+                        }
+
+                        # Check for face recognition match
+                        if i < len(frame_features) and face_recognizer.dictionary:
+                            feature = frame_features[i]
+                            best_match = None
+                            highest_score = 0
+
+                            for person_id, ref_feature in face_recognizer.dictionary.items():
+                                score = face_recognizer.face_recognizer.match(feature, ref_feature)
+
+                                # Debug logging for recognition scores
+                                person_name = db.get_person_name(person_id)
+                                print(f"🔍 RTSP Recognition: {person_name} -> Score: {score:.3f} (threshold: {face_recognizer.thresold})")
+
+                                if score > face_recognizer.thresold and score > highest_score:
+                                    highest_score = score
+                                    best_match = {
+                                        'person_id': person_id,
+                                        'person_name': person_name,
+                                        'confidence': float(score)
+                                    }
+
+                            if best_match:
+                                result.update({
+                                    'person_id': best_match['person_id'],
+                                    'person_name': best_match['person_name'],
+                                    'match_confidence': best_match['confidence'],
+                                    'recognized': True
+                                })
+
+                                # Store latest recognition for polling endpoints
+                                recognition_data = {
+                                    'type': 'recognition',
+                                    'user': {
+                                        'person_id': best_match['person_id'],
+                                        'person_name': best_match['person_name'],
+                                        'name': best_match['person_name'],
+                                        'confidence': best_match['confidence'],
+                                        'photo': None
+                                    },
+                                    'timestamp': time.time()
+                                }
+
+                                latest_recognition.update(recognition_data)
+
+                                # Broadcast recognition to all welcome screens
+                                for welcome_screen_sid in welcome_screens.keys():
+                                    await sio.emit('recognition_result', recognition_data, to=welcome_screen_sid)
+
+                            else:
+                                result.update({
+                                    'person_id': 'UNKNOWN',
+                                    'person_name': 'Unknown Person',
+                                    'match_confidence': 0.0,
+                                    'recognized': False
+                                })
+
+                        detection_results.append(result)
+
+                # Send detection results to frontend
+                await sio.emit('face_detection_result', {
+                    "faces": detection_results,
+                    "timestamp": time.time(),
+                    "frame_size": {"width": frame.shape[1], "height": frame.shape[0]}
+                }, to=sid)
+
+                if len(detection_results) > 0:
+                    print(f"🔍 RTSP Detection: Sent {len(detection_results)} results to {sid}")
+
+            except Exception as e:
+                print(f"❌ Error in RTSP detection processing: {e}")
+
+            # Process at ~10 FPS to reduce load
+            await asyncio.sleep(0.1)
+
+        print(f"🛑 RTSP detection processing stopped for {sid}")
+        cap.release()
+
+    except Exception as e:
+        print(f"❌ Error in RTSP detection stream: {e}")
+        await sio.emit('detection_error', {"error": f"RTSP detection error: {str(e)}"}, to=sid)
+
+
+
+
+# Camera utility functions
+def get_camera_index_from_device_id(device_id):
+    """
+    Map a device ID to an OpenCV camera index.
+    This is a best-effort approach since OpenCV doesn't directly support device IDs.
+    """
+    try:
+        import platform
+        import subprocess
+
+        if platform.system() == "Darwin":  # macOS
+            # For macOS, try to enumerate cameras and match
+            for i in range(10):  # Check first 10 indices
+                cap = cv2.VideoCapture(i)
+                if cap.isOpened():
+                    ret, frame = cap.read()
+                    cap.release()
+                    if ret and frame is not None:
+                        # This camera works, but we can't easily match device IDs
+                        # For now, return the index order they appear in
+                        return i
+                else:
+                    cap.release()
+        else:
+            # For other systems, try indices in order
+            for i in range(10):
+                cap = cv2.VideoCapture(i)
+                if cap.isOpened():
+                    ret, frame = cap.read()
+                    cap.release()
+                    if ret and frame is not None:
+                        return i
+                else:
+                    cap.release()
+
+        return None
+    except Exception as e:
+        print(f"Error mapping device ID to camera index: {e}")
+        return None
+
+# Simple camera testing without enumeration
+def test_single_camera(index):
+    """Test a single camera index"""
+    try:
+        cap = cv2.VideoCapture(index)
+        if cap.isOpened():
+            ret, frame = cap.read()
+            cap.release()
+            return ret and frame is not None
+        cap.release()
+        return False
+    except:
+        return False
 
 # Load RTSP settings
 def load_rtsp_settings():
@@ -255,9 +506,9 @@ class LoginRequest(BaseModel):
     admin_id: str
     password: str
 
-class StudentRegistration(BaseModel):
-    student_id: str
-    student_name: str
+class personRegistration(BaseModel):
+    person_id: str
+    person_name: str
     image_data: str
 
 class AdminPasswordChange(BaseModel):
@@ -268,7 +519,18 @@ class AdminPasswordChange(BaseModel):
     confirm_password: str
 
 class CameraSettings(BaseModel):
-    rtsp_url: Optional[str] = ""
+    source: Optional[str] = "default"
+    device_id: Optional[str] = None
+    rtsp_url: Optional[str] = None
+
+class DisplaySettings(BaseModel):
+    timer: Optional[int] = 5
+    background_color: Optional[str] = "#FFE8D4"
+    font_color: Optional[str] = "#032F5C"
+    use_background_image: Optional[bool] = False
+    background_image: Optional[str] = None
+    font_family: Optional[str] = "Inter"
+    font_size: Optional[str] = "medium"
 
 class FaceDetectionRequest(BaseModel):
     image_data: str
@@ -324,33 +586,33 @@ async def change_admin_password(request: AdminPasswordChange):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# Student management endpoints
-@app.get("/api/students")
-async def get_students():
-    """Get all registered students"""
+# person management endpoints
+@app.get("/api/people")
+async def get_people():
+    """Get all registered people"""
     try:
-        student_ids = db.get_all_student_ids()
-        students = []
+        person_ids = db.get_all_person_ids()
+        people = []
 
-        for student_id in student_ids:
-            student_name = db.get_student_name(student_id)
-            if student_name:
-                students.append({
-                    'id': student_id,
-                    'name': student_name
+        for person_id in person_ids:
+            person_name = db.get_person_name(person_id)
+            if person_name:
+                people.append({
+                    'id': person_id,
+                    'name': person_name
                 })
 
         return {
             'success': True,
-            'students': students,
-            'total': len(students)
+            'people': people,
+            'total': len(people)
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/api/students/register")
-async def register_student(request: StudentRegistration):
-    """Register a new student"""
+@app.post("/api/people/register")
+async def register_person(request: personRegistration):
+    """Register a new person"""
     try:
         # Decode base64 image
         if request.image_data.startswith('data:image'):
@@ -365,7 +627,7 @@ async def register_student(request: StudentRegistration):
         image_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
 
         # Use the face recognizer to detect faces
-        features, faces = face_recognizer.recognize_face(image_cv, f"{request.student_id}.png")
+        features, faces = face_recognizer.recognize_face(image_cv, f"{request.person_id}.png")
 
         if faces is None or len(faces) == 0:
             return {
@@ -379,28 +641,28 @@ async def register_student(request: StudentRegistration):
                 'message': 'Multiple faces detected. Please use an image with only one face.'
             }
 
-        # Save student to database
-        db_result = db.insert_into_student(request.student_id, request.student_name)
+        # Save person to database
+        db_result = db.insert_into_person(request.person_id, request.person_name)
 
         if 'already exist' in db_result:
             return {
                 'success': False,
-                'message': 'Student ID already exists'
+                'message': 'person ID already exists'
             }
 
         # Save face image
         os.makedirs('images', exist_ok=True)
-        image_path = f'images/{request.student_id}.png'
+        image_path = f'images/{request.person_id}.png'
         cv2.imwrite(image_path, image_cv)
 
-        # Recreate features dictionary with new student
+        # Recreate features dictionary with new person
         face_recognizer.create_features()
 
         return {
             'success': True,
-            'message': 'Student registered successfully',
-            'student_id': request.student_id,
-            'student_name': request.student_name
+            'message': 'person registered successfully',
+            'person_id': request.person_id,
+            'person_name': request.person_name
         }
 
     except Exception as e:
@@ -409,22 +671,22 @@ async def register_student(request: StudentRegistration):
             'message': f'Registration failed: {str(e)}'
         }
 
-@app.delete("/api/students/{student_id}")
-async def delete_student(student_id: str):
-    """Delete a student"""
+@app.delete("/api/people/{person_id}")
+async def delete_person(person_id: str):
+    """Delete a person"""
     try:
-        result = db.delete_data_from_student(student_id)
+        result = db.delete_data_from_person(person_id)
         if result:
             # Recreate features dictionary after deletion
             face_recognizer.create_features()
             return {
                 'success': True,
-                'message': 'Student deleted successfully'
+                'message': 'person deleted successfully'
             }
         else:
             return {
                 'success': False,
-                'message': 'Failed to delete student'
+                'message': 'Failed to delete person'
             }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -466,35 +728,35 @@ async def detect_faces(request: FaceDetectionRequest):
                     highest_score = 0
 
                     # Compare with all known faces
-                    for student_id, ref_feature in face_recognizer.dictionary.items():
+                    for person_id, ref_feature in face_recognizer.dictionary.items():
                         score = face_recognizer.face_recognizer.match(feature, ref_feature)
                         if score > face_recognizer.thresold and score > highest_score:
                             highest_score = score
-                            student_name = db.get_student_name(student_id)
+                            person_name = db.get_person_name(person_id)
                             best_match = {
-                                'student_id': student_id,
-                                'student_name': student_name,
+                                'person_id': person_id,
+                                'person_name': person_name,
                                 'confidence': float(score)
                             }
 
                     if best_match:
                         result.update({
-                            'student_id': best_match['student_id'],
-                            'student_name': best_match['student_name'],
+                            'person_id': best_match['person_id'],
+                            'person_name': best_match['person_name'],
                             'match_confidence': best_match['confidence'],
                             'recognized': True
                         })
                     else:
                         result.update({
-                            'student_id': 'UNKNOWN',
-                            'student_name': 'Unknown Person',
+                            'person_id': 'UNKNOWN',
+                            'person_name': 'Unknown Person',
                             'match_confidence': 0.0,
                             'recognized': False
                         })
                 else:
                     result.update({
-                        'student_id': 'UNKNOWN',
-                        'student_name': 'Unknown Person',
+                        'person_id': 'UNKNOWN',
+                        'person_name': 'Unknown Person',
                         'match_confidence': 0.0,
                         'recognized': False
                     })
@@ -542,10 +804,13 @@ async def get_latest_recognition():
 async def get_camera_settings():
     """Get current camera settings"""
     try:
-        rtsp_url = load_rtsp_settings()
+        camera_config = config_manager.get_camera_config()
         return {
-            'rtsp_url': rtsp_url,
-            'use_webcam': not bool(rtsp_url)
+            'success': True,
+            'source': camera_config.get('source', 'default'),
+            'device_id': camera_config.get('device_id'),
+            'rtsp_url': camera_config.get('rtsp_url'),
+            'use_webcam': camera_config.get('source') != 'rtsp'
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -554,11 +819,29 @@ async def get_camera_settings():
 async def update_camera_settings(request: CameraSettings):
     """Update camera settings"""
     try:
-        save_rtsp_settings(request.rtsp_url)
-        return {
-            'success': True,
-            'message': 'Camera source updated successfully'
-        }
+        # Update config file
+        success = config_manager.set_camera_config(
+            source=request.source,
+            device_id=request.device_id,
+            rtsp_url=request.rtsp_url
+        )
+
+        # Also save to legacy pickle file if RTSP
+        if request.source == 'rtsp' and request.rtsp_url:
+            save_rtsp_settings(request.rtsp_url)
+        elif request.source != 'rtsp':
+            save_rtsp_settings('')  # Clear RTSP settings
+
+        if success:
+            return {
+                'success': True,
+                'message': 'Camera settings updated successfully'
+            }
+        else:
+            return {
+                'success': False,
+                'message': 'Failed to save camera settings'
+            }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -566,39 +849,248 @@ async def update_camera_settings(request: CameraSettings):
 async def test_camera(request: CameraSettings):
     """Test camera connection"""
     try:
-        source = request.rtsp_url if request.rtsp_url else 0
+        print(f"🔍 Testing camera - source: {request.source}, device_id: {request.device_id}, rtsp_url: {request.rtsp_url}")
+
+        # Determine the video source based on settings
+        if request.source == 'rtsp':
+            if not request.rtsp_url:
+                return {
+                    'success': False,
+                    'message': 'RTSP URL is required for RTSP camera source'
+                }
+            source = request.rtsp_url
+            print(f"📡 Testing RTSP camera: {request.rtsp_url}")
+        elif request.source == 'default':
+            source = 0
+            print(f"📷 Testing default camera (index 0)")
+        elif request.source == 'device' and request.device_id:
+            print(f"📷 Testing device with ID: {request.device_id}")
+
+            # Simple mapping based on device ID patterns
+            # Based on testing: BRIO is at OpenCV index 0, MacBook Air is at index 1
+            # Logitech BRIO device ID starts with 'd16a9c26...' → camera index 0
+            # MacBook Air device ID starts with '883bf618...' → camera index 1
+
+            if request.device_id.startswith('d16a9c26'):
+                source = 0  # Logitech BRIO → OpenCV index 0
+                print(f"📷 Detected Logitech BRIO → using camera index 0")
+            elif request.device_id.startswith('883bf618'):
+                source = 1  # MacBook Air → OpenCV index 1
+                print(f"📷 Detected MacBook Air Camera → using camera index 1")
+            else:
+                # For other devices, use a simple hash to map to different indices
+                import hashlib
+                device_hash = int(hashlib.md5(request.device_id.encode()).hexdigest()[:8], 16)
+                source = device_hash % 3  # Map to 0, 1, or 2
+                print(f"📷 Unknown device → hash mapping to camera index {source}")
+
+            print(f"📷 Device {request.device_id[:12]}... → camera index: {source}")
+        else:
+            source = 0
+
+        # Test the camera
         cap = cv2.VideoCapture(source)
 
-        if cap.isOpened():
-            ret, frame = cap.read()
+        try:
+            if cap.isOpened():
+                ret, frame = cap.read()
+                if ret and frame is not None:
+                    print(f"✅ Camera test successful for source: {source}")
+                    return {
+                        'success': True,
+                        'message': f'Camera connection successful (source: {source})'
+                    }
+                else:
+                    print(f"❌ Camera opened but couldn't read frame from source: {source}")
+                    return {
+                        'success': False,
+                        'message': f'Camera opened but no video signal (source: {source})'
+                    }
+            else:
+                print(f"❌ Couldn't open camera source: {source}")
+                return {
+                    'success': False,
+                    'message': f'Failed to open camera (source: {source})'
+                }
+        finally:
             cap.release()
 
-            if ret and frame is not None:
-                return {
-                    'success': True,
-                    'message': 'Camera connection successful'
-                }
-
-        return {
-            'success': False,
-            'message': 'Failed to connect to camera'
-        }
-
     except Exception as e:
+        print(f"❌ Camera test exception: {str(e)}")
         return {
             'success': False,
             'message': f'Camera test failed: {str(e)}'
         }
+
+# Removed complex camera enumeration endpoint
+
+# Display settings endpoints
+@app.get("/api/display/settings")
+async def get_display_settings():
+    """Get current display settings"""
+    try:
+        display_config = config_manager.get_display_config()
+        return {
+            'success': True,
+            'timer': display_config.get('timer', 5),
+            'background_color': display_config.get('background_color', '#FFE8D4'),
+            'font_color': display_config.get('font_color', '#032F5C'),
+            'use_background_image': display_config.get('use_background_image', False),
+            'has_background_image': bool(display_config.get('background_image') and
+                                       os.path.exists(display_config.get('background_image', ''))),
+            'font_family': display_config.get('font_family', 'Inter'),
+            'font_size': display_config.get('font_size', 'medium')
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/display/settings")
+async def update_display_settings(request: DisplaySettings):
+    """Update display settings"""
+    try:
+        success = config_manager.set_display_config(
+            timer=request.timer,
+            background_color=request.background_color,
+            font_color=request.font_color,
+            use_background_image=request.use_background_image,
+            background_image=request.background_image,
+            font_family=request.font_family,
+            font_size=request.font_size
+        )
+
+        if success:
+            return {
+                'success': True,
+                'message': 'Display settings updated successfully'
+            }
+        else:
+            return {
+                'success': False,
+                'message': 'Failed to save display settings'
+            }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Background image endpoints
+@app.post("/api/display/upload-background")
+async def upload_background_image(file: UploadFile = File(...)):
+    """Upload a background image for the welcome screen"""
+    try:
+        print(f"🔍 Received upload request - file: {file}")
+        print(f"📄 File details - filename: {file.filename}, content_type: {file.content_type}")
+
+        # Check if file was provided
+        if not file or not file.filename:
+            print("❌ No file provided")
+            return {
+                'success': False,
+                'message': 'No file provided'
+            }
+
+        # Validate file type
+        allowed_types = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp']
+        if file.content_type not in allowed_types:
+            return {
+                'success': False,
+                'message': f'Invalid file type. Allowed types: {", ".join(allowed_types)}'
+            }
+
+        # Create backgrounds directory if it doesn't exist
+        os.makedirs("images/backgrounds", exist_ok=True)
+
+        # Read and save the file
+        contents = await file.read()
+
+        # Save to file system
+        file_extension = file.filename.split('.')[-1]
+        file_path = f"images/backgrounds/welcome_background.{file_extension}"
+        with open(file_path, "wb") as f:
+            f.write(contents)
+
+        # Convert to base64 for immediate use (but don't store in config)
+        image_base64 = base64.b64encode(contents).decode('utf-8')
+        image_data_url = f"data:{file.content_type};base64,{image_base64}"
+
+        # Store only the file path in config
+        config_manager.set_display_config(
+            use_background_image=True,
+            background_image=file_path
+        )
+
+        # Broadcast new background image to all connected welcome screens
+        if welcome_screens:
+            for screen_sid in welcome_screens.keys():
+                await sio.emit('background_image_data', {
+                    'backgroundImage': image_data_url,
+                    'useBackgroundImage': True
+                }, to=screen_sid)
+
+        return {
+            'success': True,
+            'message': 'Background image uploaded successfully',
+            'image_url': image_data_url
+        }
+    except Exception as e:
+        print(f"❌ Upload error: {e}")
+        print(f"❌ Upload error type: {type(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/display/delete-background")
+async def delete_background_image():
+    """Delete the current background image"""
+    try:
+        # Delete background images
+        backgrounds_dir = "images/backgrounds"
+        if os.path.exists(backgrounds_dir):
+            for file in os.listdir(backgrounds_dir):
+                if file.startswith("welcome_background"):
+                    os.remove(os.path.join(backgrounds_dir, file))
+
+        # Update config to clear background image settings
+        config_manager.set_display_config(
+            use_background_image=False,
+            background_image=None
+        )
+
+        # Broadcast to all connected welcome screens that background was deleted
+        if welcome_screens:
+            for screen_sid in welcome_screens.keys():
+                await sio.emit('background_image_data', {
+                    'backgroundImage': None,
+                    'useBackgroundImage': False
+                }, to=screen_sid)
+
+        return {
+            'success': True,
+            'message': 'Background image deleted successfully'
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/display/background-image")
+async def get_background_image():
+    """Get the current background image if it exists"""
+    try:
+        backgrounds_dir = "backgrounds"
+        if os.path.exists(backgrounds_dir):
+            for file in os.listdir(backgrounds_dir):
+                if file.startswith("welcome_background"):
+                    file_path = os.path.join(backgrounds_dir, file)
+                    return FileResponse(file_path)
+
+        raise HTTPException(status_code=404, detail="No background image found")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 # System endpoints
 @app.get("/api/system/status")
 async def get_system_status():
     """Get system status"""
     try:
-        students = await get_students()
+        people = await get_people()
         return {
             "status": "online",
-            "total_students": students.get("total", 0),
+            "total_people": people.get("total", 0),
             "models_loaded": True,
             "database_connected": True
         }
@@ -614,6 +1106,101 @@ async def get_system_status():
 async def health_check():
     """Health check endpoint"""
     return {"status": "healthy", "timestamp": get_current_datetime_other_format()}
+
+@app.get("/api/rtsp/stream")
+async def rtsp_stream(request: Request):
+    """Stream RTSP video feed as HTTP MJPEG stream"""
+    camera_config = config_manager.get_camera_config()
+
+    if camera_config.get('source') != 'rtsp' or not camera_config.get('rtsp_url'):
+        raise HTTPException(status_code=400, detail="RTSP not configured")
+
+    rtsp_url = camera_config['rtsp_url']
+
+    # Create unique stream ID for this request
+    stream_id = f"rtsp_{id(request)}"
+    rtsp_streams[stream_id] = True
+
+    print(f"📡 Starting RTSP stream {stream_id} from: {rtsp_url}")
+
+    def generate_frames():
+        cap = cv2.VideoCapture(rtsp_url)
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Reduce latency
+
+        if not cap.isOpened():
+            print(f"❌ Failed to open RTSP stream: {rtsp_url}")
+            return
+
+        print(f"✅ RTSP stream {stream_id} opened successfully")
+
+        try:
+            while rtsp_streams.get(stream_id, False):  # Check if stream should continue
+                ret, frame = cap.read()
+                if not ret:
+                    break
+
+                # Encode frame as JPEG
+                _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+
+                # Yield frame in multipart format
+                yield (b'--frame\r\n'
+                       b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
+
+        finally:
+            cap.release()
+            if stream_id in rtsp_streams:
+                del rtsp_streams[stream_id]
+            print(f"🛑 RTSP stream {stream_id} closed")
+
+    return StreamingResponse(
+        generate_frames(),
+        media_type="multipart/x-mixed-replace; boundary=frame"
+    )
+
+@app.get("/api/rtsp/test")
+async def test_rtsp():
+    """Test RTSP connection without streaming"""
+    camera_config = config_manager.get_camera_config()
+
+    if camera_config.get('source') != 'rtsp' or not camera_config.get('rtsp_url'):
+        return {"success": False, "error": "RTSP not configured"}
+
+    rtsp_url = camera_config['rtsp_url']
+    print(f"📡 Testing RTSP connection: {rtsp_url}")
+
+    try:
+        cap = cv2.VideoCapture(rtsp_url)
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
+        if not cap.isOpened():
+            cap.release()
+            return {"success": False, "error": "Failed to open RTSP stream"}
+
+        # Try to read one frame
+        ret, frame = cap.read()
+        cap.release()
+
+        if not ret or frame is None:
+            return {"success": False, "error": "Failed to read frame from RTSP stream"}
+
+        height, width = frame.shape[:2]
+        return {
+            "success": True,
+            "message": "RTSP connection successful",
+            "frame_size": {"width": int(width), "height": int(height)},
+            "rtsp_url": rtsp_url
+        }
+
+    except Exception as e:
+        return {"success": False, "error": f"RTSP test failed: {str(e)}"}
+
+@app.post("/api/rtsp/stop")
+async def stop_rtsp_streams():
+    """Stop all active RTSP streams"""
+    stream_count = len(rtsp_streams)
+    rtsp_streams.clear()
+    print(f"🛑 Stopped {stream_count} RTSP streams")
+    return {"success": True, "stopped_streams": stream_count}
 
 if __name__ == "__main__":
     # Run the server with SocketIO

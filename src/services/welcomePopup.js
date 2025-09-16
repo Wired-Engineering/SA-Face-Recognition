@@ -1,5 +1,5 @@
-// Welcome Screen Popup Service
-// Manages opening and closing of the welcome screen popup window
+// Welcome Canvas Popup Service
+// Manages opening and closing of the Welcome Canvas popup window
 
 class WelcomePopupService {
   constructor() {
@@ -8,7 +8,11 @@ class WelcomePopupService {
     this.settings = {
       backgroundColor: '#E1EBFF',
       fontColor: '#00243D',
-      timer: 5
+      timer: 5,
+      useBackgroundImage: false,
+      backgroundImage: null,
+      fontFamily: 'Inter',
+      fontSize: 'medium'
     };
   }
 
@@ -17,13 +21,13 @@ class WelcomePopupService {
     this.settings = { ...this.settings, ...newSettings };
   }
 
-  // Open welcome screen popup (only if not already open)
+  // Open Welcome Canvas popup (only if not already open)
   open(displaySettings = {}) {
     // If popup is already open, just update settings and return existing window
     if (this.isPopupOpen()) {
       this.updateSettings(displaySettings);
       this.sendSettingsUpdate();
-      console.log('✅ Welcome screen popup already open, updated settings');
+      console.log('✅ Welcome Canvas popup already open, updated settings');
       return this.popupWindow;
     }
 
@@ -51,14 +55,18 @@ class WelcomePopupService {
       'directories=no'
     ].join(',');
 
-    // Build URL with settings as query parameters
+    // Build URL with settings as query parameters (exclude large backgroundImage)
     const baseUrl = window.location.origin + '/welcome-popup.html';
     const params = new URLSearchParams({
       backgroundColor: this.settings.backgroundColor,
       fontColor: this.settings.fontColor,
       timer: this.settings.timer.toString(),
-      persistent: 'true'  // Flag for persistent mode
+      persistent: 'true',  // Flag for persistent mode
+      useBackgroundImage: this.settings.useBackgroundImage ? 'true' : 'false',
+      fontFamily: this.settings.fontFamily || 'Inter',
+      fontSize: this.settings.fontSize || 'medium'
     });
+
     const popupUrl = `${baseUrl}?${params.toString()}`;
 
     try {
@@ -68,10 +76,12 @@ class WelcomePopupService {
       if (this.popupWindow) {
         this.isOpen = true;
 
+        // Background image will be sent via WebSocket when popup registers
+
         // Monitor popup window
         this.monitorPopup();
 
-        console.log('✅ Welcome screen popup opened in persistent mode');
+        console.log('✅ Welcome Canvas popup opened in persistent mode');
         return this.popupWindow;
       } else {
         console.error('❌ Failed to open popup window (popup blocked?)');
@@ -82,6 +92,7 @@ class WelcomePopupService {
       return null;
     }
   }
+
 
   // Send settings update to existing popup
   sendSettingsUpdate() {
@@ -101,7 +112,7 @@ class WelcomePopupService {
   close() {
     if (this.popupWindow && !this.popupWindow.closed) {
       this.popupWindow.close();
-      console.log('🔴 Welcome screen popup closed');
+      console.log('🔴 Welcome Canvas popup closed');
     }
     this.popupWindow = null;
     this.isOpen = false;
@@ -119,7 +130,7 @@ class WelcomePopupService {
         this.isOpen = false;
         this.popupWindow = null;
         clearInterval(checkInterval);
-        console.log('🔴 Welcome screen popup was closed');
+        console.log('🔴 Welcome Canvas popup was closed');
       }
     }, 1000);
   }
@@ -148,7 +159,7 @@ class WelcomePopupService {
   testPopup(displaySettings = {}) {
     const testUser = {
       name: 'John Doe',
-      student_id: 'STU001',
+      person_id: 'STU001',
       department: 'Computer Science',
       confidence: 0.95,
       photo: null

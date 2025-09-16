@@ -11,15 +11,14 @@ import {
   Text,
   FileInput,
   Alert,
-  Modal,
 } from '@mantine/core';
 import { useDisclosure } from '@mantine/hooks';
 import { IconUser, IconId, IconCamera, IconUpload, IconUserPlus, IconAlertCircle } from '@tabler/icons-react';
 import apiService, { imageUtils, webcamUtils } from '../services/api';
 
 export function RegistrationPage({ onRegister }) {
-  const [studentId, setStudentId] = useState('');
-  const [studentName, setStudentName] = useState('');
+  const [personId, setpersonId] = useState('');
+  const [personName, setpersonName] = useState('');
   const [photoFile, setPhotoFile] = useState(null);
   const [capturedPhoto, setCapturedPhoto] = useState(null);
   const [isCapturing] = useState(false);
@@ -28,14 +27,56 @@ export function RegistrationPage({ onRegister }) {
   const [success, setSuccess] = useState('');
   const [stream, setStream] = useState(null);
   const [opened, { open, close }] = useDisclosure(false);
+  const [cameraSettings, setCameraSettings] = useState(null);
 
   const videoRef = useRef(null);
+
+  // Fetch camera settings on component mount
+  useEffect(() => {
+    const fetchCameraSettings = async () => {
+      try {
+        const settings = await apiService.getCameraSettings();
+        if (settings.success) {
+          setCameraSettings(settings);
+        }
+      } catch (error) {
+        console.error('Failed to fetch camera settings:', error);
+        // Use default settings if fetch fails
+        setCameraSettings({ source: 'default', device_id: null, rtsp_url: null });
+      }
+    };
+
+    fetchCameraSettings();
+  }, []);
 
 
   const handleStartCapture = async () => {
     try {
       open();
-      const mediaStream = await webcamUtils.getUserMedia();
+
+      // Use configured camera settings
+      let mediaStream;
+      if (cameraSettings && cameraSettings.source === 'rtsp' && cameraSettings.rtsp_url) {
+        // For RTSP cameras, we can't use getUserMedia directly
+        // This would need a different implementation, possibly using a video element with the RTSP stream
+        setError('RTSP camera capture is not yet supported in registration. Please use file upload instead.');
+        close();
+        return;
+      } else {
+        // Use webcam with configured device ID if available
+        const constraints = {};
+        if (cameraSettings && cameraSettings.device_id) {
+          constraints.video = {
+            deviceId: { exact: cameraSettings.device_id },
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+            frameRate: { ideal: 30 },
+          };
+        }
+
+        mediaStream = await webcamUtils.getUserMedia(constraints);
+      }
+
       setStream(mediaStream);
       if (videoRef.current) {
         videoRef.current.srcObject = mediaStream;
@@ -64,7 +105,7 @@ export function RegistrationPage({ onRegister }) {
   };
 
   const handleRegister = async () => {
-    if (!studentId || !studentName || (!photoFile && !capturedPhoto)) {
+    if (!personId || !personName || (!photoFile && !capturedPhoto)) {
       setError('Please fill in all fields and provide a photo');
       return;
     }
@@ -84,20 +125,20 @@ export function RegistrationPage({ onRegister }) {
         imageData = capturedPhoto;
       }
 
-      const result = await apiService.registerStudent(studentId, studentName, imageData);
+      const result = await apiService.registerperson(personId, personName, imageData);
 
       if (result.success) {
-        setSuccess(`Student ${studentName} registered successfully!`);
+        setSuccess(`person ${personName} registered successfully!`);
         // Reset form
-        setStudentId('');
-        setStudentName('');
+        setpersonId('');
+        setpersonName('');
         setPhotoFile(null);
         setCapturedPhoto(null);
 
         // Call parent callback if provided
         onRegister?.({
-          id: studentId,
-          name: studentName,
+          id: personId,
+          name: personName,
           photo: imageData,
         });
       } else {
@@ -116,8 +157,8 @@ export function RegistrationPage({ onRegister }) {
       <Stack gap="xl" style={{ maxWidth: '600px' }}>
         {/* Header */}
         <Box ta="center" mb="md">
-          <Title order={2} c="rgb(0, 36, 61)" mb="xs">
-            Student Registration
+          <Title order={2} mb="xs">
+            person Registration
           </Title>
         </Box>
 
@@ -128,49 +169,52 @@ export function RegistrationPage({ onRegister }) {
           radius="md"
           style={{
             backgroundColor: 'white',
-            border: '1px solid rgb(0, 36, 61)',
           }}
         >
           <Stack gap="md">
-            <Title order={3} ta="center" c="rgb(0, 36, 61)" mb="md">
-              Register New Student
+            <Title order={3} ta="center" mb="md">
+              Register New person
             </Title>
 
-            {/* Student Information */}
+            {/* person Information */}
             <TextInput
               leftSection={<IconId size={16} />}
-              label="Student ID"
+              label="person ID"
               placeholder="Enter ID here"
-              value={studentId}
-              onChange={(event) => setStudentId(event.currentTarget.value)}
+              value={personId}
+              onChange={(event) => setpersonId(event.currentTarget.value)}
+              required
               styles={{
                 input: {
-                  borderColor: 'rgb(0, 36, 61)',
-                  minHeight: '30px',
+                  backgroundColor: 'white',
+                  border: '1px solid rgb(206, 212, 218)',
                   '&:focus': {
-                    borderColor: 'rgb(0, 170, 127)',
+                    borderColor: 'rgb(0, 36, 61)',
+                    outline: '2px solid rgb(0, 36, 61)',
+                    outlineOffset: '2px',
                   },
                 },
               }}
-              required
             />
 
             <TextInput
               leftSection={<IconUser size={16} />}
               label="Name"
               placeholder="Enter name here"
-              value={studentName}
-              onChange={(event) => setStudentName(event.currentTarget.value)}
+              value={personName}
+              onChange={(event) => setpersonName(event.currentTarget.value)}
+              required
               styles={{
                 input: {
-                  borderColor: 'rgb(0, 36, 61)',
-                  minHeight: '30px',
+                  backgroundColor: 'white',
+                  border: '1px solid rgb(206, 212, 218)',
                   '&:focus': {
-                    borderColor: 'rgb(0, 170, 127)',
+                    borderColor: 'rgb(0, 36, 61)',
+                    outline: '2px solid rgb(0, 36, 61)',
+                    outlineOffset: '2px',
                   },
                 },
               }}
-              required
             />
 
             {/* Photo Section */}
@@ -188,9 +232,22 @@ export function RegistrationPage({ onRegister }) {
                   onChange={setPhotoFile}
                   styles={{
                     input: {
-                      borderColor: 'rgb(0, 36, 61)',
+                      backgroundColor: 'white',
+                      border: '1px solid rgb(206, 212, 218)',
                       '&:focus': {
-                        borderColor: 'rgb(0, 170, 127)',
+                        borderColor: 'rgb(0, 36, 61)',
+                        outline: '2px solid rgb(0, 36, 61)',
+                        outlineOffset: '2px',
+                      },
+                      '&:focus-within': {
+                        borderColor: 'rgb(0, 36, 61)',
+                        outline: '2px solid rgb(0, 36, 61)',
+                        outlineOffset: '2px',
+                      },
+                      '&[data-with-focus]': {
+                        borderColor: 'rgb(0, 36, 61)',
+                        outline: '2px solid rgb(0, 36, 61)',
+                        outlineOffset: '2px',
                       },
                     },
                   }}
@@ -200,23 +257,39 @@ export function RegistrationPage({ onRegister }) {
                   leftSection={<IconCamera size={16} />}
                   onClick={handleStartCapture}
                   loading={isCapturing}
-                  variant="outline"
-                  style={{
-                    borderColor: 'rgb(0, 36, 61)',
-                    color: 'rgb(0, 36, 61)',
-                    fontFamily: 'Tahoma',
-                    fontWeight: 'bold',
-                    fontSize: '10pt',
-                    '&:hover': {
-                      backgroundColor: 'rgb(0, 170, 127)',
-                      color: 'white',
-                      borderColor: 'rgb(0, 170, 127)',
+                  variant="light"
+                  color="signature"
+                  disabled={cameraSettings && cameraSettings.source === 'rtsp'}
+                  styles={{
+                    root: {
+                      backgroundColor: 'rgba(0, 36, 61, 0.1)',
+                      color: 'rgb(0, 36, 61)',
+                      border: '1px solid rgb(0, 36, 61)',
+                      '&:hover': {
+                        backgroundColor: 'rgba(0, 36, 61, 0.2)',
+                      },
+                      '&:disabled': {
+                        backgroundColor: 'rgba(128, 128, 128, 0.1)',
+                        color: 'rgba(128, 128, 128, 0.6)',
+                        border: '1px solid rgba(128, 128, 128, 0.3)',
+                      },
                     },
                   }}
                 >
                   {isCapturing ? 'Capturing...' : 'Capture'}
                 </Button>
               </Group>
+
+              {/* RTSP Camera Information */}
+              {cameraSettings && cameraSettings.source === 'rtsp' && (
+                <Alert
+                  color="blue"
+                  title="RTSP Camera Configured"
+                  style={{ marginTop: '0.5rem' }}
+                >
+                  Camera capture is disabled because an RTSP camera is configured. Please use the file upload option instead.
+                </Alert>
+              )}
 
               {/* Photo Preview */}
               {(capturedPhoto || photoFile) && (
@@ -289,7 +362,7 @@ export function RegistrationPage({ onRegister }) {
             )}
 
             {/* Validation Alert */}
-            {!error && !success && (!studentId || !studentName || (!photoFile && !capturedPhoto)) && (
+            {!error && !success && (!personId || !personName || (!photoFile && !capturedPhoto)) && (
               <Alert
                 icon={<IconAlertCircle size={16} />}
                 color="orange"
@@ -305,17 +378,9 @@ export function RegistrationPage({ onRegister }) {
               onClick={handleRegister}
               loading={loading}
               fullWidth
-              style={{
-                backgroundColor: 'rgb(0, 36, 61)',
-                fontFamily: 'Tahoma',
-                fontWeight: 'bold',
-                fontSize: '10pt',
-                marginTop: '1rem',
-                '&:hover': {
-                  backgroundColor: 'rgb(0, 170, 127)',
-                },
-              }}
-              disabled={!studentId || !studentName || (!photoFile && !capturedPhoto) || loading}
+              color="signature"
+              style={{ marginTop: '1rem' }}
+              disabled={!personId || !personName || (!photoFile && !capturedPhoto) || loading}
             >
               {loading ? 'Registering...' : 'Register'}
             </Button>
@@ -342,11 +407,10 @@ export function RegistrationPage({ onRegister }) {
             backgroundColor: 'white',
             padding: '30px',
             borderRadius: '8px',
-            border: '1px solid rgb(0, 36, 61)',
             maxWidth: '500px',
             textAlign: 'center'
           }}>
-            <h2 style={{ color: 'rgb(0, 36, 61)', marginBottom: '10px' }}>Capture Student Photo</h2>
+            <h2 style={{ color: 'rgb(0, 36, 61)', marginBottom: '10px' }}>Capture person Photo</h2>
             <p style={{ color: 'rgb(0, 36, 61)', marginBottom: '20px', fontSize: '14px' }}>
               Position your face inside the green rectangle
             </p>
@@ -479,26 +543,21 @@ export function RegistrationPage({ onRegister }) {
             <div style={{ display: 'flex', gap: '10px', justifyContent: 'center' }}>
               <Button
                 onClick={handleCapturePhoto}
+                color="signature"
                 style={{
-                  backgroundColor: 'rgb(0, 36, 61)',
-                  color: 'white',
-                  border: 'none',
                   padding: '10px 20px',
                   borderRadius: '4px',
-                  cursor: 'pointer'
                 }}
               >
                 📷 Take Photo
               </Button>
               <Button
                 onClick={handleStopCapture}
+                color="signature"
+                variant="outline"
                 style={{
-                  backgroundColor: 'transparent',
-                  color: 'rgb(0, 36, 61)',
-                  border: '2px solid rgb(0, 36, 61)',
                   padding: '10px 20px',
                   borderRadius: '4px',
-                  cursor: 'pointer'
                 }}
               >
                 Cancel

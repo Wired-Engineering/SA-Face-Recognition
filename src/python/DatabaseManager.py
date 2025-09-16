@@ -8,7 +8,7 @@ class MySqlite3Manager:
         self.dbname="system/Attendance.db"
         self.create_database()
         self.create_table_admin()
-        self.create_table_student()
+        self.create_table_person()
         self.insert_into_admin()
     def connect(self):
         self.con=sqlite3.connect(self.dbname)
@@ -31,13 +31,13 @@ class MySqlite3Manager:
             print('Admin table created')
         except Exception as e:
             print(e)
-    def create_table_student(self):
+    def create_table_person(self):
         self.connect()
-        command = f'''CREATE TABLE STUDENT(Id TEXT, Name TEXT)'''
+        command = f'''CREATE TABLE PERSON(Id TEXT, Name TEXT)'''
         try:
             self.cursor.execute(command)
             self.con.commit()
-            print('Student table created')
+            print('Person table created')
         except Exception as e:
             print(e)
 
@@ -59,19 +59,19 @@ class MySqlite3Manager:
                 print('data entered in admin table')
             except Exception as e:
                 print(e)
-    def insert_into_student(self, id_, name):
+    def insert_into_person(self, id_, name):
         self.connect()
-        command = "SELECT * FROM STUDENT WHERE (Id) = ? "
+        command = "SELECT * FROM PERSON WHERE (Id) = ? "
         self.cursor.execute(command, (id_,))
         rows = self.cursor.fetchall()
         if rows:
             return "Id already exist"
-        command_insertvalue = f"insert into STUDENT (Id,Name) values (?, ?)"
+        command_insertvalue = f"insert into PERSON (Id,Name) values (?, ?)"
         try:
             self.cursor.execute(command_insertvalue, (id_,name))
             self.con.commit()
             self.con.close()
-            return "New student Added"
+            return "New person Added"
         except Exception as e:
             print(e)
     
@@ -97,7 +97,7 @@ class MySqlite3Manager:
    
     def get_id_from_name(self, name):
         self.connect()
-        command = "SELECT * FROM STUDENT WHERE (Name) = ? "
+        command = "SELECT * FROM PERSON WHERE (Name) = ? "
         self.cursor.execute(command, (name,))
         rows = self.cursor.fetchall()
         if rows:
@@ -108,7 +108,7 @@ class MySqlite3Manager:
     
     def get_name_from_id(self, id_):
         self.connect()
-        command = "SELECT * FROM STUDENT WHERE (Id) = ? "
+        command = "SELECT * FROM PERSON WHERE (Id) = ? "
         self.cursor.execute(command, (id_,))
         rows = self.cursor.fetchall()
         if rows:
@@ -117,9 +117,9 @@ class MySqlite3Manager:
             return name
         return None
     
-    def get_student_name(self, id_):
+    def get_person_name(self, id_):
         self.connect()
-        command = "SELECT * FROM STUDENT WHERE (Id) = ? "
+        command = "SELECT * FROM PERSON WHERE (Id) = ? "
         self.cursor.execute(command, (id_,))
         rows = self.cursor.fetchall()
         if rows:
@@ -128,15 +128,15 @@ class MySqlite3Manager:
             return name
         return None
     
-    def get_student_list(self):
+    def get_person_list(self):
         self.connect()
-        command = "SELECT * FROM STUDENT "
+        command = "SELECT * FROM PERSON "
         self.cursor.execute(command)
         rows = self.cursor.fetchall()
-        student_list=[]
+        person_list=[]
         if rows:
-            student_list=[row[0] for row in rows]
-        return student_list
+            person_list=[row[0] for row in rows]
+        return person_list
     def get_admin_name(self, id_):
         self.connect()
         command = "SELECT * FROM ADMIN WHERE (ID) = ? "
@@ -166,9 +166,9 @@ class MySqlite3Manager:
             return 'previous admin id or password not matched'
     
 
-    def get_all_student_ids(self,):
+    def get_all_person_ids(self,):
         self.connect()
-        df = pd.read_sql_query(f"SELECT * FROM STUDENT", self.con)
+        df = pd.read_sql_query(f"SELECT * FROM PERSON", self.con)
         self.con.close()
         return list(df['Id'].values)
     def get_attendance_data(self,):
@@ -176,9 +176,9 @@ class MySqlite3Manager:
         df = pd.read_sql_query(f"SELECT * FROM ATTENDANCE", self.con)
         return df
         
-    def total_student(self)->str:
+    def total_person(self)->str:
         self.connect()
-        df = pd.read_sql_query(f"SELECT * FROM STUDENT", self.con)
+        df = pd.read_sql_query(f"SELECT * FROM PERSON", self.con)
         self.con.close()
         return str(len(df))
     def total_data_attendance(self)->str:
@@ -187,11 +187,11 @@ class MySqlite3Manager:
         self.con.close()
         return str(len(df))
     
-    def delete_data_from_student(self, id_):
+    def delete_data_from_person(self, id_):
         face_deleted=False
-        name=self.get_student_name(id_)
+        name=self.get_person_name(id_)
         self.connect()
-        command = "DELETE FROM STUDENT WHERE Id=? "
+        command = "DELETE FROM PERSON WHERE Id=? "
         try:
             self.cursor.execute(command, (id_,))
             self.con.commit()
@@ -224,12 +224,12 @@ class MySqlite3Manager:
         self.cursor.execute(command)
         self.con.commit()
         print ('Success! DATABASE Deleted')
-    def get_last_entry_time(self, studentid):
+    def get_last_entry_time(self, personid):
         self.con=sqlite3.connect(self.dbname)
         cursor = self.con.cursor()
         command = "SELECT * FROM ATTENDANCE WHERE (Id) = ? and (Date) = ? and (Status) = ?"
         cdate,ctime,cdtime=get_current_datetime()
-        cursor.execute(command, (str(studentid),cdate,'Present'))
+        cursor.execute(command, (str(personid),cdate,'Present'))
         rows = cursor.fetchall()
         if rows:
             row = rows[-1]

@@ -15,13 +15,16 @@ class ApiService {
       },
     };
 
+    // Don't merge headers if options.headers is explicitly empty (for file uploads)
     const config = {
       ...defaultOptions,
       ...options,
-      headers: {
-        ...defaultOptions.headers,
-        ...options.headers,
-      },
+      headers: Object.keys(options.headers || {}).length === 0 && options.body instanceof FormData
+        ? {} // Empty headers for FormData uploads
+        : {
+            ...defaultOptions.headers,
+            ...options.headers,
+          },
     };
 
     try {
@@ -63,24 +66,24 @@ class ApiService {
     });
   }
 
-  // Student management methods
-  async getStudents() {
-    return this.request('/api/students');
+  // person management methods
+  async getpeople() {
+    return this.request('/api/people');
   }
 
-  async registerStudent(studentId, studentName, imageData) {
-    return this.request('/api/students/register', {
+  async registerperson(personId, personName, imageData) {
+    return this.request('/api/people/register', {
       method: 'POST',
       body: JSON.stringify({
-        student_id: studentId,
-        student_name: studentName,
+        person_id: personId,
+        person_name: personName,
         image_data: imageData,
       }),
     });
   }
 
-  async deleteStudent(studentId) {
-    return this.request(`/api/students/${studentId}`, {
+  async deleteperson(personId) {
+    return this.request(`/api/people/${personId}`, {
       method: 'DELETE',
     });
   }
@@ -111,23 +114,34 @@ class ApiService {
     return this.request('/api/camera/settings');
   }
 
-  async updateCameraSettings(rtspUrl = '') {
+  async updateCameraSettings(source = 'default', deviceId = null, rtspUrl = null) {
     return this.request('/api/camera/settings', {
       method: 'POST',
       body: JSON.stringify({
+        source: source,
+        device_id: deviceId,
         rtsp_url: rtspUrl,
       }),
     });
   }
 
-  async testCamera(rtspUrl = '') {
+  async testCamera(source = 'default', deviceId = null, rtspUrl = null) {
     return this.request('/api/camera/test', {
       method: 'POST',
       body: JSON.stringify({
+        source: source,
+        device_id: deviceId,
         rtsp_url: rtspUrl,
       }),
     });
   }
+
+  async stopRtspStreams() {
+    return this.request('/api/rtsp/stop', {
+      method: 'POST',
+    });
+  }
+
 
   // System methods
   async getSystemStatus() {
@@ -141,6 +155,62 @@ class ApiService {
   // Health check for Express server
   async checkExpressHealth() {
     return this.request('/health');
+  }
+
+  // Display settings methods
+  async getDisplaySettings() {
+    return this.request('/api/display/settings');
+  }
+
+  async updateDisplaySettings(timer, backgroundColor, fontColor, useBackgroundImage, backgroundImage, fontFamily, fontSize) {
+    return this.request('/api/display/settings', {
+      method: 'POST',
+      body: JSON.stringify({
+        timer: timer,
+        background_color: backgroundColor,
+        font_color: fontColor,
+        use_background_image: useBackgroundImage,
+        background_image: backgroundImage,
+        font_family: fontFamily,
+        font_size: fontSize,
+      }),
+    });
+  }
+
+  async uploadBackgroundImage(file) {
+    const formData = new FormData();
+    formData.append('file', file);
+
+    // Bypass the request method to avoid any header issues
+    const url = `${this.baseURL}/api/display/upload-background`;
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        body: formData,
+        // No headers - let browser set Content-Type with boundary
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error('Upload error response:', errorText);
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+
+      return await response.json();
+    } catch (error) {
+      console.error(`Upload Error:`, error);
+      throw error;
+    }
+  }
+
+  async deleteBackgroundImage() {
+    return this.request('/api/display/delete-background', {
+      method: 'DELETE',
+    });
+  }
+
+  async getBackgroundImage() {
+    return `${this.baseURL}/api/display/background-image`;
   }
 }
 

@@ -6,6 +6,7 @@ import {
   Avatar,
   Paper,
   Loader,
+  useMantineTheme,
 } from '@mantine/core';
 import { IconUser, IconCheck, IconAlertCircle } from '@tabler/icons-react';
 import { useEffect, useState, useRef } from 'react';
@@ -16,6 +17,7 @@ export function WelcomeScreen({
   recognizedUser = null,
   onTimeout = null
 }) {
+  const theme = useMantineTheme();
   const [timeLeft, setTimeLeft] = useState(displaySettings.timer || 5);
   const [currentUser, setCurrentUser] = useState(recognizedUser);
   const [isConnected, setIsConnected] = useState(false);
@@ -25,8 +27,8 @@ export function WelcomeScreen({
 
   // Default display settings
   const settings = {
-    backgroundColor: displaySettings.backgroundColor || '#E1EBFF',
-    fontColor: displaySettings.fontColor || '#00243D',
+    backgroundColor: displaySettings.backgroundColor || theme.other.cardBackground,
+    fontColor: displaySettings.fontColor || theme.other.textDark,
     timer: displaySettings.timer || 5,
     ...displaySettings
   };
@@ -133,7 +135,7 @@ export function WelcomeScreen({
   useEffect(() => {
     if (isStandalone && window.parent !== window) {
       // This is a popup window
-      document.title = 'Face Recognition - Welcome Screen';
+      document.title = 'Face Recognition - Welcome Canvas';
 
       // Auto-close window on timer expiry if no callback is provided
       if (timeLeft === 0 && !onTimeout && currentUser) {
@@ -254,11 +256,11 @@ export function WelcomeScreen({
                   margin: 0
                 }}
               >
-                {currentUser.name || currentUser.student_name || 'Unknown User'}
+                {currentUser.name || currentUser.person_name || 'Unknown User'}
               </Title>
 
               {/* User Details */}
-              {(currentUser.studentId || currentUser.student_id) && (
+              {(currentUser.personId || currentUser.person_id) && (
                 <Text
                   size="xl"
                   style={{
@@ -267,7 +269,7 @@ export function WelcomeScreen({
                     opacity: 0.8
                   }}
                 >
-                  ID: {currentUser.studentId || currentUser.student_id}
+                  ID: {currentUser.personId || currentUser.person_id}
                 </Text>
               )}
 
@@ -364,66 +366,3 @@ export function WelcomeScreen({
     </Box>
   );
 }
-
-// Popup window utility functions
-export const WelcomeScreenPopup = {
-  // Open welcome screen as popup window
-  open: (displaySettings = {}) => {
-    const width = 600;
-    const height = 700;
-    const left = (window.screen.width - width) / 2;
-    const top = (window.screen.height - height) / 2;
-
-    const features = [
-      `width=${width}`,
-      `height=${height}`,
-      `left=${left}`,
-      `top=${top}`,
-      'resizable=no',
-      'scrollbars=no',
-      'status=no',
-      'menubar=no',
-      'toolbar=no',
-      'location=no'
-    ].join(',');
-
-    // Create popup window with standalone welcome screen
-    const popupWindow = window.open('', 'WelcomeScreen', features);
-
-    if (popupWindow) {
-      // Write the HTML content for the popup
-      popupWindow.document.write(`
-        <!DOCTYPE html>
-        <html>
-          <head>
-            <title>Face Recognition - Welcome Screen</title>
-            <meta charset="utf-8">
-            <style>
-              body { margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
-              #root { width: 100%; height: 100vh; }
-            </style>
-          </head>
-          <body>
-            <div id="root"></div>
-            <script type="module">
-              // This would need to be implemented with proper React rendering
-              console.log('Welcome Screen Popup initialized');
-            </script>
-          </body>
-        </html>
-      `);
-      popupWindow.document.close();
-
-      return popupWindow;
-    }
-
-    return null;
-  },
-
-  // Close popup window
-  close: (popupWindow) => {
-    if (popupWindow && !popupWindow.closed) {
-      popupWindow.close();
-    }
-  }
-};

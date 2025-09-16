@@ -1,6 +1,6 @@
 # 🛡️ Signature Aviation - Face Recognition System
 
-A modern, full-stack face recognition application for student attendance and access control, built with React, Express.js, and FastAPI.
+A modern, full-stack face recognition application for person attendance and access control, built with React, Express.js, and FastAPI.
 
 ## 🏗️ Architecture
 
@@ -27,7 +27,7 @@ A modern, full-stack face recognition application for student attendance and acc
 ## ✨ Features
 
 - 🎯 **Real-time Face Recognition** - Webcam & RTSP stream support
-- 👤 **Student Management** - Register, update, delete students
+- 👤 **person Management** - Register, update, delete people
 - 🔐 **Admin Authentication** - Secure login with password management
 - 📊 **Attendance Tracking** - Automatic logging with timestamps
 - ⚙️ **System Settings** - Camera configuration, display preferences
@@ -94,11 +94,11 @@ POST /api/auth/login
 POST /api/auth/change-password
 ```
 
-### 👥 Student Management
+### 👥 person Management
 ```http
-GET    /api/students
-POST   /api/students/register
-DELETE /api/students/{id}
+GET    /api/people
+POST   /api/people/register
+DELETE /api/people/{id}
 ```
 
 ### 🎯 Face Recognition
@@ -128,7 +128,7 @@ SA-Face-Recognition/
 │   ├── 📁 components/          # React components
 │   │   ├── AppShell.jsx        # Main layout
 │   │   ├── LoginPage.jsx       # Authentication
-│   │   ├── RegistrationPage.jsx# Student registration
+│   │   ├── RegistrationPage.jsx# person registration
 │   │   ├── DetectionPage.jsx   # Face recognition
 │   │   ├── SettingsPage.jsx    # System settings
 │   │   └── WelcomeScreen.jsx   # Dashboard
@@ -140,7 +140,7 @@ SA-Face-Recognition/
 │       ├── DatabaseManager.py  # Database operations
 │       ├── utils.py            # Helper functions
 │       ├── 📁 model/           # AI models (ONNX)
-│       ├── 📁 images/          # Student face images
+│       ├── 📁 images/          # person face images
 │       └── 📁 system/          # Config & database
 ├── 📄 server.js                # Express middleware
 ├── 📄 package.json             # Node.js dependencies
@@ -168,9 +168,9 @@ CREATE TABLE ADMIN (
 );
 ```
 
-### Student Table
+### person Table
 ```sql
-CREATE TABLE STUDENT (
+CREATE TABLE person (
     Id TEXT PRIMARY KEY,
     Name TEXT
 );

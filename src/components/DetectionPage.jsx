@@ -11,23 +11,29 @@ import {
   Badge,
   Alert,
   Grid,
+  useMantineTheme,
 } from '@mantine/core';
 import {
   IconVideo,
   IconVideoOff,
   IconAlertCircle,
+  IconHome,
 } from '@tabler/icons-react';
-import { webcamUtils } from '../services/api';
+import apiService, { webcamUtils } from '../services/api';
 import { io } from 'socket.io-client';
+import { openWelcomePopup } from '../services/welcomePopup';
 
 export function DetectionPage({ onDetection }) {
+  const theme = useMantineTheme();
   const [isVideoStarted, setIsVideoStarted] = useState(false);
   const [isDetecting, setIsDetecting] = useState(false);
   const [detectedPerson, setDetectedPerson] = useState(null);
   const [detectionHistory, setDetectionHistory] = useState([]);
   const [videoStatus, setVideoStatus] = useState('Stopped');
   const [error, setError] = useState(null);
+  const [isRtspSource, setIsRtspSource] = useState(false);
   const videoRef = useRef(null);
+  const rtspImageRef = useRef(null);
   const canvasRef = useRef(null);
   const streamRef = useRef(null);
   const socketRef = useRef(null);
@@ -40,10 +46,13 @@ export function DetectionPage({ onDetection }) {
     try {
       setError(null);
       setVideoStatus('Connecting...');
-      console.log('🎥 Starting video with default camera');
+      console.log('🎥 Starting video...');
 
-      // Get user media with default camera
-      const constraints = {
+      // Load saved camera settings
+      const cameraSettings = await apiService.getCameraSettings();
+      console.log('📷 Loaded camera settings:', cameraSettings);
+
+      let constraints = {
         video: {
           width: { ideal: 1280 },
           height: { ideal: 720 },
@@ -51,6 +60,43 @@ export function DetectionPage({ onDetection }) {
         },
         audio: false
       };
+
+      // Apply saved camera settings
+      if (cameraSettings.success || cameraSettings.source) {
+        if (cameraSettings.source === 'rtsp') {
+          // RTSP camera - use HTTP video stream from backend
+          console.log('📡 RTSP camera selected, using HTTP video stream');
+
+          // Set RTSP mode
+          setIsRtspSource(true);
+
+          // Set video source to RTSP HTTP stream endpoint
+          setIsVideoStarted(true);
+          setVideoStatus('Connecting to RTSP...');
+
+          // Set up RTSP image stream after state update
+          setTimeout(() => {
+            if (rtspImageRef.current) {
+              rtspImageRef.current.src = '/api/rtsp/stream';
+              console.log('📡 RTSP stream source set to /api/rtsp/stream');
+            }
+          }, 100);
+
+          // Use existing Socket.IO connection setup for detection results
+          await setupSocketIOConnection();
+          return; // Skip getUserMedia for RTSP
+        } else if (cameraSettings.device_id && cameraSettings.source === 'device') {
+          // Specific camera device
+          constraints.video.deviceId = { exact: cameraSettings.device_id };
+          console.log('📹 Using specific camera:', cameraSettings.device_id);
+          setIsRtspSource(false);
+        } else {
+          setIsRtspSource(false);
+        }
+        // Otherwise use default camera
+      } else {
+        setIsRtspSource(false);
+      }
 
       console.log('📹 Requesting camera with constraints:', constraints);
       const stream = await navigator.mediaDevices.getUserMedia(constraints);
@@ -149,13 +195,24 @@ export function DetectionPage({ onDetection }) {
     }
   };
 
-  const handleStopVideo = useCallback(() => {
+  const handleStopVideo = useCallback(async () => {
     // console.log('🛑 handleStopVideo called');
     // console.trace('🛑 Stop video called from:');
 
     // Stop detection if active
     if (isDetectingRef.current) {
       handleStopDetection();
+    }
+
+    // Stop RTSP streams if using RTSP
+    if (isRtspSource) {
+      try {
+        console.log('🛑 Stopping RTSP streams...');
+        await apiService.stopRtspStreams();
+        console.log('✅ RTSP streams stopped');
+      } catch (error) {
+        console.error('❌ Error stopping RTSP streams:', error);
+      }
     }
 
     // Close SocketIO connection
@@ -207,7 +264,7 @@ export function DetectionPage({ onDetection }) {
         console.log('🔌 Connected to SocketIO server:', socket.id);
         setConnectionState('connected');
 
-        // Start detection when connected
+        // Start detection (works for both webcam and RTSP)
         console.log('🎯 Emitting start_detection...');
         socket.emit('start_detection', {});
 
@@ -215,9 +272,20 @@ export function DetectionPage({ onDetection }) {
         setIsDetecting(true);
         isDetectingRef.current = true;
 
-        // Start frame processing
-        console.log('🖼️ About to start frame processing...');
-        startFrameProcessing();
+        // Start frame processing (only for webcam, RTSP handles detection on backend)
+        // Check camera source dynamically since Socket.IO connects before RTSP state is set
+        apiService.getCameraSettings().then(currentCameraSettings => {
+          if (currentCameraSettings.source !== 'rtsp') {
+            console.log('🖼️ Starting frame processing for webcam...');
+            startFrameProcessing();
+          } else {
+            console.log('📡 RTSP mode - backend handles detection, skipping frontend frame processing');
+          }
+        }).catch(error => {
+          console.error('Error checking camera settings:', error);
+          // Default to starting frame processing if we can't check
+          startFrameProcessing();
+        });
       });
 
       socket.on('disconnect', () => {
@@ -236,6 +304,7 @@ export function DetectionPage({ onDetection }) {
         // console.log('🔍 Received face detection results:', data);
         handleDetectionResult(data);
       });
+
 
       socket.on('detection_started', (data) => {
         console.log('🎯 Detection started:', data);
@@ -289,26 +358,46 @@ export function DetectionPage({ onDetection }) {
     }, 100); // Process 10 frames per second for smoother streaming
   };
 
-  // Capture frame from video element and send via SocketIO
+  // Capture frame from video element or RTSP image and send via SocketIO
   const captureAndSendFrame = () => {
     try {
-      const video = videoRef.current;
-      if (!video || video.readyState !== 4) {
-        console.log('📹 Video not ready for frame capture:', {
-          exists: !!video,
-          readyState: video?.readyState
-        });
-        return;
+      let sourceElement;
+      let width, height;
+
+      if (isRtspSource) {
+        sourceElement = rtspImageRef.current;
+        if (!sourceElement || !sourceElement.complete || sourceElement.naturalWidth === 0) {
+          console.log('📹 RTSP image not ready for frame capture:', {
+            exists: !!sourceElement,
+            complete: sourceElement?.complete,
+            naturalWidth: sourceElement?.naturalWidth,
+            src: sourceElement?.src
+          });
+          return;
+        }
+        width = sourceElement.naturalWidth || 640;
+        height = sourceElement.naturalHeight || 480;
+      } else {
+        sourceElement = videoRef.current;
+        if (!sourceElement || sourceElement.readyState !== 4) {
+          console.log('📹 Video not ready for frame capture:', {
+            exists: !!sourceElement,
+            readyState: sourceElement?.readyState
+          });
+          return;
+        }
+        width = sourceElement.videoWidth || 640;
+        height = sourceElement.videoHeight || 480;
       }
 
       // Create canvas to capture frame
       const canvas = document.createElement('canvas');
-      canvas.width = video.videoWidth || 640;
-      canvas.height = video.videoHeight || 480;
+      canvas.width = width;
+      canvas.height = height;
       const ctx = canvas.getContext('2d');
 
-      // Draw current video frame to canvas
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      // Draw current frame to canvas
+      ctx.drawImage(sourceElement, 0, 0, canvas.width, canvas.height);
 
       // Convert to base64
       const frameData = canvas.toDataURL('image/jpeg', 0.8);
@@ -343,8 +432,8 @@ export function DetectionPage({ onDetection }) {
 
       if (bestMatch) {
         const detectedPerson = {
-          id: bestMatch.student_id,
-          name: bestMatch.student_name,
+          id: bestMatch.person_id,
+          name: bestMatch.person_name,
           confidence: Math.round(bestMatch.match_confidence * 100),
           bbox: bestMatch.bbox
         };
@@ -385,28 +474,38 @@ export function DetectionPage({ onDetection }) {
     }
 
     // Draw detection overlays on canvas using backend coordinates
-    drawDetectionOverlays(data.faces || []);
+    drawDetectionOverlays(data.faces || [], data.frame_size);
   };
 
   // Draw detection overlays using canvas
-  const drawDetectionOverlays = (faces) => {
-    if (!canvasRef.current || !videoRef.current) {
-      console.log('🎨 Canvas or video not available for drawing');
+  const drawDetectionOverlays = (faces, frameSize) => {
+    if (!canvasRef.current) {
+      console.log('🎨 Canvas not available for drawing');
       return;
     }
 
     const canvas = canvasRef.current;
-    const video = videoRef.current;
     const ctx = canvas.getContext('2d');
 
-    // Set canvas size to match video
-    canvas.width = video.videoWidth || video.clientWidth;
-    canvas.height = video.videoHeight || video.clientHeight;
+    // Set canvas size to match the displayed image size (not natural size)
+    if (isRtspSource && rtspImageRef.current) {
+      const rtspImage = rtspImageRef.current;
+      canvas.width = rtspImage.clientWidth || 640;
+      canvas.height = rtspImage.clientHeight || 480;
+    } else if (videoRef.current) {
+      const video = videoRef.current;
+      canvas.width = video.videoWidth || video.clientWidth || 640;
+      canvas.height = video.videoHeight || video.clientHeight || 480;
+    } else {
+      console.log('🎨 No video or RTSP image available for drawing');
+      return;
+    }
 
     // console.log('🎨 Drawing overlays:', {
     //   facesCount: faces.length,
     //   canvasSize: { width: canvas.width, height: canvas.height },
-    //   videoSize: { width: video.videoWidth, height: video.videoHeight }
+    //   frameSize: frameSize,
+    //   isRtspSource: isRtspSource
     // });
 
     // Clear previous overlays
@@ -420,9 +519,25 @@ export function DetectionPage({ onDetection }) {
       const width = x2 - x1;
       const height = y2 - y1;
 
-      // Scale coordinates to canvas size (should be 1:1 since we're using the video dimensions)
-      const scaleX = canvas.width / (video.videoWidth || video.clientWidth);
-      const scaleY = canvas.height / (video.videoHeight || video.clientHeight);
+      // Scale coordinates from backend frame size to displayed canvas size
+      let scaleX = 1;
+      let scaleY = 1;
+
+      if (isRtspSource && frameSize) {
+        // For RTSP, scale from backend frame size to displayed size
+        scaleX = canvas.width / frameSize.width;
+        scaleY = canvas.height / frameSize.height;
+        // console.log('🎨 RTSP scaling:', {
+        //   canvasSize: { width: canvas.width, height: canvas.height },
+        //   frameSize: frameSize,
+        //   scale: { x: scaleX, y: scaleY }
+        // });
+      } else if (videoRef.current) {
+        // For webcam, use video dimensions
+        const video = videoRef.current;
+        scaleX = canvas.width / (video.videoWidth || video.clientWidth || 640);
+        scaleY = canvas.height / (video.videoHeight || video.clientHeight || 480);
+      }
 
       const scaledX = x1 * scaleX;
       const scaledY = y1 * scaleY;
@@ -441,7 +556,7 @@ export function DetectionPage({ onDetection }) {
 
       // Draw label background
       if (face.recognized) {
-        const label = face.student_name;
+        const label = face.person_name;
         const confidence = Math.round(face.match_confidence * 100);
 
         ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
@@ -489,6 +604,24 @@ export function DetectionPage({ onDetection }) {
     };
   }, [handleStopVideo]);
 
+  // Cleanup RTSP streams on page unload
+  useEffect(() => {
+    const handleBeforeUnload = async () => {
+      if (isRtspSource) {
+        try {
+          await apiService.stopRtspStreams();
+        } catch (error) {
+          console.error('Error stopping RTSP streams on page unload:', error);
+        }
+      }
+    };
+
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+    };
+  }, [isRtspSource]);
+
   return (
     <Box style={{ width: '100%', minHeight: '100%' }}>
       <Box style={{ padding: '24px' }}>
@@ -509,7 +642,7 @@ export function DetectionPage({ onDetection }) {
           <Card shadow="md" radius="md" withBorder>
             <Stack gap="md">
               <Group justify="space-between">
-                <Title order={4} c="white">
+                <Title order={4}>
                   Camera Feed
                 </Title>
                 <Badge
@@ -529,8 +662,8 @@ export function DetectionPage({ onDetection }) {
                 style={{
                   width: '100%',
                   aspectRatio: '16/9',
-                  backgroundColor: isVideoStarted ? '#000' : 'rgb(225, 235, 255)',
-                  border: '2px solid white',
+                  backgroundColor: isVideoStarted ? '#000' : '#f8fafc',
+                  border: '2px solid #ddd',
                   borderRadius: '8px',
                   display: 'flex',
                   alignItems: 'center',
@@ -540,14 +673,14 @@ export function DetectionPage({ onDetection }) {
               >
                 {!isVideoStarted ? (
                   <Group>
-                    <IconVideoOff size={48} color="white" />
-                    <Text size="lg" c="white">
+                    <IconVideoOff size={48} color="gray" />
+                    <Text size="lg">
                       Camera Feed Stopped
                     </Text>
                   </Group>
                 ) : (
                   <Box style={{ position: 'relative', width: '100%', height: '100%' }}>
-                    {/* HTML5 video stream - smooth and efficient */}
+                    {/* HTML5 video stream for webcam */}
                     <video
                       ref={videoRef}
                       autoPlay
@@ -558,9 +691,40 @@ export function DetectionPage({ onDetection }) {
                         height: '100%',
                         objectFit: 'cover',
                         borderRadius: '6px',
-                        display: 'block'
+                        display: isRtspSource ? 'none' : 'block'
                       }}
                     />
+
+                    {/* MJPEG image stream for RTSP */}
+                    {isRtspSource && (
+                      <img
+                        ref={rtspImageRef}
+                        alt="RTSP Stream"
+                        style={{
+                          width: '100%',
+                          height: '100%',
+                          objectFit: 'cover',
+                          borderRadius: '6px',
+                          display: 'block'
+                        }}
+                        onLoad={() => {
+                          console.log('📡 RTSP stream loaded successfully');
+                          console.log('📡 RTSP image dimensions:', {
+                            naturalWidth: rtspImageRef.current?.naturalWidth,
+                            naturalHeight: rtspImageRef.current?.naturalHeight,
+                            complete: rtspImageRef.current?.complete
+                          });
+                          setVideoStatus('Connected');
+                          setError(null); // Clear any previous errors
+                        }}
+                        onError={(e) => {
+                          console.error('📡 RTSP stream error:', e);
+                          console.error('📡 RTSP stream src:', rtspImageRef.current?.src);
+                          setError('RTSP stream failed to load. Check the RTSP URL and network connection.');
+                          setVideoStatus('Connection Failed');
+                        }}
+                      />
+                    )}
 
                     {/* Canvas overlay for backend-calculated detection boxes */}
                     <canvas
@@ -584,7 +748,7 @@ export function DetectionPage({ onDetection }) {
                           position: 'absolute',
                           top: 20,
                           left: 20,
-                          backgroundColor: 'rgba(0, 36, 61, 0.9)',
+                          backgroundColor: 'white',
                           color: 'white',
                           padding: '10px',
                           borderRadius: '8px',
@@ -614,10 +778,7 @@ export function DetectionPage({ onDetection }) {
                   leftSection={<IconVideo size={20} />}
                   onClick={handleStartVideo}
                   disabled={isVideoStarted}
-                  style={{
-                    backgroundColor: 'rgb(0, 36, 61)',
-                    '&:hover': { backgroundColor: 'rgb(0, 170, 127)' },
-                  }}
+                  color="signature"
                 >
                   Start Camera & Detection
                 </Button>
@@ -631,6 +792,34 @@ export function DetectionPage({ onDetection }) {
                 >
                   Stop Camera
                 </Button>
+
+                <Button
+                  leftSection={<IconHome size={20} />}
+                  onClick={() => {
+                    // Get display settings from localStorage
+                    const savedSettings = localStorage.getItem('faceRecognitionDisplaySettings');
+                    let displaySettings = {
+                      backgroundColor: theme.other.cardBackground,
+                      fontColor: theme.other.textDark,
+                      timer: 5
+                    };
+
+                    if (savedSettings) {
+                      try {
+                        displaySettings = { ...displaySettings, ...JSON.parse(savedSettings) };
+                      } catch (e) {
+                        console.warn('Failed to parse display settings:', e);
+                      }
+                    }
+
+                    console.log('🪟 Opening welcome canvas from detection page');
+                    openWelcomePopup(displaySettings);
+                  }}
+                  color="green"
+                  variant="filled"
+                >
+                  Welcome Canvas
+                </Button>
               </Group>
             </Stack>
           </Card>
@@ -641,22 +830,22 @@ export function DetectionPage({ onDetection }) {
           <Stack gap="md">
             {/* Current Detection */}
             <Card shadow="md" radius="md" withBorder>
-              <Title order={5} c="white" mb="md">
+              <Title order={5} mb="md">
                 Current Detection
               </Title>
 
               {detectedPerson ? (
                 <Stack gap="xs">
                   <Group justify="space-between">
-                    <Text fw={600} c="white">Name:</Text>
-                    <Text c="white">{detectedPerson.name}</Text>
+                    <Text fw={600}>Name:</Text>
+                    <Text>{detectedPerson.name}</Text>
                   </Group>
                   <Group justify="space-between">
-                    <Text fw={600} c="white">ID:</Text>
-                    <Text c="white">{detectedPerson.id}</Text>
+                    <Text fw={600}>ID:</Text>
+                    <Text>{detectedPerson.id}</Text>
                   </Group>
                   <Group justify="space-between">
-                    <Text fw={600} c="white">Confidence:</Text>
+                    <Text fw={600}>Confidence:</Text>
                     <Badge
                       color={detectedPerson.confidence > 80 ? 'green' : 'orange'}
                     >
@@ -665,7 +854,7 @@ export function DetectionPage({ onDetection }) {
                   </Group>
                 </Stack>
               ) : (
-                <Text c="white" ta="center" py="md">
+                <Text ta="center" py="md">
                   {isDetecting ? 'Scanning for faces...' : 'No detection active'}
                 </Text>
               )}
@@ -673,13 +862,13 @@ export function DetectionPage({ onDetection }) {
 
             {/* Detection History */}
             <Card shadow="md" radius="md" withBorder>
-              <Title order={5} c="white" mb="md">
+              <Title order={5} mb="md">
                 Recent Detections
               </Title>
 
               <Stack gap="xs" style={{ maxHeight: 300, overflowY: 'auto' }}>
                 {detectionHistory.length === 0 ? (
-                  <Text c="white" ta="center" py="md">
+                  <Text ta="center" py="md">
                     No recent detections
                   </Text>
                 ) : (
@@ -687,10 +876,10 @@ export function DetectionPage({ onDetection }) {
                     <Paper key={index} p="xs" withBorder>
                       <Group justify="space-between" gap="xs">
                         <Box style={{ flex: 1 }}>
-                          <Text size="sm" fw={600} c="white">
+                          <Text size="sm" fw={600}>
                             {detection.name}
                           </Text>
-                          <Text size="xs" c="white">
+                          <Text size="xs">
                             {detection.timestamp}
                           </Text>
                         </Box>

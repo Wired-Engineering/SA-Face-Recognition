@@ -23,3 +23,6 @@ dist-ssr
 *.sln
 *.sw?
 *.claude
+
+src/python/model/system/*
+src/python/images/*

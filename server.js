@@ -29,9 +29,7 @@ const upload = multer({
 const apiProxy = createProxyMiddleware({
   target: 'http://localhost:8000',
   changeOrigin: true,
-  pathRewrite: {
-    '^/': '/api/', // Prepend /api to the stripped path
-  },
+  // Remove the pathRewrite that was incorrectly prepending /api/
   onError: (err, req, res) => {
     console.error('Proxy Error:', err.message);
     res.status(500).json({

@@ -3,7 +3,11 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Face Recognition - Welcome Screen</title>
+    <title>Face Recognition - Welcome Canvas</title>
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Roboto:wght@400;500;700&family=Montserrat:wght@400;500;600;700&family=Poppins:wght@400;500;600;700&family=Open+Sans:wght@400;600;700&family=Lato:wght@400;700&family=Raleway:wght@400;600;700&family=Playfair+Display:wght@400;700&display=swap" rel="stylesheet">
     <style>
         * {
             margin: 0;
@@ -12,7 +16,7 @@
         }
 
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+            font-family: var(--font-family, 'Inter'), -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
             overflow: hidden;
             height: 100vh;
             width: 100vw;
@@ -27,6 +31,9 @@
             padding: 40px;
             position: relative;
             background-color: var(--bg-color, #E1EBFF);
+            background-size: cover;
+            background-position: center;
+            background-repeat: no-repeat;
         }
 
         .connection-status {
@@ -91,9 +98,10 @@
 
         .welcome-title {
             color: var(--font-color, #00243D);
-            font-size: 3rem;
+            font-size: var(--title-font-size, 3rem);
             font-weight: bold;
             margin: 0 0 30px 0;
+            font-family: var(--font-family, 'Inter'), sans-serif;
         }
 
         .user-avatar {
@@ -117,24 +125,27 @@
 
         .user-name {
             color: var(--font-color, #00243D);
-            font-size: 2.2rem;
+            font-size: var(--name-font-size, 2.2rem);
             font-weight: normal;
             line-height: 1.2;
             margin: 20px 0 10px 0;
+            font-family: var(--font-family, 'Inter'), sans-serif;
         }
 
         .user-id {
             color: var(--font-color, #00243D);
-            font-size: 1.3rem;
+            font-size: var(--info-font-size, 1.3rem);
             opacity: 0.8;
             margin: 10px 0;
+            font-family: var(--font-family, 'Inter'), sans-serif;
         }
 
         .user-department {
             color: var(--font-color, #00243D);
-            font-size: 1.1rem;
+            font-size: var(--info-font-size, 1.1rem);
             opacity: 0.7;
             margin: 10px 0;
+            font-family: var(--font-family, 'Inter'), sans-serif;
         }
 
         .confidence-score {
@@ -167,14 +178,16 @@
 
         .waiting-title {
             color: var(--font-color, #00243D);
-            font-size: 1.8rem;
+            font-size: var(--waiting-font-size, 1.8rem);
             margin: 20px 0;
+            font-family: var(--font-family, 'Inter'), sans-serif;
         }
 
         .waiting-subtitle {
             color: var(--font-color, #00243D);
             opacity: 0.7;
-            font-size: 1rem;
+            font-size: var(--subtitle-font-size, 1rem);
+            font-family: var(--font-family, 'Inter'), sans-serif;
         }
 
         @keyframes spin {
@@ -257,7 +270,11 @@
                 this.settings = {
                     backgroundColor: '#E1EBFF',
                     fontColor: '#00243D',
-                    timer: 5
+                    timer: 5,
+                    useBackgroundImage: false,
+                    backgroundImage: null,
+                    fontFamily: 'Inter',
+                    fontSize: 'medium'
                 };
                 this.timeLeft = 0;
                 this.timerInterval = null;
@@ -292,6 +309,16 @@
                 if (urlParams.has('persistent')) {
                     this.isPersistent = urlParams.get('persistent') === 'true';
                 }
+                if (urlParams.has('useBackgroundImage')) {
+                    this.settings.useBackgroundImage = urlParams.get('useBackgroundImage') === 'true';
+                }
+                // Background image will be sent via postMessage to avoid URL length limits
+                if (urlParams.has('fontFamily')) {
+                    this.settings.fontFamily = urlParams.get('fontFamily');
+                }
+                if (urlParams.has('fontSize')) {
+                    this.settings.fontSize = urlParams.get('fontSize');
+                }
 
                 // Try to load from localStorage as fallback
                 const savedSettings = localStorage.getItem('faceRecognitionDisplaySettings');
@@ -319,8 +346,60 @@
             }
 
             applySettings() {
+                const container = document.querySelector('.welcome-container');
+
+                if (this.settings.useBackgroundImage && this.settings.backgroundImage) {
+                    // Use background image
+                    container.style.backgroundImage = `url(${this.settings.backgroundImage})`;
+                    container.style.backgroundColor = 'transparent';
+                } else {
+                    // Use solid color
+                    container.style.backgroundImage = 'none';
+                    container.style.backgroundColor = this.settings.backgroundColor;
+                }
+
                 document.documentElement.style.setProperty('--bg-color', this.settings.backgroundColor);
                 document.documentElement.style.setProperty('--font-color', this.settings.fontColor);
+                document.documentElement.style.setProperty('--font-family', this.settings.fontFamily);
+
+                // Apply font size presets
+                const fontSizes = {
+                    small: {
+                        title: '2.5rem',
+                        name: '1.8rem',
+                        info: '1rem',
+                        waiting: '1.5rem',
+                        subtitle: '0.9rem'
+                    },
+                    medium: {
+                        title: '3rem',
+                        name: '2.2rem',
+                        info: '1.3rem',
+                        waiting: '1.8rem',
+                        subtitle: '1rem'
+                    },
+                    large: {
+                        title: '3.5rem',
+                        name: '2.6rem',
+                        info: '1.5rem',
+                        waiting: '2rem',
+                        subtitle: '1.2rem'
+                    },
+                    xlarge: {
+                        title: '4rem',
+                        name: '3rem',
+                        info: '1.7rem',
+                        waiting: '2.3rem',
+                        subtitle: '1.4rem'
+                    }
+                };
+
+                const selectedSize = fontSizes[this.settings.fontSize] || fontSizes.medium;
+                document.documentElement.style.setProperty('--title-font-size', selectedSize.title);
+                document.documentElement.style.setProperty('--name-font-size', selectedSize.name);
+                document.documentElement.style.setProperty('--info-font-size', selectedSize.info);
+                document.documentElement.style.setProperty('--waiting-font-size', selectedSize.waiting);
+                document.documentElement.style.setProperty('--subtitle-font-size', selectedSize.subtitle);
             }
 
             connectSocketIO() {
@@ -331,7 +410,7 @@
                         console.log('✅ Connected to SocketIO server');
                         this.updateConnectionStatus(true);
 
-                        // Register this popup as a welcome screen
+                        // Register this popup as a Welcome Canvas
                         this.socket.emit('register_welcome_screen', {});
                     });
 
@@ -348,7 +427,25 @@
                     });
 
                     this.socket.on('welcome_screen_registered', (data) => {
-                        console.log('📺 Welcome screen registered successfully');
+                        console.log('📺 Welcome Canvas registered successfully');
+
+                        // Request background image settings if needed
+                        if (this.settings.useBackgroundImage && !this.settings.backgroundImage) {
+                            this.socket.emit('request_background_image', {});
+                        }
+                    });
+
+                    this.socket.on('background_image_data', (data) => {
+                        console.log('🖼️ Received background image data');
+                        if (data.backgroundImage) {
+                            this.settings.backgroundImage = data.backgroundImage;
+                            this.settings.useBackgroundImage = data.useBackgroundImage;
+                        } else {
+                            // Background image was deleted
+                            this.settings.backgroundImage = null;
+                            this.settings.useBackgroundImage = false;
+                        }
+                        this.applySettings();
                     });
 
                     this.socket.on('connect_error', (error) => {
@@ -399,19 +496,19 @@
 
             addUserToQueue(user) {
                 // Check if user is already in queue (prevent duplicates)
-                const userId = user.student_id || user.studentId;
+                const userId = user.person_id || user.personId;
                 const existingIndex = this.userQueue.findIndex(u =>
-                    (u.student_id || u.studentId) === userId
+                    (u.person_id || u.personId) === userId
                 );
 
                 if (existingIndex !== -1) {
                     // Update existing user in queue
                     this.userQueue[existingIndex] = user;
-                    console.log(`🔄 Updated ${user.name || user.student_name} in queue`);
+                    console.log(`🔄 Updated ${user.name || user.person_name} in queue`);
                 } else {
                     // Add new user to queue
                     this.userQueue.push(user);
-                    console.log(`➕ Added ${user.name || user.student_name} to queue`);
+                    console.log(`➕ Added ${user.name || user.person_name} to queue`);
                 }
 
                 // If no user is currently displayed, show the first user
@@ -448,11 +545,11 @@
                 const userIconEl = document.getElementById('userIcon');
 
                 // Set user name
-                userNameEl.textContent = user.name || user.student_name || 'Unknown User';
+                userNameEl.textContent = user.name || user.person_name || 'Unknown User';
 
                 // Set user ID
-                if (user.studentId || user.student_id) {
-                    userIdEl.textContent = `ID: ${user.studentId || user.student_id}`;
+                if (user.personId || user.person_id) {
+                    userIdEl.textContent = `ID: ${user.personId || user.person_id}`;
                     userIdEl.classList.remove('hidden');
                 } else {
                     userIdEl.classList.add('hidden');
@@ -486,7 +583,7 @@
 
                 // Start countdown timer
                 this.startTimer();
-                console.log(`👋 Showing ${user.name || user.student_name} for ${this.settings.timer} seconds`);
+                console.log(`👋 Showing ${user.name || user.person_name} for ${this.settings.timer} seconds`);
             }
 
             showWaitingState() {

@@ -6,8 +6,6 @@ import {
   TextInput,
   PasswordInput,
   Button,
-  Group,
-  Image,
   Box,
   Alert,
 } from '@mantine/core';
@@ -54,7 +52,7 @@ export function LoginPage({ onLogin }) {
       <Stack gap="xl" style={{ maxWidth: '400px' }}>
         {/* Header with Logo/Title */}
         <Box ta="center" mb="md">
-          <Title order={2} c="rgb(0, 36, 61)" mb="xs">
+          <Title order={2} mb="xs">
             Face Recognition System
           </Title>
         </Box>
@@ -64,13 +62,9 @@ export function LoginPage({ onLogin }) {
           shadow="md"
           p="xl"
           radius="md"
-          style={{
-            backgroundColor: 'white',
-            border: '1px solid rgb(0, 36, 61)',
-          }}
         >
           <Stack gap="md">
-            <Title order={3} ta="center" c="rgb(0, 36, 61)" mb="md">
+            <Title order={3} ta="center" mb="md">
               Login
             </Title>
 
@@ -80,14 +74,6 @@ export function LoginPage({ onLogin }) {
               placeholder="Enter your login ID"
               value={loginId}
               onChange={(event) => setLoginId(event.currentTarget.value)}
-              styles={{
-                input: {
-                  borderColor: 'rgb(0, 36, 61)',
-                  '&:focus': {
-                    borderColor: 'rgb(0, 170, 127)',
-                  },
-                },
-              }}
             />
 
             <PasswordInput
@@ -96,14 +82,6 @@ export function LoginPage({ onLogin }) {
               placeholder="Enter your password"
               value={password}
               onChange={(event) => setPassword(event.currentTarget.value)}
-              styles={{
-                input: {
-                  borderColor: 'rgb(0, 36, 61)',
-                  '&:focus': {
-                    borderColor: 'rgb(0, 170, 127)',
-                  },
-                },
-              }}
             />
 
             {error && (
@@ -120,16 +98,8 @@ export function LoginPage({ onLogin }) {
               onClick={handleLogin}
               loading={loading}
               fullWidth
-              style={{
-                backgroundColor: 'rgb(0, 36, 61)',
-                fontFamily: 'Tahoma',
-                fontWeight: 'bold',
-                fontSize: '10pt',
-                marginTop: '1rem',
-                '&:hover': {
-                  backgroundColor: 'rgb(0, 170, 127)',
-                },
-              }}
+              color="signature"
+              style={{ marginTop: '1rem' }}
               disabled={!loginId || !password || loading}
             >
               {loading ? 'Logging in...' : 'Login'}

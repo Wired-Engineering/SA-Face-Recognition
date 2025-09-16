@@ -17,9 +17,9 @@ import {
   Divider,
   Box,
   Card,
+  useMantineTheme,
 } from '@mantine/core';
 import {
-  IconSettings,
   IconUser,
   IconLock,
   IconClock,
@@ -29,11 +29,14 @@ import {
   IconPalette,
   IconEye,
   IconTrash,
+  IconUpload,
+  IconPhoto,
 } from '@tabler/icons-react';
 import apiService, { webcamUtils } from '../services/api';
 import { testWelcomePopup, closeWelcomePopup, isWelcomePopupOpen } from '../services/welcomePopup';
 
 export function SettingsPage({ onSaveSettings }) {
+  const theme = useMantineTheme();
   // Admin settings state
   const [oldAdminId, setOldAdminId] = useState('');
   const [oldAdminPass, setOldAdminPass] = useState('');
@@ -41,14 +44,16 @@ export function SettingsPage({ onSaveSettings }) {
   const [newAdminPass, setNewAdminPass] = useState('');
   const [newAdminPassConf, setNewAdminPassConf] = useState('');
 
-  // Display settings state
+  // Welcome Canvas state
   const [displayTimer, setDisplayTimer] = useState(5);
-  const [backgroundColor, setBackgroundColor] = useState('#E1EBFF');
-  const [fontColor, setFontColor] = useState('#00243D');
+  const [backgroundColor, setBackgroundColor] = useState(theme.colors.accent[1]);
+  const [fontColor, setFontColor] = useState(theme.other.signatureNavy);
+  const [useBackgroundImage, setUseBackgroundImage] = useState(false);
+  const [backgroundImagePreview, setBackgroundImagePreview] = useState(null);
+  const [fontFamily, setFontFamily] = useState('Inter');
+  const [fontSize, setFontSize] = useState('medium');
 
   // Camera settings state
-  const [cameraUrl, setCameraUrl] = useState('');
-  const [cameraStatus, setCameraStatus] = useState('Not Connected');
   const [cameraDevices, setCameraDevices] = useState([]);
   const [selectedCamera, setSelectedCamera] = useState('default');
   const [rtspUrl, setRtspUrl] = useState('');
@@ -64,21 +69,57 @@ export function SettingsPage({ onSaveSettings }) {
   // Test popup state
   const [testPopupOpen, setTestPopupOpen] = useState(false);
 
-  // Load available cameras on component mount
+  // Load available cameras and saved settings on component mount
   useEffect(() => {
-    const loadCameras = async () => {
+    const loadCamerasAndSettings = async () => {
       try {
+        // Load available camera devices
         const devices = await webcamUtils.getVideoDevices();
+        console.log('Available cameras:', devices);
         setCameraDevices(devices);
-        if (devices.length > 0 && selectedCamera === 'default') {
-          setSelectedCamera(devices[0].deviceId);
+
+        // Load saved camera settings from backend
+        const cameraSettings = await apiService.getCameraSettings();
+        if (cameraSettings.success || cameraSettings.source) {
+          if (cameraSettings.source === 'rtsp') {
+            setSelectedCamera('rtsp');
+            setRtspUrl(cameraSettings.rtsp_url || '');
+          } else if (cameraSettings.source === 'device' && cameraSettings.device_id) {
+            // Find which camera index this device ID corresponds to
+            const deviceIndex = devices.findIndex(device => device.deviceId === cameraSettings.device_id);
+            if (deviceIndex >= 0) {
+              setSelectedCamera(`camera_${deviceIndex}`);
+              console.log(`Loaded camera setting: device_id ${cameraSettings.device_id} → camera_${deviceIndex}`);
+            } else {
+              console.warn(`Saved device ID ${cameraSettings.device_id} not found in available devices`);
+              setSelectedCamera('default');
+            }
+          } else {
+            setSelectedCamera(cameraSettings.source || 'default');
+          }
+        }
+
+        // Load Canvas Settings from backend
+        const displaySettings = await apiService.getDisplaySettings();
+        if (displaySettings.success) {
+          setDisplayTimer(displaySettings.timer || 5);
+          setBackgroundColor(displaySettings.background_color || theme.colors.accent[1]);
+          setFontColor(displaySettings.font_color || theme.other.signatureNavy);
+          setUseBackgroundImage(displaySettings.use_background_image || false);
+          setFontFamily(displaySettings.font_family || 'Inter');
+          setFontSize(displaySettings.font_size || 'medium');
+
+          // If there's a background image on the server, show placeholder preview
+          if (displaySettings.has_background_image) {
+            setBackgroundImagePreview('background-exists'); // Placeholder to show delete button
+          }
         }
       } catch (error) {
-        console.error('Error loading cameras:', error);
+        console.error('Error loading settings:', error);
       }
     };
-    loadCameras();
-  }, [selectedCamera]);
+    loadCamerasAndSettings();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleAdminChange = async () => {
     if (newAdminPass !== newAdminPassConf) {
@@ -131,39 +172,107 @@ export function SettingsPage({ onSaveSettings }) {
     }
   };
 
-  const handleSaveDisplay = () => {
+  const handleSaveDisplay = async () => {
     const settings = {
       timer: displayTimer,
       backgroundColor,
       fontColor,
+      useBackgroundImage,
+      backgroundImage: backgroundImagePreview,
+      fontFamily,
+      fontSize,
     };
 
-    // Save to localStorage for welcome popup access
-    localStorage.setItem('faceRecognitionDisplaySettings', JSON.stringify(settings));
+    try {
+      // Save to backend (don't send background image data, just the flag)
+      const result = await apiService.updateDisplaySettings(
+        displayTimer,
+        backgroundColor,
+        fontColor,
+        useBackgroundImage,
+        null, // Don't send image data
+        fontFamily,
+        fontSize
+      );
 
-    // If test popup is open, close and reopen with new saved settings
-    if (testPopupOpen && isWelcomePopupOpen()) {
-      console.log('💾 Settings saved, updating test popup');
-      closeWelcomePopup();
-      setTimeout(() => {
-        testWelcomePopup(settings);
-      }, 100);
+      if (result.success) {
+        // Also save to localStorage for welcome popup access
+        localStorage.setItem('faceRecognitionDisplaySettings', JSON.stringify(settings));
+
+        setSuccess('Canvas Settings saved successfully!');
+
+        // If test popup is open, close and reopen with new saved settings
+        if (testPopupOpen && isWelcomePopupOpen()) {
+          console.log('💾 Settings saved, updating test popup');
+          closeWelcomePopup();
+          setTimeout(() => {
+            testWelcomePopup(settings);
+          }, 100);
+        }
+
+        onSaveSettings?.({
+          type: 'display',
+          ...settings,
+        });
+      } else {
+        setError('Failed to save Canvas Settings');
+      }
+    } catch (error) {
+      setError('Failed to save Canvas Settings: ' + error.message);
+      console.error('Display save error:', error);
     }
-
-    onSaveSettings?.({
-      type: 'display',
-      ...settings,
-    });
   };
 
   const handleTestWelcomePopup = () => {
     const currentSettings = {
       backgroundColor,
       fontColor,
-      timer: displayTimer
+      timer: displayTimer,
+      useBackgroundImage,
+      backgroundImage: backgroundImagePreview,
+      fontFamily,
+      fontSize
     };
     testWelcomePopup(currentSettings);
     setTestPopupOpen(true);
+  };
+
+  const handleBackgroundImageUpload = async (file) => {
+    if (!file) {
+      setError('No file selected');
+      return;
+    }
+
+    try {
+      setError('');
+      const result = await apiService.uploadBackgroundImage(file);
+      if (result.success) {
+        setBackgroundImagePreview(result.image_url);
+        setSuccess('Background image uploaded successfully!');
+      } else {
+        setError(result.message || 'Failed to upload background image');
+      }
+    } catch (error) {
+      setError('Failed to upload background image: ' + error.message);
+      console.error('Background upload error:', error);
+    }
+  };
+
+  const handleDeleteBackgroundImage = async () => {
+    try {
+      setError('');
+      const result = await apiService.deleteBackgroundImage();
+      if (result.success) {
+        setBackgroundImagePreview(null);
+        setUseBackgroundImage(false);
+        setSuccess('Background image deleted successfully!');
+      } else {
+        setError(result.message || 'Failed to delete background image');
+      }
+    } catch (error) {
+      setError('Failed to delete background image: ' + error.message);
+      console.error('Background delete error:', error);
+    }
   };
 
   // Note: Auto-update only happens when Save button is pressed, not on parameter changes
@@ -184,21 +293,48 @@ export function SettingsPage({ onSaveSettings }) {
 
   const handleTestCamera = async () => {
     setCameraLoading(true);
-    setCameraStatus('Testing...');
     setError('');
 
     try {
-      const result = await apiService.testCamera(selectedCamera === 'rtsp' ? rtspUrl : cameraUrl);
+      // Determine the source and parameters for testing
+      let source = selectedCamera;
+      let deviceId = null;
+      let rtspUrlToTest = null;
+
+      if (selectedCamera === 'rtsp') {
+        source = 'rtsp';
+        rtspUrlToTest = rtspUrl;
+        // Validate RTSP URL before testing
+        if (!rtspUrl || rtspUrl.trim() === '') {
+          setError('Please enter an RTSP URL before testing');
+          return;
+        }
+      } else if (selectedCamera === 'default') {
+        source = 'default';
+      } else if (selectedCamera.startsWith('camera_')) {
+        // It's a camera index - get the actual device ID from our stored devices
+        source = 'device';
+        const cameraIndex = parseInt(selectedCamera.replace('camera_', ''));
+        if (cameraIndex < cameraDevices.length) {
+          deviceId = cameraDevices[cameraIndex].deviceId; // Use actual browser device ID
+          console.log(`Testing camera ${cameraIndex}: device ID = ${deviceId}`);
+        } else {
+          setError('Selected camera not found in available devices');
+          return;
+        }
+      } else {
+        // Fallback to default
+        source = 'default';
+      }
+
+      const result = await apiService.testCamera(source, deviceId, rtspUrlToTest);
 
       if (result.success) {
-        setCameraStatus('Connected');
         setSuccess('Camera test successful!');
       } else {
-        setCameraStatus('Not Connected');
         setError(result.message || 'Camera test failed');
       }
     } catch (error) {
-      setCameraStatus('Not Connected');
       setError('Camera test failed: ' + error.message);
       console.error('Camera test error:', error);
     } finally {
@@ -212,14 +348,46 @@ export function SettingsPage({ onSaveSettings }) {
     setSuccess('');
 
     try {
-      const urlToSave = selectedCamera === 'rtsp' ? rtspUrl : cameraUrl;
-      const result = await apiService.updateCameraSettings(urlToSave);
+      // Determine the source and parameters for saving
+      let source = selectedCamera;
+      let deviceId = null;
+      let rtspUrlToSave = null;
+
+      if (selectedCamera === 'rtsp') {
+        source = 'rtsp';
+        rtspUrlToSave = rtspUrl;
+        // Validate RTSP URL before saving
+        if (!rtspUrl || rtspUrl.trim() === '') {
+          setError('Please enter an RTSP URL before saving');
+          return;
+        }
+      } else if (selectedCamera === 'default') {
+        source = 'default';
+      } else if (selectedCamera.startsWith('camera_')) {
+        // It's a camera index - get the actual device ID from our stored devices
+        source = 'device';
+        const cameraIndex = parseInt(selectedCamera.replace('camera_', ''));
+        if (cameraIndex < cameraDevices.length) {
+          deviceId = cameraDevices[cameraIndex].deviceId; // Use actual browser device ID
+          console.log(`Saving camera ${cameraIndex}: device ID = ${deviceId}`);
+        } else {
+          setError('Selected camera not found in available devices');
+          return;
+        }
+      } else {
+        // Fallback to default
+        source = 'default';
+      }
+
+      const result = await apiService.updateCameraSettings(source, deviceId, rtspUrlToSave);
 
       if (result.success) {
         setSuccess('Camera settings saved successfully!');
         onSaveSettings?.({
           type: 'camera',
-          url: urlToSave,
+          source: source,
+          device_id: deviceId,
+          rtsp_url: rtspUrlToSave,
         });
       } else {
         setError(result.message || 'Failed to save camera settings');
@@ -244,10 +412,10 @@ export function SettingsPage({ onSaveSettings }) {
     try {
       // Note: This endpoint may not exist in the current API, but we'll call it anyway
       // The backend should implement a bulk delete endpoint
-      const students = await apiService.getStudents();
+      const people = await apiService.getpeople();
 
-      if (students.success && students.students) {
-        const deletePromises = students.students.map(student =>
+      if (people.success && people.people) {
+        const deletePromises = people.people.map(student =>
           apiService.deleteStudent(student.student_id)
         );
 
@@ -255,14 +423,14 @@ export function SettingsPage({ onSaveSettings }) {
         setSuccess('All student records deleted successfully!');
 
         onSaveSettings?.({
-          type: 'deleteStudents',
+          type: 'deletepeople',
         });
       } else {
         setError('Failed to retrieve student list');
       }
     } catch (error) {
       setError('Failed to delete student records: ' + error.message);
-      console.error('Delete students error:', error);
+      console.error('Delete people error:', error);
     } finally {
       setDeleteLoading(false);
     }
@@ -271,7 +439,7 @@ export function SettingsPage({ onSaveSettings }) {
   return (
     <Box style={{ width: '100%', minHeight: '100%' }}>
       <Box style={{ padding: '24px' }}>
-        <Title order={2} ta="center" c="rgb(0, 36, 61)" mb="xl">
+        <Title order={2} ta="center" mb="xl">
           System Settings
         </Title>
 
@@ -301,13 +469,13 @@ export function SettingsPage({ onSaveSettings }) {
           </Alert>
         )}
 
-      <Tabs defaultValue="admin" variant="pills">
+      <Tabs defaultValue="admin" color="blue">
         <Tabs.List grow mb="md">
           <Tabs.Tab value="admin" leftSection={<IconUser size={16} />}>
             Admin Settings
           </Tabs.Tab>
           <Tabs.Tab value="display" leftSection={<IconPalette size={16} />}>
-            Display Settings
+            Canvas Settings
           </Tabs.Tab>
           <Tabs.Tab value="camera" leftSection={<IconCamera size={16} />}>
             Camera Settings
@@ -321,7 +489,7 @@ export function SettingsPage({ onSaveSettings }) {
         <Tabs.Panel value="admin">
           <Card shadow="sm" p="lg" radius="md" withBorder>
             <Stack gap="md">
-              <Title order={4} c="rgb(0, 36, 61)">
+              <Title order={4}>
                 Change Admin Credentials
               </Title>
 
@@ -387,7 +555,7 @@ export function SettingsPage({ onSaveSettings }) {
                   newAdminPass !== newAdminPassConf ||
                   adminLoading
                 }
-                style={{ backgroundColor: 'rgb(0, 36, 61)' }}
+                color="signature"
               >
                 {adminLoading ? 'Changing...' : 'Change Admin'}
               </Button>
@@ -395,12 +563,12 @@ export function SettingsPage({ onSaveSettings }) {
           </Card>
         </Tabs.Panel>
 
-        {/* Display Settings Tab */}
+        {/* Canvas Settings Tab */}
         <Tabs.Panel value="display">
           <Card shadow="sm" p="lg" radius="md" withBorder>
             <Stack gap="md">
-              <Title order={4} c="rgb(0, 36, 61)">
-                Display Preferences
+              <Title order={4}>
+                Canvas Preferences
               </Title>
 
               <NumberInput
@@ -413,7 +581,81 @@ export function SettingsPage({ onSaveSettings }) {
                 leftSection={<IconClock size={16} />}
               />
 
-              <Group grow>
+              <Divider my="sm" label="Background Settings" labelPosition="left" />
+
+              <Switch
+                label="Use Background Image"
+                checked={useBackgroundImage}
+                onChange={(event) => setUseBackgroundImage(event.currentTarget.checked)}
+                description="Toggle between solid color and custom image background"
+              />
+
+              {useBackgroundImage ? (
+                <Stack gap="md">
+                  <Group>
+                    <Button
+                      leftSection={<IconUpload size={16} />}
+                      variant="outline"
+                      component="label"
+                      color="signature"
+                    >
+                      Upload Background Image
+                      <input
+                        type="file"
+                        hidden
+                        accept="image/jpeg,image/jpg,image/png,image/webp"
+                        onChange={(e) => handleBackgroundImageUpload(e.target.files[0])}
+                      />
+                    </Button>
+                    {backgroundImagePreview && (
+                      <Button
+                        leftSection={<IconTrash size={16} />}
+                        variant="outline"
+                        color="red"
+                        onClick={handleDeleteBackgroundImage}
+                      >
+                        Delete Background
+                      </Button>
+                    )}
+                  </Group>
+
+                  {backgroundImagePreview && (
+                    <Box>
+                      <Text size="sm" fw={500} mb="xs">
+                        Current Background:
+                      </Text>
+                      <Box
+                        style={{
+                          width: '100%',
+                          maxWidth: '400px',
+                          height: '225px',
+                          border: '2px solid #dee2e6',
+                          borderRadius: '8px',
+                          overflow: 'hidden',
+                          backgroundImage: backgroundImagePreview === 'background-exists'
+                            ? 'none'
+                            : `url(${backgroundImagePreview})`,
+                          backgroundSize: 'cover',
+                          backgroundPosition: 'center',
+                          backgroundColor: backgroundImagePreview === 'background-exists'
+                            ? '#f8f9fa'
+                            : 'transparent',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                        }}
+                      >
+                        {backgroundImagePreview === 'background-exists' && (
+                          <Text size="sm" c="dimmed">
+                            Background image stored on server
+                          </Text>
+                        )}
+                      </Box>
+                    </Box>
+                  )}
+                </Stack>
+              ) : (
+                <Group grow>
                 <Box>
                   <Text size="sm" fw={500} mb="xs">
                     Background Color
@@ -456,15 +698,72 @@ export function SettingsPage({ onSaveSettings }) {
                   </Group>
                 </Box>
               </Group>
+              )}
+
+              <Divider my="sm" label="Font Settings" labelPosition="left" />
+
+              <Group grow>
+                <Select
+                  label="Font Family"
+                  placeholder="Choose font"
+                  value={fontFamily}
+                  onChange={setFontFamily}
+                  data={[
+                    { value: 'Inter', label: 'Inter' },
+                    { value: 'Roboto', label: 'Roboto' },
+                    { value: 'Montserrat', label: 'Montserrat' },
+                    { value: 'Poppins', label: 'Poppins' },
+                    { value: 'Open Sans', label: 'Open Sans' },
+                    { value: 'Lato', label: 'Lato' },
+                    { value: 'Raleway', label: 'Raleway' },
+                    { value: 'Playfair Display', label: 'Playfair Display' }
+                  ]}
+                  styles={{
+                    option: {
+                      fontFamily: 'var(--option-font-family)',
+                    },
+                    item: {
+                      fontFamily: 'var(--option-font-family)',
+                    }
+                  }}
+                  renderOption={({ option, ...others }) => (
+                    <div
+                      {...others}
+                      style={{
+                        fontFamily: option.value,
+                        fontSize: '16px',
+                        fontWeight: '500'
+                      }}
+                    >
+                      {option.label}
+                    </div>
+                  )}
+                  leftSection={<IconPhoto size={16} />}
+                />
+
+                <Select
+                  label="Font Size"
+                  placeholder="Choose size"
+                  value={fontSize}
+                  onChange={setFontSize}
+                  data={[
+                    { value: 'small', label: 'Small (Compact)' },
+                    { value: 'medium', label: 'Medium (Standard)' },
+                    { value: 'large', label: 'Large (Prominent)' },
+                    { value: 'xlarge', label: 'Extra Large (Bold)' }
+                  ]}
+                  leftSection={<IconPhoto size={16} />}
+                />
+              </Group>
 
               <Group>
                 <Button
                   leftSection={<IconDeviceFloppy size={16} />}
                   onClick={handleSaveDisplay}
                   loading={displayLoading}
-                  style={{ backgroundColor: 'rgb(0, 36, 61)' }}
+                  color="signature"
                 >
-                  {displayLoading ? 'Saving...' : 'Save Display Settings'}
+                  {displayLoading ? 'Saving...' : 'Save Canvas Settings'}
                 </Button>
 
                 <Button
@@ -474,12 +773,9 @@ export function SettingsPage({ onSaveSettings }) {
                     closeWelcomePopup();
                     setTestPopupOpen(false);
                   } : handleTestWelcomePopup}
-                  style={{
-                    borderColor: testPopupOpen ? 'rgb(255, 107, 107)' : 'rgb(0, 36, 61)',
-                    color: testPopupOpen ? 'rgb(255, 107, 107)' : 'rgb(0, 36, 61)'
-                  }}
+                  color={testPopupOpen ? "red" : "signature"}
                 >
-                  {testPopupOpen ? 'Close Test Window' : 'Test Welcome Screen'}
+                  {testPopupOpen ? 'Close Test Window' : 'Test Welcome Canvas'}
                 </Button>
               </Group>
             </Stack>
@@ -490,7 +786,7 @@ export function SettingsPage({ onSaveSettings }) {
         <Tabs.Panel value="camera">
           <Card shadow="sm" p="lg" radius="md" withBorder>
             <Stack gap="md">
-              <Title order={4} c="rgb(0, 36, 61)">
+              <Title order={4}>
                 Camera Configuration
               </Title>
 
@@ -501,9 +797,9 @@ export function SettingsPage({ onSaveSettings }) {
                 onChange={setSelectedCamera}
                 data={[
                   { value: 'default', label: 'Default Camera' },
-                  ...cameraDevices.map(device => ({
-                    value: device.deviceId,
-                    label: device.label || `Camera ${device.deviceId.substring(0, 8)}...`
+                  ...cameraDevices.map((device, index) => ({
+                    value: `camera_${index}`,
+                    label: device.label || `Camera ${index + 1}`
                   })),
                   { value: 'rtsp', label: 'RTSP Stream' }
                 ]}
@@ -520,27 +816,8 @@ export function SettingsPage({ onSaveSettings }) {
                 />
               )}
 
-              <TextInput
-                label="Camera RTSP URL (Legacy)"
-                placeholder="rtsp://camera-url:port/stream"
-                value={cameraUrl}
-                onChange={(event) => setCameraUrl(event.currentTarget.value)}
-                leftSection={<IconCamera size={16} />}
-                description="This field is for backward compatibility"
-              />
-
-              <Alert
-                color={cameraStatus === 'Connected' ? 'green' : 'orange'}
-                title={`Camera Status: ${cameraStatus}`}
-                icon={<IconCamera size={16} />}
-              >
-                {cameraStatus === 'Connected'
-                  ? 'Camera is working properly'
-                  : 'Camera not connected or URL invalid'}
-              </Alert>
-
-              <Text size="sm" c="rgb(0, 36, 61)">
-                {cameraDevices.length} camera(s) detected. Select a camera source above to configure for live detection.
+              <Text size="sm" c="dimmed">
+                {cameraDevices.length} camera device{cameraDevices.length !== 1 ? 's' : ''} detected. Select a camera source above to configure for live detection.
               </Text>
 
               <Group>
@@ -549,7 +826,7 @@ export function SettingsPage({ onSaveSettings }) {
                   onClick={handleTestCamera}
                   variant="outline"
                   loading={cameraLoading}
-                  style={{ borderColor: 'rgb(0, 36, 61)', color: 'rgb(0, 36, 61)' }}
+                  color="signature"
                 >
                   {cameraLoading ? 'Testing...' : 'Test Camera'}
                 </Button>
@@ -558,7 +835,7 @@ export function SettingsPage({ onSaveSettings }) {
                   leftSection={<IconDeviceFloppy size={16} />}
                   onClick={handleSaveCamera}
                   loading={cameraLoading}
-                  style={{ backgroundColor: 'rgb(0, 36, 61)' }}
+                  color="signature"
                 >
                   {cameraLoading ? 'Saving...' : 'Save Camera Settings'}
                 </Button>
@@ -571,7 +848,7 @@ export function SettingsPage({ onSaveSettings }) {
         <Tabs.Panel value="data">
           <Card shadow="sm" p="lg" radius="md" withBorder>
             <Stack gap="md">
-              <Title order={4} c="rgb(0, 36, 61)">
+              <Title order={4}>
                 Data Management
               </Title>
 
@@ -587,7 +864,7 @@ export function SettingsPage({ onSaveSettings }) {
                 color="red"
                 variant="filled"
               >
-                {deleteLoading ? 'Deleting...' : 'Delete All Students'}
+                {deleteLoading ? 'Deleting...' : 'Delete All people'}
               </Button>
             </Stack>
           </Card>
