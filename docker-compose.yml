@@ -1,0 +1,22 @@
+---
+
+services:
+  face-recognition:
+    image: safacerecognition:latest
+    container_name: sa-face-recognition
+    ports:
+      - "80:80"
+    volumes:
+      - system_data:/app/src/python/system
+      - images_data:/app/src/python/images
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:80/api/system/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+volumes:
+  system_data:
+  images_data:
