@@ -15,6 +15,9 @@ import time
 import logging
 import asyncio
 from contextlib import asynccontextmanager
+import ffmpeg
+import threading
+import queue
 
 # SocketIO imports
 import socketio
@@ -85,6 +88,7 @@ detection_active: Dict[str, bool] = {}
 welcome_screens: Dict[str, bool] = {}  # Track welcome screen connections
 latest_recognition: Dict = {}  # Store latest recognition result
 rtsp_streams: Dict[str, bool] = {}  # Track active RTSP streams
+ffmpeg_streams: Dict[str, bool] = {}  # Track active ffmpeg streams with overlays
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -103,10 +107,13 @@ async def disconnect(sid):
     # Cleanup welcome screen state
     if sid in welcome_screens:
         del welcome_screens[sid]
-    # Stop any RTSP streams when clients disconnect
-    if rtsp_streams:
-        print(f"🛑 Stopping {len(rtsp_streams)} RTSP streams due to client disconnect")
+    # Stop any RTSP and FFmpeg streams when clients disconnect
+    if rtsp_streams or ffmpeg_streams:
+        rtsp_count = len(rtsp_streams)
+        ffmpeg_count = len(ffmpeg_streams)
+        print(f"🛑 Stopping {rtsp_count} RTSP streams and {ffmpeg_count} FFmpeg streams due to client disconnect")
         rtsp_streams.clear()
+        ffmpeg_streams.clear()
 
 @sio.event
 async def start_detection(sid, data):
@@ -114,12 +121,11 @@ async def start_detection(sid, data):
     print(f"🔍 Starting face detection for client {sid}")
     detection_active[sid] = True
 
-    # Check if RTSP is configured and start RTSP processing
+    # Check if RTSP is configured - note: RTSP detection is now handled by ffmpeg overlay stream
     camera_config = config_manager.get_camera_config()
     if camera_config.get('source') == 'rtsp' and camera_config.get('rtsp_url'):
-        # Start RTSP stream processing with detection in background
-        import asyncio
-        asyncio.create_task(process_rtsp_with_detection(sid, camera_config['rtsp_url']))
+        print(f"📡 RTSP detected - detection will be handled by ffmpeg overlay stream, not SocketIO")
+        # Don't start the old RTSP processing since overlays are handled by /api/rtsp/stream-with-overlay
 
     await sio.emit('detection_started', {'status': 'started'}, to=sid)
 
@@ -313,7 +319,7 @@ async def process_rtsp_with_detection(sid, rtsp_url):
             ret, frame = cap.read()
             if not ret:
                 print(f"⚠️ Failed to read frame from RTSP detection stream")
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(0.01)  # Reduced delay from 100ms to 10ms
                 continue
 
             frame_count += 1
@@ -415,8 +421,8 @@ async def process_rtsp_with_detection(sid, rtsp_url):
             except Exception as e:
                 print(f"❌ Error in RTSP detection processing: {e}")
 
-            # Process at ~10 FPS to reduce load
-            await asyncio.sleep(0.1)
+            # Minimal delay for better responsiveness
+            await asyncio.sleep(0.01)
 
         print(f"🛑 RTSP detection processing stopped for {sid}")
         cap.release()
@@ -424,6 +430,176 @@ async def process_rtsp_with_detection(sid, rtsp_url):
     except Exception as e:
         print(f"❌ Error in RTSP detection stream: {e}")
         await sio.emit('detection_error', {"error": f"RTSP detection error: {str(e)}"}, to=sid)
+
+
+def draw_detection_overlays_on_frame(frame, faces):
+    """Draw detection overlays directly on video frame"""
+    overlay_frame = frame.copy()
+
+    for face in faces:
+        x1, y1, x2, y2 = face['bbox']
+
+        # Draw bounding box
+        color = (0, 255, 0) if face.get('recognized', False) else (0, 0, 255)  # Green for recognized, red for unknown
+        cv2.rectangle(overlay_frame, (x1, y1), (x2, y2), color, 2)
+
+        # Draw label
+        if face.get('recognized', False):
+            label = f"{face['person_name']} ({int(face['match_confidence'] * 100)}%)"
+            label_color = (255, 255, 255)
+            bg_color = (0, 255, 0)
+        else:
+            label = "Unknown"
+            label_color = (255, 255, 255)
+            bg_color = (0, 0, 255)
+
+        # Get text size
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.7
+        thickness = 2
+        (text_width, text_height), _ = cv2.getTextSize(label, font, font_scale, thickness)
+
+        # Draw background rectangle for text
+        cv2.rectangle(overlay_frame, (x1, y1 - text_height - 10), (x1 + text_width, y1), bg_color, -1)
+
+        # Draw text
+        cv2.putText(overlay_frame, label, (x1, y1 - 5), font, font_scale, label_color, thickness)
+
+    return overlay_frame
+
+
+async def process_rtsp_with_ffmpeg_overlay(rtsp_url, output_queue, stop_event):
+    """Process RTSP stream with ffmpeg and overlay detection results"""
+    print(f"🎬 Starting ffmpeg RTSP processing: {rtsp_url}")
+
+    try:
+        cap = cv2.VideoCapture(rtsp_url)
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
+        if not cap.isOpened():
+            print(f"❌ Failed to open RTSP stream for ffmpeg: {rtsp_url}")
+            return
+
+        # Get video properties
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+        print(f"📺 Video properties: {width}x{height} @ {fps}fps")
+
+        frame_count = 0
+        detection_results_cache = []
+
+        while not stop_event.is_set():
+            ret, frame = cap.read()
+            if not ret:
+                print("⚠️ Failed to read frame from RTSP stream")
+                await asyncio.sleep(0.01)  # Reduced delay
+                continue
+
+            frame_count += 1
+
+            # Run face detection every frame for lower latency
+            if frame_count % 1 == 0:  # Detect every frame
+                try:
+                    frame_features, faces = face_recognizer.recognize_face(frame)
+
+                    # Process detection results
+                    detection_results_cache = []
+                    if faces is not None and len(faces) > 0:
+                        for i, face in enumerate(faces):
+                            x1, y1, w, h = face[:4].astype(int)
+                            x2, y2 = x1 + w, y1 + h
+
+                            result = {
+                                'bbox': [int(x1), int(y1), int(x2), int(y2)],
+                                'confidence': float(face[14]) if len(face) > 14 else 0.0,
+                                'recognized': False,
+                                'person_name': 'Unknown',
+                                'match_confidence': 0.0
+                            }
+
+                            # Check for face recognition match
+                            if i < len(frame_features) and face_recognizer.dictionary:
+                                feature = frame_features[i]
+                                best_match = None
+                                highest_score = 0
+
+                                for person_id, ref_feature in face_recognizer.dictionary.items():
+                                    score = face_recognizer.face_recognizer.match(feature, ref_feature)
+
+                                    if score > face_recognizer.thresold and score > highest_score:
+                                        highest_score = score
+                                        person_name = db.get_person_name(person_id)
+                                        best_match = {
+                                            'person_id': person_id,
+                                            'person_name': person_name,
+                                            'confidence': float(score)
+                                        }
+
+                                if best_match:
+                                    result.update({
+                                        'person_id': best_match['person_id'],
+                                        'person_name': best_match['person_name'],
+                                        'match_confidence': best_match['confidence'],
+                                        'recognized': True
+                                    })
+
+                                    # Store latest recognition and broadcast to welcome screens
+                                    recognition_data = {
+                                        'type': 'recognition',
+                                        'user': {
+                                            'person_id': best_match['person_id'],
+                                            'person_name': best_match['person_name'],
+                                            'name': best_match['person_name'],
+                                            'confidence': best_match['confidence'],
+                                            'photo': None
+                                        },
+                                        'timestamp': time.time()
+                                    }
+
+                                    latest_recognition.update(recognition_data)
+
+                                    # Broadcast to welcome screens via SocketIO
+                                    for welcome_screen_sid in welcome_screens.keys():
+                                        asyncio.create_task(sio.emit('recognition_result', recognition_data, to=welcome_screen_sid))
+
+                            detection_results_cache.append(result)
+
+                    # Send detection results to frontend for UI updates (sidebar panels)
+                    if detection_results_cache:
+                        for sid in detection_active.keys():
+                            asyncio.create_task(sio.emit('face_detection_result', {
+                                "faces": detection_results_cache,
+                                "timestamp": time.time(),
+                                "frame_size": {"width": frame.shape[1], "height": frame.shape[0]}
+                            }, to=sid))
+
+                except Exception as e:
+                    print(f"❌ Error in face detection: {e}")
+
+            # Draw overlays on frame using cached detection results
+            if detection_results_cache:
+                frame = draw_detection_overlays_on_frame(frame, detection_results_cache)
+
+            # Encode frame as JPEG
+            _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+
+            # Put frame in output queue
+            if not output_queue.full():
+                try:
+                    output_queue.put_nowait(buffer.tobytes())
+                except queue.Full:
+                    pass  # Skip frame if queue is full
+
+            # Minimal delay for better responsiveness
+            await asyncio.sleep(0.01)  # 10ms instead of fps-based delay
+
+        cap.release()
+        print("🛑 FFmpeg RTSP processing stopped")
+
+    except Exception as e:
+        print(f"❌ Error in ffmpeg RTSP processing: {e}")
 
 
 
@@ -1157,6 +1333,62 @@ async def rtsp_stream(request: Request):
         media_type="multipart/x-mixed-replace; boundary=frame"
     )
 
+
+@app.get("/api/rtsp/stream-with-overlay")
+async def rtsp_stream_with_overlay(request: Request):
+    """Stream RTSP video feed with face detection overlays as HTTP MJPEG stream"""
+    camera_config = config_manager.get_camera_config()
+
+    if camera_config.get('source') != 'rtsp' or not camera_config.get('rtsp_url'):
+        raise HTTPException(status_code=400, detail="RTSP not configured")
+
+    rtsp_url = camera_config['rtsp_url']
+
+    # Create unique stream ID for this request
+    stream_id = f"ffmpeg_{id(request)}"
+    ffmpeg_streams[stream_id] = True
+
+    print(f"🎬 Starting FFmpeg RTSP stream with overlays {stream_id} from: {rtsp_url}")
+
+    # Create a queue for frame data
+    frame_queue = queue.Queue(maxsize=10)
+    stop_event = threading.Event()
+
+    # Start the background processing thread
+    processing_task = asyncio.create_task(
+        process_rtsp_with_ffmpeg_overlay(rtsp_url, frame_queue, stop_event)
+    )
+
+    def generate_frames():
+        try:
+            while ffmpeg_streams.get(stream_id, False):
+                try:
+                    # Get frame from queue with shorter timeout for responsiveness
+                    frame_data = frame_queue.get(timeout=0.1)
+
+                    # Yield frame in multipart format
+                    yield (b'--frame\r\n'
+                           b'Content-Type: image/jpeg\r\n\r\n' + frame_data + b'\r\n')
+
+                except queue.Empty:
+                    # If no frame available, continue
+                    continue
+                except Exception as e:
+                    print(f"❌ Error in frame generation: {e}")
+                    break
+
+        finally:
+            # Cleanup
+            stop_event.set()
+            if stream_id in ffmpeg_streams:
+                del ffmpeg_streams[stream_id]
+            print(f"🛑 FFmpeg stream {stream_id} closed")
+
+    return StreamingResponse(
+        generate_frames(),
+        media_type="multipart/x-mixed-replace; boundary=frame"
+    )
+
 @app.get("/api/rtsp/test")
 async def test_rtsp():
     """Test RTSP connection without streaming"""
@@ -1197,10 +1429,21 @@ async def test_rtsp():
 @app.post("/api/rtsp/stop")
 async def stop_rtsp_streams():
     """Stop all active RTSP streams"""
-    stream_count = len(rtsp_streams)
+    rtsp_stream_count = len(rtsp_streams)
+    ffmpeg_stream_count = len(ffmpeg_streams)
+
     rtsp_streams.clear()
-    print(f"🛑 Stopped {stream_count} RTSP streams")
-    return {"success": True, "stopped_streams": stream_count}
+    ffmpeg_streams.clear()
+
+    total_stopped = rtsp_stream_count + ffmpeg_stream_count
+    print(f"🛑 Stopped {rtsp_stream_count} RTSP streams and {ffmpeg_stream_count} FFmpeg streams")
+
+    return {
+        "success": True,
+        "stopped_rtsp_streams": rtsp_stream_count,
+        "stopped_ffmpeg_streams": ffmpeg_stream_count,
+        "total_stopped": total_stopped
+    }
 
 if __name__ == "__main__":
     # Run the server with SocketIO

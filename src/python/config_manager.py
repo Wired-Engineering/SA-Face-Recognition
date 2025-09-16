@@ -127,7 +127,6 @@ class ConfigManager:
                 'source': 'default',
                 'device_id': None,
                 'rtsp_url': None,
-                'legacy_url': None
             },
             'display': {
                 'timer': 5,

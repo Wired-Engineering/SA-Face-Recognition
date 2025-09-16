@@ -64,25 +64,25 @@ export function DetectionPage({ onDetection }) {
       // Apply saved camera settings
       if (cameraSettings.success || cameraSettings.source) {
         if (cameraSettings.source === 'rtsp') {
-          // RTSP camera - use HTTP video stream from backend
-          console.log('📡 RTSP camera selected, using HTTP video stream');
+          // RTSP camera - use HTTP video stream with overlays from backend
+          console.log('📡 RTSP camera selected, using ffmpeg stream with overlays');
 
           // Set RTSP mode
           setIsRtspSource(true);
 
-          // Set video source to RTSP HTTP stream endpoint
+          // Set video source to ffmpeg stream with overlays endpoint
           setIsVideoStarted(true);
           setVideoStatus('Connecting to RTSP...');
 
-          // Set up RTSP image stream after state update
+          // Set up RTSP image stream with overlays after state update
           setTimeout(() => {
             if (rtspImageRef.current) {
-              rtspImageRef.current.src = '/api/rtsp/stream';
-              console.log('📡 RTSP stream source set to /api/rtsp/stream');
+              rtspImageRef.current.src = '/api/rtsp/stream-with-overlay';
+              console.log('📡 RTSP stream source set to /api/rtsp/stream-with-overlay');
             }
           }, 100);
 
-          // Use existing Socket.IO connection setup for detection results
+          // Use existing Socket.IO connection for welcome screen recognition events only
           await setupSocketIOConnection();
           return; // Skip getUserMedia for RTSP
         } else if (cameraSettings.device_id && cameraSettings.source === 'device') {
@@ -272,14 +272,14 @@ export function DetectionPage({ onDetection }) {
         setIsDetecting(true);
         isDetectingRef.current = true;
 
-        // Start frame processing (only for webcam, RTSP handles detection on backend)
+        // Start frame processing (only for webcam, RTSP handles detection and overlays on backend)
         // Check camera source dynamically since Socket.IO connects before RTSP state is set
         apiService.getCameraSettings().then(currentCameraSettings => {
           if (currentCameraSettings.source !== 'rtsp') {
             console.log('🖼️ Starting frame processing for webcam...');
             startFrameProcessing();
           } else {
-            console.log('📡 RTSP mode - backend handles detection, skipping frontend frame processing');
+            console.log('📡 RTSP mode - backend handles detection and overlays, skipping frontend frame processing');
           }
         }).catch(error => {
           console.error('Error checking camera settings:', error);
@@ -355,7 +355,7 @@ export function DetectionPage({ onDetection }) {
       if (videoRef.current && socketRef.current && isDetectingRef.current) {
         captureAndSendFrame();
       }
-    }, 100); // Process 10 frames per second for smoother streaming
+    }, 33); // Process ~30 frames per second for better responsiveness
   };
 
   // Capture frame from video element or RTSP image and send via SocketIO
@@ -422,6 +422,7 @@ export function DetectionPage({ onDetection }) {
   const handleDetectionResult = (data) => {
     // console.log('🔍 Received detection results:', data);
 
+    // Update UI state for both RTSP and webcam modes
     if (data.faces && data.faces.length > 0) {
       // Find the best recognition result
       const recognizedFaces = data.faces.filter(face => face.recognized);
@@ -473,12 +474,19 @@ export function DetectionPage({ onDetection }) {
       setDetectedPerson(null);
     }
 
-    // Draw detection overlays on canvas using backend coordinates
-    drawDetectionOverlays(data.faces || [], data.frame_size);
+    // Draw detection overlays on canvas ONLY for webcam (RTSP has overlays from backend)
+    if (!isRtspSource) {
+      drawDetectionOverlays(data.faces || [], data.frame_size);
+    }
   };
 
   // Draw detection overlays using canvas
   const drawDetectionOverlays = (faces, frameSize) => {
+    // Skip canvas drawing for RTSP mode - overlays are handled by backend
+    if (isRtspSource) {
+      return;
+    }
+
     if (!canvasRef.current) {
       console.log('🎨 Canvas not available for drawing');
       return;
@@ -726,20 +734,22 @@ export function DetectionPage({ onDetection }) {
                       />
                     )}
 
-                    {/* Canvas overlay for backend-calculated detection boxes */}
-                    <canvas
-                      ref={canvasRef}
-                      style={{
-                        width: '100%',
-                        height: '100%',
-                        borderRadius: '6px',
-                        position: 'absolute',
-                        top: 0,
-                        left: 0,
-                        zIndex: 2,
-                        pointerEvents: 'none'
-                      }}
-                    />
+                    {/* Canvas overlay for detection boxes (only for webcam, RTSP has overlays from backend) */}
+                    {!isRtspSource && (
+                      <canvas
+                        ref={canvasRef}
+                        style={{
+                          width: '100%',
+                          height: '100%',
+                          borderRadius: '6px',
+                          position: 'absolute',
+                          top: 0,
+                          left: 0,
+                          zIndex: 2,
+                          pointerEvents: 'none'
+                        }}
+                      />
+                    )}
 
                     {/* Detection Overlay */}
                     {isDetecting && detectedPerson && (
