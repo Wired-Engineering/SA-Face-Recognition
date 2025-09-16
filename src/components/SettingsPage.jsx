@@ -18,6 +18,10 @@ import {
   Box,
   Card,
   useMantineTheme,
+  Image,
+  ScrollArea,
+  LoadingOverlay,
+  Flex,
 } from '@mantine/core';
 import {
   IconUser,
@@ -31,6 +35,8 @@ import {
   IconTrash,
   IconUpload,
   IconPhoto,
+  IconRefresh,
+  IconUsersGroup,
 } from '@tabler/icons-react';
 import apiService, { webcamUtils } from '../services/api';
 import { testWelcomePopup, closeWelcomePopup, isWelcomePopupOpen } from '../services/welcomePopup';
@@ -57,6 +63,10 @@ export function SettingsPage({ onSaveSettings }) {
   const [cameraDevices, setCameraDevices] = useState([]);
   const [selectedCamera, setSelectedCamera] = useState('default');
   const [rtspUrl, setRtspUrl] = useState('');
+
+  // Data management state
+  const [people, setPeople] = useState([]);
+  const [peopleLoading, setPeopleLoading] = useState(false);
 
   // Loading and error states
   const [adminLoading, setAdminLoading] = useState(false);
@@ -116,12 +126,32 @@ export function SettingsPage({ onSaveSettings }) {
             setBackgroundImagePreview(imageUrl);
           }
         }
+
+        // Load people data for data management tab
+        await loadPeopleData();
       } catch (error) {
         console.error('Error loading settings:', error);
       }
     };
     loadCamerasAndSettings();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const loadPeopleData = async () => {
+    try {
+      setPeopleLoading(true);
+      const response = await apiService.getpeople();
+      if (response.success) {
+        setPeople(response.people || []);
+      } else {
+        setError('Failed to load people data');
+      }
+    } catch (error) {
+      setError('Error loading people: ' + error.message);
+      console.error('People loading error:', error);
+    } finally {
+      setPeopleLoading(false);
+    }
+  };
 
   const handleAdminChange = async () => {
     if (newAdminPass !== newAdminPassConf) {
@@ -402,8 +432,8 @@ export function SettingsPage({ onSaveSettings }) {
     }
   };
 
-  const handleDeleteStudent = async () => {
-    if (!window.confirm('Are you sure you want to delete all student records? This action cannot be undone.')) {
+  const handleDeleteAllPeople = async () => {
+    if (!window.confirm('Are you sure you want to delete all people records? This action cannot be undone.')) {
       return;
     }
 
@@ -412,29 +442,53 @@ export function SettingsPage({ onSaveSettings }) {
     setSuccess('');
 
     try {
-      // Note: This endpoint may not exist in the current API, but we'll call it anyway
-      // The backend should implement a bulk delete endpoint
-      const people = await apiService.getpeople();
+      const result = await apiService.deleteAllPeople();
 
-      if (people.success && people.people) {
-        const deletePromises = people.people.map(student =>
-          apiService.deleteStudent(student.student_id)
-        );
-
-        await Promise.all(deletePromises);
-        setSuccess('All student records deleted successfully!');
+      if (result.success) {
+        setSuccess(`All ${result.deleted_count} people deleted successfully!`);
+        // Refresh the people list
+        await loadPeopleData();
 
         onSaveSettings?.({
-          type: 'deletepeople',
+          type: 'deleteAllPeople',
+          deletedCount: result.deleted_count
         });
       } else {
-        setError('Failed to retrieve student list');
+        setError(result.message || 'Failed to delete all people');
       }
     } catch (error) {
-      setError('Failed to delete student records: ' + error.message);
-      console.error('Delete people error:', error);
+      setError('Failed to delete all people: ' + error.message);
+      console.error('Delete all people error:', error);
     } finally {
       setDeleteLoading(false);
+    }
+  };
+
+  const handleDeletePerson = async (personId, personName) => {
+    if (!window.confirm(`Are you sure you want to delete ${personName}? This action cannot be undone.`)) {
+      return;
+    }
+
+    try {
+      setError('');
+      const result = await apiService.deleteperson(personId);
+
+      if (result.success) {
+        setSuccess(`${personName} deleted successfully!`);
+        // Refresh the people list
+        await loadPeopleData();
+
+        onSaveSettings?.({
+          type: 'deletePerson',
+          personId,
+          personName
+        });
+      } else {
+        setError(result.message || `Failed to delete ${personName}`);
+      }
+    } catch (error) {
+      setError(`Failed to delete ${personName}: ` + error.message);
+      console.error('Delete person error:', error);
     }
   };
 
@@ -615,9 +669,18 @@ export function SettingsPage({ onSaveSettings }) {
                     {backgroundImagePreview && (
                       <Button
                         leftSection={<IconTrash size={16} />}
-                        variant="outline"
+                        variant="filled"
                         color="red"
                         onClick={handleDeleteBackgroundImage}
+                        styles={{
+                          root: {
+                            backgroundColor: '#fa5252',
+                            color: 'white',
+                            '&:hover': {
+                              backgroundColor: '#e03131'
+                            }
+                          }
+                        }}
                       >
                         Delete Background
                       </Button>
@@ -838,28 +901,157 @@ export function SettingsPage({ onSaveSettings }) {
 
         {/* Data Management Tab */}
         <Tabs.Panel value="data">
-          <Card shadow="sm" p="lg" radius="md" withBorder>
-            <Stack gap="md">
-              <Title order={4}>
-                Data Management
-              </Title>
+          <Stack gap="md">
+            {/* People List Section */}
+            <Card shadow="sm" p="lg" radius="md" withBorder>
+              <Stack gap="md">
+                <Flex justify="space-between" align="center">
+                  <Title order={4}>
+                    <IconUsersGroup size={20} style={{ marginRight: '8px', verticalAlign: 'text-bottom' }} />
+                    Registered People ({people.length})
+                  </Title>
+                  <Button
+                    leftSection={<IconRefresh size={16} />}
+                    onClick={loadPeopleData}
+                    loading={peopleLoading}
+                    variant="filled"
+                    size="sm"
+                    color="blue"
+                    styles={{
+                      root: {
+                        backgroundColor: '#228be6',
+                        color: 'white',
+                        '&:hover': {
+                          backgroundColor: '#1c7ed6'
+                        }
+                      }
+                    }}
+                  >
+                    Refresh
+                  </Button>
+                </Flex>
 
-              <Alert color="red" title="Warning" icon={<IconTrash size={16} />}>
-                This action cannot be undone. All registered student data will be
-                permanently deleted.
-              </Alert>
+                <ScrollArea h={400} style={{ position: 'relative' }}>
+                  <LoadingOverlay visible={peopleLoading} overlayProps={{ blur: 2 }} />
 
-              <Button
-                leftSection={<IconTrash size={16} />}
-                onClick={handleDeleteStudent}
-                loading={deleteLoading}
-                color="red"
-                variant="filled"
-              >
-                {deleteLoading ? 'Deleting...' : 'Delete All people'}
-              </Button>
-            </Stack>
-          </Card>
+                  {people.length === 0 ? (
+                    <Text c="dimmed" ta="center" py="xl">
+                      No people registered yet
+                    </Text>
+                  ) : (
+                    <Stack gap="xs">
+                      {people.map((person) => (
+                        <Card key={person.id} withBorder p="md">
+                          <Group justify="space-between" align="center">
+                            <Group>
+                              {person.has_image ? (
+                                <Image
+                                  src={`http://localhost:8000${person.image_path}`}
+                                  alt={`${person.name} reference photo`}
+                                  w={60}
+                                  h={60}
+                                  radius="md"
+                                  style={{ objectFit: 'cover' }}
+                                  fallbackSrc="data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' width='60' height='60' viewBox='0 0 24 24' fill='%23868e96'%3e%3cpath d='M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z'/%3e%3c/svg%3e"
+                                />
+                              ) : (
+                                <Box
+                                  w={60}
+                                  h={60}
+                                  style={{
+                                    backgroundColor: '#f8f9fa',
+                                    borderRadius: '6px',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'center',
+                                    border: '1px solid #dee2e6'
+                                  }}
+                                >
+                                  <IconUser size={30} color="#868e96" />
+                                </Box>
+                              )}
+
+                              <Stack gap={0}>
+                                <Text fw={500} size="sm">
+                                  {person.name}
+                                </Text>
+                                <Text size="xs" c="dimmed">
+                                  ID: {person.id}
+                                </Text>
+                                {person.title && (
+                                  <Text size="xs" c="blue.6">
+                                    {person.title}
+                                  </Text>
+                                )}
+                              </Stack>
+                            </Group>
+
+                            <Button
+                              leftSection={<IconTrash size={14} />}
+                              onClick={() => handleDeletePerson(person.id, person.name)}
+                              color="red"
+                              variant="filled"
+                              size="xs"
+                              styles={{
+                                root: {
+                                  backgroundColor: '#fa5252',
+                                  color: 'white',
+                                  fontSize: '12px',
+                                  fontWeight: 500,
+                                  '&:hover': {
+                                    backgroundColor: '#e03131'
+                                  }
+                                }
+                              }}
+                            >
+                              Delete
+                            </Button>
+                          </Group>
+                        </Card>
+                      ))}
+                    </Stack>
+                  )}
+                </ScrollArea>
+              </Stack>
+            </Card>
+
+            {/* Bulk Actions Section */}
+            <Card shadow="sm" p="lg" radius="md" withBorder>
+              <Stack gap="md">
+                <Title order={4}>
+                  Bulk Actions
+                </Title>
+
+                <Alert color="red" title="Warning" icon={<IconTrash size={16} />}>
+                  This action cannot be undone. All registered people data will be
+                  permanently deleted.
+                </Alert>
+
+                <Button
+                  leftSection={<IconTrash size={16} />}
+                  onClick={handleDeleteAllPeople}
+                  loading={deleteLoading}
+                  color="red"
+                  variant="filled"
+                  disabled={people.length === 0}
+                  size="md"
+                  styles={{
+                    root: {
+                      backgroundColor: people.length === 0 ? '#ced4da' : '#fa5252',
+                      color: people.length === 0 ? '#868e96' : 'white',
+                      fontWeight: 600,
+                      fontSize: '14px',
+                      '&:hover': people.length > 0 ? {
+                        backgroundColor: '#e03131'
+                      } : {}
+                    }
+                  }}
+                >
+                  {deleteLoading ? 'Deleting...' : `Delete All People (${people.length})`}
+                </Button>
+              </Stack>
+            </Card>
+          </Stack>
         </Tabs.Panel>
       </Tabs>
       </Box>

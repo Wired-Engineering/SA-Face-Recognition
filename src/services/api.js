@@ -71,11 +71,10 @@ class ApiService {
     return this.request('/api/people');
   }
 
-  async registerperson(personId, personName, personTitle, imageData) {
+  async registerperson(personName, personTitle, imageData) {
     return this.request('/api/people/register', {
       method: 'POST',
       body: JSON.stringify({
-        person_id: personId,
         person_name: personName,
         person_title: personTitle,
         image_data: imageData,
@@ -85,6 +84,12 @@ class ApiService {
 
   async deleteperson(personId) {
     return this.request(`/api/people/${personId}`, {
+      method: 'DELETE',
+    });
+  }
+
+  async deleteAllPeople() {
+    return this.request('/api/people', {
       method: 'DELETE',
     });
   }

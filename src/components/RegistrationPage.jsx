@@ -13,11 +13,10 @@ import {
   Alert,
 } from '@mantine/core';
 import { useDisclosure } from '@mantine/hooks';
-import { IconUser, IconId, IconCamera, IconUpload, IconUserPlus, IconAlertCircle } from '@tabler/icons-react';
+import { IconUser, IconCamera, IconUpload, IconUserPlus, IconAlertCircle } from '@tabler/icons-react';
 import apiService, { imageUtils, webcamUtils } from '../services/api';
 
 export function RegistrationPage({ onRegister }) {
-  const [personId, setpersonId] = useState('');
   const [personName, setpersonName] = useState('');
   const [personTitle, setpersonTitle] = useState('');
   const [photoFile, setPhotoFile] = useState(null);
@@ -106,7 +105,7 @@ export function RegistrationPage({ onRegister }) {
   };
 
   const handleRegister = async () => {
-    if (!personId || !personName || !personTitle || (!photoFile && !capturedPhoto)) {
+    if (!personName || !personTitle || (!photoFile && !capturedPhoto)) {
       setError('Please fill in all fields and provide a photo');
       return;
     }
@@ -126,12 +125,11 @@ export function RegistrationPage({ onRegister }) {
         imageData = capturedPhoto;
       }
 
-      const result = await apiService.registerperson(personId, personName, personTitle, imageData);
+      const result = await apiService.registerperson(personName, personTitle, imageData);
 
       if (result.success) {
-        setSuccess(`person ${personName} registered successfully!`);
+        setSuccess(`Person ${personName} registered successfully! ID: ${result.person_id}`);
         // Reset form
-        setpersonId('');
         setpersonName('');
         setpersonTitle('');
         setPhotoFile(null);
@@ -139,7 +137,7 @@ export function RegistrationPage({ onRegister }) {
 
         // Call parent callback if provided
         onRegister?.({
-          id: personId,
+          id: result.person_id,
           name: personName,
           title: personTitle,
           photo: imageData,
@@ -180,25 +178,6 @@ export function RegistrationPage({ onRegister }) {
             </Title>
 
             {/* Person Information */}
-            <TextInput
-              leftSection={<IconId size={16} />}
-              label="person ID"
-              placeholder="Enter ID here"
-              value={personId}
-              onChange={(event) => setpersonId(event.currentTarget.value)}
-              required
-              styles={{
-                input: {
-                  backgroundColor: 'white',
-                  border: '1px solid rgb(206, 212, 218)',
-                  '&:focus': {
-                    borderColor: 'rgb(0, 36, 61)',
-                    outline: '2px solid rgb(0, 36, 61)',
-                    outlineOffset: '2px',
-                  },
-                },
-              }}
-            />
 
             <TextInput
               leftSection={<IconUser size={16} />}
@@ -376,7 +355,7 @@ export function RegistrationPage({ onRegister }) {
             )}
 
             {/* Validation Alert */}
-            {!error && !success && (!personId || !personName || !personTitle || (!photoFile && !capturedPhoto)) && (
+            {!error && !success && (!personName || !personTitle || (!photoFile && !capturedPhoto)) && (
               <Alert
                 icon={<IconAlertCircle size={16} />}
                 color="orange"
@@ -394,7 +373,7 @@ export function RegistrationPage({ onRegister }) {
               fullWidth
               color="signature"
               style={{ marginTop: '1rem' }}
-              disabled={!personId || !personName || !personTitle || (!photoFile && !capturedPhoto) || loading}
+              disabled={!personName || !personTitle || (!photoFile && !capturedPhoto) || loading}
             >
               {loading ? 'Registering...' : 'Register'}
             </Button>

@@ -15,8 +15,8 @@ import time
 import logging
 import asyncio
 from contextlib import asynccontextmanager
-import threading
 import queue
+import uuid
 
 # SocketIO imports
 import socketio
@@ -651,7 +651,6 @@ class LoginRequest(BaseModel):
     password: str
 
 class personRegistration(BaseModel):
-    person_id: str
     person_name: str
     person_title: str
     image_data: str
@@ -735,17 +734,31 @@ async def change_admin_password(request: AdminPasswordChange):
 # person management endpoints
 @app.get("/api/people")
 async def get_people():
-    """Get all registered people"""
+    """Get all registered people with complete information"""
     try:
         person_ids = db.get_all_person_ids()
         people = []
 
         for person_id in person_ids:
             person_name = db.get_person_name(person_id)
+            person_title = db.get_person_title(person_id)
             if person_name:
+                # Check if reference image exists
+                image_path = f'images/{person_id}.png'
+                has_image = os.path.exists(image_path)
+
+                # Add timestamp for cache busting
+                image_url = None
+                if has_image:
+                    file_mtime = int(os.path.getmtime(image_path))
+                    image_url = f'/api/people/{person_id}/image?t={file_mtime}'
+
                 people.append({
                     'id': person_id,
-                    'name': person_name
+                    'name': person_name,
+                    'title': person_title or '',
+                    'has_image': has_image,
+                    'image_path': image_url
                 })
 
         return {
@@ -758,8 +771,11 @@ async def get_people():
 
 @app.post("/api/people/register")
 async def register_person(request: personRegistration):
-    """Register a new person"""
+    """Register a new person with auto-generated UUID"""
     try:
+        # Generate a unique UUID for the person
+        person_id = str(uuid.uuid4())
+
         # Decode base64 image
         if request.image_data.startswith('data:image'):
             image_data = request.image_data.split(',')[1]
@@ -773,7 +789,7 @@ async def register_person(request: personRegistration):
         image_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
 
         # Use the face recognizer to detect faces
-        _, faces = face_recognizer.recognize_face(image_cv, f"{request.person_id}.png")
+        _, faces = face_recognizer.recognize_face(image_cv, f"{person_id}.png")
 
         if faces is None or len(faces) == 0:
             return {
@@ -787,18 +803,19 @@ async def register_person(request: personRegistration):
                 'message': 'Multiple faces detected. Please use an image with only one face.'
             }
 
-        # Save person to database
-        db_result = db.insert_into_person(request.person_id, request.person_name, request.person_title)
+        # Save person to database (UUID ensures uniqueness, so no conflict possible)
+        db_result = db.insert_into_person(person_id, request.person_name, request.person_title)
 
         if 'already exist' in db_result:
+            # This should theoretically never happen with UUID, but handle it just in case
             return {
                 'success': False,
-                'message': 'person ID already exists'
+                'message': 'Unexpected ID collision occurred, please try again'
             }
 
         # Save face image
         os.makedirs('images', exist_ok=True)
-        image_path = f'images/{request.person_id}.png'
+        image_path = f'images/{person_id}.png'
         cv2.imwrite(image_path, image_cv)
 
         # Recreate features dictionary with new person
@@ -806,8 +823,8 @@ async def register_person(request: personRegistration):
 
         return {
             'success': True,
-            'message': 'person registered successfully',
-            'person_id': request.person_id,
+            'message': 'Person registered successfully',
+            'person_id': person_id,
             'person_name': request.person_name,
             'person_title': request.person_title
         }
@@ -835,6 +852,65 @@ async def delete_person(person_id: str):
                 'success': False,
                 'message': 'Failed to delete person'
             }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/people")
+async def delete_all_people():
+    """Delete all people from the database"""
+    try:
+        person_ids = db.get_all_person_ids()
+        deleted_count = 0
+        failed_deletions = []
+
+        for person_id in person_ids:
+            result = db.delete_data_from_person(person_id)
+            if result:
+                deleted_count += 1
+            else:
+                failed_deletions.append(person_id)
+
+        # Recreate features dictionary after deletion
+        face_recognizer.create_features()
+
+        if len(failed_deletions) == 0:
+            return {
+                'success': True,
+                'message': f'All {deleted_count} people deleted successfully',
+                'deleted_count': deleted_count
+            }
+        else:
+            return {
+                'success': False,
+                'message': f'Deleted {deleted_count} people, but failed to delete {len(failed_deletions)} people',
+                'deleted_count': deleted_count,
+                'failed_deletions': failed_deletions
+            }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/people/{person_id}/image")
+async def get_person_image(person_id: str):
+    """Get a person's reference image"""
+    try:
+        image_path = f'images/{person_id}.png'
+        if os.path.exists(image_path):
+            # Get file modification time for cache busting
+            file_mtime = os.path.getmtime(image_path)
+            etag = f'"{person_id}-{int(file_mtime)}"'
+
+            return FileResponse(
+                image_path,
+                media_type="image/png",
+                headers={
+                    "Cache-Control": "no-cache, must-revalidate",
+                    "Access-Control-Allow-Origin": "*",
+                    "ETag": etag,
+                    "Last-Modified": time.strftime('%a, %d %b %Y %H:%M:%S GMT', time.gmtime(file_mtime))
+                }
+            )
+        else:
+            raise HTTPException(status_code=404, detail="Person image not found")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

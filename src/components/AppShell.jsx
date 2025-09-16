@@ -2,10 +2,10 @@ import { useState, useEffect } from 'react';
 import {
   AppShell,
   Group,
-  Title,
   Button,
   Text,
   Stack,
+  Image,
   useMantineTheme,
 } from '@mantine/core';
 import {
@@ -100,17 +100,13 @@ export function MainAppShell() {
       <AppShell.Header>
         <Group justify="space-between" h="100%" px="md">
           <Group>
-            <Title
-              order={2}
-              c="white"
-              style={{
-                fontFamily: 'Sitka',
-                fontSize: '18px',
-                fontWeight: 'normal',
-              }}
-            >
-              Signature Aviation
-            </Title>
+            <Image
+              src="/Logo.png"
+              alt="Logo"
+              h={20}
+              w="auto"
+              fit="contain"
+            />
           </Group>
 
           {/* Only show navigation when authenticated */}
