@@ -124,6 +124,29 @@ export function DetectionPage({ onDetection }) {
     try {
       console.log('📹 Starting browser webcam capture...', deviceId ? `Device: ${deviceId}` : 'Default device');
 
+      // Check if getUserMedia is available
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        throw new Error('Camera access is not supported in this browser. Please use a modern browser with HTTPS.');
+      }
+
+      // Check if running over HTTPS (required for camera access in most browsers)
+      if (location.protocol !== 'https:' && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1') {
+        throw new Error('Camera access requires HTTPS. Please access this site using HTTPS for camera functionality.');
+      }
+
+      // Check camera permissions first
+      try {
+        const permission = await navigator.permissions.query({ name: 'camera' });
+        console.log('📹 Camera permission status:', permission.state);
+
+        if (permission.state === 'denied') {
+          throw new Error('Camera access has been denied. Please enable camera permissions in your browser settings and reload the page.');
+        }
+      } catch (permErr) {
+        // Permissions API not supported in all browsers, continue with getUserMedia
+        console.log('📹 Permissions API not supported, proceeding with getUserMedia');
+      }
+
       // Build constraints based on device selection
       const constraints = {
         video: {
@@ -139,8 +162,37 @@ export function DetectionPage({ onDetection }) {
         constraints.video.deviceId = { exact: deviceId };
       }
 
-      // Get user media for webcam
-      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      // Get user media for webcam - this will prompt for permission if not granted
+      setVideoStatus('Requesting camera permission...');
+      let stream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia(constraints);
+      } catch (constraintError) {
+        // If specific device fails, try again with default device
+        if (constraintError.name === 'OverconstrainedError' && deviceId && deviceId !== 'default') {
+          console.warn('📹 Specific device failed, falling back to default camera:', constraintError);
+
+          // Clear the invalid device settings to prevent future auto-restart issues
+          try {
+            await apiService.setCameraSettings('default', null, null);
+            console.log('🔄 Cleared invalid device settings, set to default camera');
+          } catch (settingsError) {
+            console.warn('Failed to clear invalid camera settings:', settingsError);
+          }
+
+          const fallbackConstraints = {
+            video: {
+              width: { ideal: 640 },
+              height: { ideal: 480 },
+              frameRate: { ideal: 30 }
+            },
+            audio: false
+          };
+          stream = await navigator.mediaDevices.getUserMedia(fallbackConstraints);
+        } else {
+          throw constraintError;
+        }
+      }
 
       setBrowserWebcamStream(stream);
 
@@ -204,8 +256,33 @@ export function DetectionPage({ onDetection }) {
 
     } catch (error) {
       console.error('❌ Error starting browser webcam:', error);
-      setError(`Failed to access webcam: ${error.message}`);
       setIsStreamLoading(false);
+      setVideoStatus('Error');
+
+      // Provide specific error messages for common permission issues
+      let errorMessage = error.message;
+
+      if (error.name === 'NotAllowedError' || error.name === 'PermissionDeniedError') {
+        errorMessage = 'Camera access denied. Please click "Allow" when prompted for camera permission, or check your browser settings to enable camera access for this site.';
+      } else if (error.name === 'NotFoundError' || error.name === 'DeviceNotFoundError') {
+        errorMessage = 'No camera found. Please ensure a camera is connected and try again.';
+      } else if (error.name === 'NotReadableError' || error.name === 'TrackStartError') {
+        errorMessage = 'Camera is already in use by another application. Please close other applications using the camera and try again.';
+      } else if (error.name === 'OverconstrainedError' || error.name === 'ConstraintNotSatisfiedError') {
+        errorMessage = 'Selected camera does not support the required settings. Camera settings have been reset to default.';
+
+        // Clear detection state to prevent auto-restart loop
+        if (isDetectingRef.current) {
+          handleStopDetection(true);
+        }
+        setIsVideoStarted(false);
+      } else if (error.name === 'NotSupportedError') {
+        errorMessage = 'Camera access is not supported. Please use HTTPS and a modern browser.';
+      } else if (error.name === 'SecurityError') {
+        errorMessage = 'Camera access blocked for security reasons. Please ensure you are using HTTPS and try again.';
+      }
+
+      setError(`Failed to access camera: ${errorMessage}`);
       throw error;
     }
   }, [emit]);
@@ -800,6 +877,18 @@ export function DetectionPage({ onDetection }) {
                   Welcome Canvas
                 </Button>
               </Group>
+
+              {/* Camera Permission Info */}
+              {!isVideoStarted && !isStreamLoading && (
+                <Text size="xs" c="dimmed" ta="center" mt="sm">
+                  📹 Camera access is required for face detection.
+                  {location.protocol !== 'https:' && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1' && (
+                    <span> HTTPS connection required.</span>
+                  )}
+                  <br />
+                  Please allow camera permission when prompted.
+                </Text>
+              )}
 
             </Stack>
           </Card>
