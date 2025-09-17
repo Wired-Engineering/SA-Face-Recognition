@@ -35,15 +35,22 @@ export function DetectionPage({ onDetection }) {
   const [error, setError] = useState(null);
   const [actualCameraSource, setActualCameraSource] = useState('default');
   const rtspImageRef = useRef(null);
+  const videoRef = useRef(null);
+  const canvasRef = useRef(null); // For capturing frames
   const frameProcessingIntervalRef = useRef(null);
   const isDetectingRef = useRef(false);
   const [isStreamLoading, setIsStreamLoading] = useState(false);
+  const [browserWebcamStream, setBrowserWebcamStream] = useState(null);
+  const lastFrameTimeRef = useRef(0);
+  const currentBlobUrlRef = useRef(null);
+  const [faceDetections, setFaceDetections] = useState([]);
+  const videoContainerRef = useRef(null);
 
-  // Handle detection results for UI updates
+  // Handle detection results for UI updates (welcome screens and UI state only)
   const handleDetectionResult = useCallback((data) => {
     // console.log('🔍 Received detection results:', data);
 
-    // Update UI state for both RTSP and webcam modes
+    // Update UI state for detection results
     if (data.faces && data.faces.length > 0) {
       // Find the best recognition result
       const recognizedFaces = data.faces.filter(face => face.recognized);
@@ -97,6 +104,141 @@ export function DetectionPage({ onDetection }) {
     }
   }, [onDetection]);
 
+  // Handle binary frame processing results
+  const handleBinaryFrameResult = useCallback((data) => {
+    // console.log('🔍 Received binary frame results:', data);
+
+    // Update face detections for visual overlays
+    if (data.faces && data.faces.length > 0) {
+      setFaceDetections(data.faces);
+      // Also process faces for UI display
+      handleDetectionResult({ faces: data.faces });
+    } else {
+      setFaceDetections([]);
+      setDetectedPerson(null);
+    }
+  }, [handleDetectionResult]);
+
+  // Browser webcam capture and frame processing
+  const startBrowserWebcam = useCallback(async (deviceId = null) => {
+    try {
+      console.log('📹 Starting browser webcam capture...', deviceId ? `Device: ${deviceId}` : 'Default device');
+
+      // Build constraints based on device selection
+      const constraints = {
+        video: {
+          width: { ideal: 640 },
+          height: { ideal: 480 },
+          frameRate: { ideal: 30 }
+        },
+        audio: false
+      };
+
+      // Add specific device ID if provided
+      if (deviceId && deviceId !== 'default') {
+        constraints.video.deviceId = { exact: deviceId };
+      }
+
+      // Get user media for webcam
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+
+      setBrowserWebcamStream(stream);
+
+      // Set video element source
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        await new Promise((resolve) => {
+          videoRef.current.onloadedmetadata = () => {
+            videoRef.current.play();
+            resolve();
+          };
+        });
+      }
+
+      // Start frame processing
+      const canvas = canvasRef.current;
+      const ctx = canvas.getContext('2d');
+
+      const processFrame = () => {
+        if (!isDetectingRef.current || !videoRef.current || !canvas || !ctx) {
+          return;
+        }
+
+        // Throttle frame processing to prevent overwhelming the network
+        const now = Date.now();
+        if (now - lastFrameTimeRef.current < 100) { // Max 10 FPS
+          return;
+        }
+        lastFrameTimeRef.current = now;
+
+        // Draw video frame to canvas
+        canvas.width = videoRef.current.videoWidth || 640;
+        canvas.height = videoRef.current.videoHeight || 480;
+        ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
+
+        // Convert to blob and send as binary to backend
+        canvas.toBlob((blob) => {
+          if (blob) {
+            // Send binary blob directly via Socket.IO
+            emit('process_frame_binary', {
+              frame: blob,
+              width: canvas.width,
+              height: canvas.height
+            });
+          }
+        }, 'image/jpeg', 0.8);
+      };
+
+      // Process frames using requestAnimationFrame with throttling
+      const frameLoop = () => {
+        processFrame();
+        if (isDetectingRef.current) {
+          frameProcessingIntervalRef.current = requestAnimationFrame(frameLoop);
+        }
+      };
+      frameLoop();
+
+      console.log('✅ Browser webcam capture started');
+      setVideoStatus('Browser Webcam Active');
+      setIsStreamLoading(false);
+
+    } catch (error) {
+      console.error('❌ Error starting browser webcam:', error);
+      setError(`Failed to access webcam: ${error.message}`);
+      setIsStreamLoading(false);
+      throw error;
+    }
+  }, [emit]);
+
+  const stopBrowserWebcam = useCallback(() => {
+    console.log('🛑 Stopping browser webcam...');
+
+    // Stop the media stream
+    if (browserWebcamStream) {
+      browserWebcamStream.getTracks().forEach(track => track.stop());
+      setBrowserWebcamStream(null);
+    }
+
+    // Clear video element
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
+
+    // Stop frame processing
+    if (frameProcessingIntervalRef.current) {
+      cancelAnimationFrame(frameProcessingIntervalRef.current);
+      frameProcessingIntervalRef.current = null;
+    }
+
+    // Clean up current blob URL
+    if (currentBlobUrlRef.current) {
+      URL.revokeObjectURL(currentBlobUrlRef.current);
+      currentBlobUrlRef.current = null;
+    }
+
+    console.log('✅ Browser webcam stopped');
+  }, [browserWebcamStream]);
+
   // Setup SocketIO connection using the socket provider
   const setupSocketIOConnection = useCallback(async () => {
     console.log('🔌 Setting up SocketIO connection...');
@@ -147,7 +289,7 @@ export function DetectionPage({ onDetection }) {
 
     // Stop frame processing
     if (frameProcessingIntervalRef.current) {
-      clearInterval(frameProcessingIntervalRef.current);
+      cancelAnimationFrame(frameProcessingIntervalRef.current);
       frameProcessingIntervalRef.current = null;
     }
 
@@ -195,49 +337,31 @@ export function DetectionPage({ onDetection }) {
           // Use Socket.IO connection for welcome screen recognition events only
           await setupSocketIOConnection();
           return; // Skip getUserMedia for RTSP
-        } else if (cameraSettings.source === 'webcam' || cameraSettings.source === 'device' || cameraSettings.source === 'default') {
-          // Webcam/Device/Default - use HTTP video stream with overlays from backend (just like RTSP)
-          console.log('📹 Webcam/Device/Default selected, using backend stream with overlays');
-          console.log('📹 Setting actualCameraSource to:', cameraSettings.source);
-          if (cameraSettings.device_id) {
-            console.log('📹 Using webcam device:', cameraSettings.device_id);
+        } else {
+          // All other camera sources - use browser getUserMedia with Socket.IO processing
+          const source = cameraSettings.source || 'default';
+          console.log('📹 Camera selected:', source, 'using browser getUserMedia with Socket.IO processing');
+
+          // Set browser webcam mode
+          setActualCameraSource('browser');
+          setIsVideoStarted(true);
+          setVideoStatus('Starting camera...');
+          setIsStreamLoading(true);
+
+          // Set up Socket.IO connection first
+          await setupSocketIOConnection();
+
+          // Start browser webcam capture with specific device if not default
+          let deviceIdToUse = null;
+          if (cameraSettings.source === 'device' && cameraSettings.device_id) {
+            deviceIdToUse = cameraSettings.device_id;
+            console.log('📹 Using specific device ID:', deviceIdToUse);
           }
 
-          // Set webcam streaming mode
-          setActualCameraSource(cameraSettings.source);
-          setIsVideoStarted(true);
-          setVideoStatus('Connecting to webcam...');
-          setIsStreamLoading(true); // Start loading state
-
-          // Set up webcam stream with overlays after state update
-          setTimeout(() => {
-            if (rtspImageRef.current) {
-              rtspImageRef.current.src = '/api/webcam/stream-with-overlay';
-              console.log('📹 Webcam stream source set to /api/webcam/stream-with-overlay');
-
-              // Set status once stream loads
-              rtspImageRef.current.onload = () => {
-                setVideoStatus('Webcam Active');
-                setIsStreamLoading(false); // Stop loading when loaded
-              };
-              rtspImageRef.current.onerror = () => {
-                setVideoStatus('Webcam Error');
-                setError('Failed to connect to webcam stream');
-                setIsStreamLoading(false); // Stop loading on error
-              };
-            }
-          }, 100);
-
-          // Use Socket.IO for welcome screen events
-          await setupSocketIOConnection();
-          return; // Skip getUserMedia for webcam streaming
+          await startBrowserWebcam(deviceIdToUse);
+          return;
         }
-        // If source is not rtsp, webcam, device, or default, fall through to legacy getUserMedia
       }
-
-      // This should not happen with current streaming architecture
-      console.error('🚨 Unexpected fallthrough to legacy getUserMedia path');
-      throw new Error('Unsupported camera configuration');
 
     } catch (err) {
       console.error('❌ Error starting video:', err);
@@ -256,18 +380,19 @@ export function DetectionPage({ onDetection }) {
       handleStopDetection(true);
     }
 
-    // Stop backend streams for both device and RTSP sources
+    // Stop backend streams or browser webcam based on source
     console.log('🔍 Debug stop - actualCameraSource:', actualCameraSource);
     try {
-      if (actualCameraSource === 'rtsp') {
+      if (actualCameraSource === 'browser') {
+        console.log('🛑 Stopping browser webcam...');
+        stopBrowserWebcam();
+        console.log('✅ Browser webcam stopped');
+      } else if (actualCameraSource === 'rtsp') {
         console.log('🛑 Stopping RTSP streams...');
         await apiService.stopRtspStreams();
         console.log('✅ RTSP streams stopped');
-      } else if (actualCameraSource === 'device' || actualCameraSource === 'webcam' || actualCameraSource === 'default') {
-        console.log('🛑 Stopping device streams...');
-        await apiService.stopWebcamStreams();
-        console.log('✅ Device streams stopped');
       }
+      // Note: All non-RTSP sources now use browser webcam, so no need for backend stream stopping
     } catch (error) {
       console.error('❌ Error stopping streams:', error);
     }
@@ -294,7 +419,7 @@ export function DetectionPage({ onDetection }) {
     setDetectedPerson(null);
     setError(null);
     setIsStreamLoading(false);
-  }, [actualCameraSource, disconnect, handleStopDetection]);
+  }, [actualCameraSource, disconnect, handleStopDetection, stopBrowserWebcam]);
 
 
   // Check for persistent detection state on mount
@@ -318,9 +443,23 @@ export function DetectionPage({ onDetection }) {
   useEffect(() => {
     if (!isConnected) return;
 
-    // Handle face detection results from SocketIO (for welcome screen events)
-    const cleanupDetectionResult = on('face_detection_result', (data) => {
-      handleDetectionResult(data);
+    // Handle binary frame processing results (browser webcam)
+    const cleanupBinaryFrameResult = on('frame_processed_binary', (data) => {
+      handleBinaryFrameResult(data);
+    });
+
+    // Handle face detection results (RTSP and other sources)
+    const cleanupFaceDetectionResult = on('face_detection_result', (data) => {
+      // For RTSP sources, update detection overlays and UI state
+      if (actualCameraSource === 'rtsp') {
+        if (data.faces && data.faces.length > 0) {
+          setFaceDetections(data.faces);
+          handleDetectionResult({ faces: data.faces });
+        } else {
+          setFaceDetections([]);
+          setDetectedPerson(null);
+        }
+      }
     });
 
     const cleanupDetectionStarted = on('detection_started', (data) => {
@@ -342,13 +481,14 @@ export function DetectionPage({ onDetection }) {
 
     // Cleanup function
     return () => {
-      cleanupDetectionResult?.();
+      cleanupBinaryFrameResult?.();
+      cleanupFaceDetectionResult?.();
       cleanupDetectionStarted?.();
       cleanupDetectionStopped?.();
       cleanupDetectionError?.();
       cleanupError?.();
     };
-  }, [isConnected, on, handleDetectionResult]);
+  }, [isConnected, on, handleBinaryFrameResult, handleDetectionResult, actualCameraSource]);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -357,6 +497,12 @@ export function DetectionPage({ onDetection }) {
       // Only disconnect socket, do NOT send stop_detection to preserve detection for welcome screens
       setIsVideoStarted(false);
       setIsDetecting(false);
+
+      // Clean up blob URL on unmount
+      if (currentBlobUrlRef.current) {
+        URL.revokeObjectURL(currentBlobUrlRef.current);
+        currentBlobUrlRef.current = null;
+      }
     };
   }, []); // Empty dependency array - only run on mount/unmount
 
@@ -366,6 +512,12 @@ export function DetectionPage({ onDetection }) {
 
   return (
     <Box style={{ width: '100%', minHeight: '100%' }}>
+      {/* Hidden canvas for browser webcam frame capture */}
+      <canvas
+        ref={canvasRef}
+        style={{ display: 'none' }}
+      />
+
       <Box style={{ padding: '24px' }}>
         <Title order={2} ta="center" c="white" mb="xl">
           Live Face Detection
@@ -423,30 +575,140 @@ export function DetectionPage({ onDetection }) {
                 ) : (
                   <Box style={{ position: 'relative', width: '100%', height: '100%' }}>
                     <LoadingOverlay visible={isStreamLoading} loaderProps={{ size: 'lg' }} />
-                    {/* MJPEG stream with backend overlays for both device and RTSP sources */}
-                    <img
-                      ref={rtspImageRef}
-                      alt="Camera Stream"
-                      style={{
-                        width: '100%',
-                        height: '100%',
-                        objectFit: 'cover',
-                        borderRadius: '6px',
-                        display: 'block'
-                      }}
-                      onLoad={() => {
-                        console.log('📡 Camera stream loaded successfully');
-                        setVideoStatus('Connected');
-                        setError(null);
-                        setIsStreamLoading(false); // Stop loading when stream loads
-                      }}
-                      onError={(e) => {
-                        console.error('📡 Camera stream error:', e);
-                        setError('Camera stream failed to load. Check camera connection.');
-                        setVideoStatus('Connection Failed');
-                        setIsStreamLoading(false); // Stop loading on error
-                      }}
-                    />
+
+                    {/* Show MJPEG stream only for RTSP sources */}
+                    {actualCameraSource === 'rtsp' && (
+                      <Box
+                        ref={videoContainerRef}
+                        style={{
+                          position: 'relative',
+                          width: '100%',
+                          height: '100%'
+                        }}
+                      >
+                        <img
+                          ref={rtspImageRef}
+                          alt="RTSP Camera Stream"
+                          style={{
+                            width: '100%',
+                            height: '100%',
+                            objectFit: 'cover',
+                            borderRadius: '6px',
+                            display: 'block'
+                          }}
+                          onLoad={() => {
+                            console.log('📡 RTSP stream loaded successfully');
+                            setVideoStatus('RTSP Connected');
+                            setError(null);
+                            setIsStreamLoading(false);
+                          }}
+                          onError={(e) => {
+                            console.error('📡 RTSP stream error:', e);
+                            setError('RTSP stream failed to load. Check camera connection.');
+                            setVideoStatus('RTSP Connection Failed');
+                            setIsStreamLoading(false);
+                          }}
+                        />
+
+                        {/* Face detection overlays for RTSP (optional - backend already draws them) */}
+                        {/* Uncomment if you want additional CSS overlays on top of backend overlays */}
+                        {/* {faceDetections.map((face, index) => {
+                          // Same overlay logic as browser webcam
+                        })} */}
+                      </Box>
+                    )}
+
+                    {/* Show live video for browser webcam */}
+                    {actualCameraSource === 'browser' && (
+                      <Box
+                        ref={videoContainerRef}
+                        style={{
+                          position: 'relative',
+                          width: '100%',
+                          height: '100%'
+                        }}
+                      >
+                        <video
+                          ref={videoRef}
+                          autoPlay
+                          playsInline
+                          muted
+                          style={{
+                            width: '100%',
+                            height: '100%',
+                            objectFit: 'cover',
+                            borderRadius: '6px',
+                            display: 'block'
+                          }}
+                        />
+
+                        {/* Face detection overlays */}
+                        {faceDetections.map((face, index) => {
+                          if (!face.bbox || !videoContainerRef.current || !videoRef.current) return null;
+
+                          const container = videoContainerRef.current.getBoundingClientRect();
+                          const video = videoRef.current;
+
+                          // Calculate scaling based on video display size vs original frame size
+                          const scaleX = container.width / (video.videoWidth || 640);
+                          const scaleY = container.height / (video.videoHeight || 480);
+
+                          const [x1, y1, x2, y2] = face.bbox;
+                          const width = (x2 - x1) * scaleX;
+                          const height = (y2 - y1) * scaleY;
+                          const left = x1 * scaleX;
+                          const top = y1 * scaleY;
+
+                          const isRecognized = face.recognized;
+                          const color = isRecognized ? '#00ff00' : '#ff0000';
+
+                          // Determine label text
+                          const label = isRecognized
+                            ? `${face.person_name} (${Math.round(face.match_confidence * 100)}%)`
+                            : 'Unknown';
+
+                          return (
+                            <Box
+                              key={index}
+                              style={{
+                                position: 'absolute',
+                                left: `${left}px`,
+                                top: `${top}px`,
+                                width: `${width}px`,
+                                height: `${height}px`,
+                                border: `2px solid ${color}`,
+                                borderRadius: '2px',
+                                pointerEvents: 'none',
+                                zIndex: 10
+                              }}
+                            >
+                              {/* Label with background rectangle (like RTSP) */}
+                              <Box
+                                style={{
+                                  position: 'absolute',
+                                  top: '-32px',
+                                  left: '0',
+                                  backgroundColor: color,
+                                  color: 'white',
+                                  padding: '4px 8px',
+                                  fontSize: '14px',
+                                  fontWeight: '700',
+                                  fontFamily: 'Arial, sans-serif',
+                                  whiteSpace: 'nowrap',
+                                  borderRadius: '0px',
+                                  textShadow: '1px 1px 1px rgba(0,0,0,0.8)',
+                                  minHeight: '20px',
+                                  display: 'flex',
+                                  alignItems: 'center'
+                                }}
+                              >
+                                {label}
+                              </Box>
+                            </Box>
+                          );
+                        })}
+                      </Box>
+                    )}
 
                     {/* Detection Overlay */}
                     {isDetecting && detectedPerson && (

@@ -88,24 +88,51 @@ export function SettingsPage({ onSaveSettings }) {
         console.log('Available cameras:', devices);
         setCameraDevices(devices);
 
-        // Load saved camera settings from backend
+        // Load saved camera settings first to check current configuration
         const cameraSettings = await apiService.getCameraSettings();
-        if (cameraSettings.success || cameraSettings.source) {
-          if (cameraSettings.source === 'rtsp') {
+
+        // If no cameras are available, only auto-set RTSP if there's no valid existing config
+        if (devices.length === 0) {
+          console.log('No cameras available');
+
+          // Check if we already have a valid RTSP configuration
+          if (cameraSettings.success && cameraSettings.source === 'rtsp') {
+            console.log('Using existing RTSP configuration');
             setSelectedCamera('rtsp');
             setRtspUrl(cameraSettings.rtsp_url || '');
-          } else if (cameraSettings.source === 'device' && cameraSettings.device_id) {
-            // Find which camera index this device ID corresponds to
-            const deviceIndex = devices.findIndex(device => device.deviceId === cameraSettings.device_id);
-            if (deviceIndex >= 0) {
-              setSelectedCamera(`camera_${deviceIndex}`);
-              console.log(`Loaded camera setting: device_id ${cameraSettings.device_id} → camera_${deviceIndex}`);
-            } else {
-              console.warn(`Saved device ID ${cameraSettings.device_id} not found in available devices`);
-              setSelectedCamera('default');
-            }
           } else {
-            setSelectedCamera(cameraSettings.source || 'default');
+            // Only set default RTSP if no valid config exists or config uses invalid camera
+            console.log('No valid camera config found, defaulting to RTSP');
+            setSelectedCamera('rtsp');
+
+            try {
+              await apiService.updateCameraSettings('rtsp', null, '');
+              console.log('✅ Automatically updated config to use RTSP (no cameras detected)');
+            } catch (error) {
+              console.warn('Failed to auto-save RTSP config:', error);
+            }
+          }
+        }
+
+        // Load saved camera settings from backend (only if cameras are available)
+        if (devices.length > 0) {
+          if (cameraSettings.success || cameraSettings.source) {
+            if (cameraSettings.source === 'rtsp') {
+              setSelectedCamera('rtsp');
+              setRtspUrl(cameraSettings.rtsp_url || '');
+            } else if (cameraSettings.source === 'device' && cameraSettings.device_id) {
+              // Find which camera index this device ID corresponds to
+              const deviceIndex = devices.findIndex(device => device.deviceId === cameraSettings.device_id);
+              if (deviceIndex >= 0) {
+                setSelectedCamera(`camera_${deviceIndex}`);
+                console.log(`Loaded camera setting: device_id ${cameraSettings.device_id} → camera_${deviceIndex}`);
+              } else {
+                console.warn(`Saved device ID ${cameraSettings.device_id} not found in available devices`);
+                setSelectedCamera('default');
+              }
+            } else {
+              setSelectedCamera(cameraSettings.source || 'default');
+            }
           }
         }
 
@@ -344,12 +371,13 @@ export function SettingsPage({ onSaveSettings }) {
       } else if (selectedCamera === 'default') {
         source = 'default';
       } else if (selectedCamera.startsWith('camera_')) {
-        // It's a camera index - get the actual device ID from our stored devices
+        // It's a camera index - for testing, send both the index and device ID
         source = 'device';
         const cameraIndex = parseInt(selectedCamera.replace('camera_', ''));
         if (cameraIndex < cameraDevices.length) {
-          deviceId = cameraDevices[cameraIndex].deviceId; // Use actual browser device ID
-          console.log(`Testing camera ${cameraIndex}: device ID = ${deviceId}`);
+          // For testing, pass a special format: "index:deviceId" so backend can use index directly
+          deviceId = `${cameraIndex}:${cameraDevices[cameraIndex].deviceId}`;
+          console.log(`Testing camera ${cameraIndex}: index=${cameraIndex}, deviceId=${cameraDevices[cameraIndex].deviceId}`);
         } else {
           setError('Selected camera not found in available devices');
           return;
@@ -358,6 +386,9 @@ export function SettingsPage({ onSaveSettings }) {
         // Fallback to default
         source = 'default';
       }
+
+      // Always attempt to test cameras - the backend will handle any environment limitations
+      // and provide appropriate error messages if camera access fails
 
       const result = await apiService.testCamera(source, deviceId, rtspUrlToTest);
 
@@ -851,7 +882,8 @@ export function SettingsPage({ onSaveSettings }) {
                 value={selectedCamera}
                 onChange={setSelectedCamera}
                 data={[
-                  { value: 'default', label: 'Default Camera' },
+                  // Only show default camera option if cameras are available
+                  ...(cameraDevices.length > 0 ? [{ value: 'default', label: 'Default Camera' }] : []),
                   ...cameraDevices.map((device, index) => ({
                     value: `camera_${index}`,
                     label: device.label || `Camera ${index + 1}`
@@ -872,7 +904,10 @@ export function SettingsPage({ onSaveSettings }) {
               )}
 
               <Text size="sm" c="dimmed">
-                {cameraDevices.length} camera device{cameraDevices.length !== 1 ? 's' : ''} detected. Select a camera source above to configure for live detection.
+                {cameraDevices.length === 0
+                  ? 'No cameras detected or camera permissions denied. Use RTSP stream for external cameras.'
+                  : `${cameraDevices.length} camera device${cameraDevices.length !== 1 ? 's' : ''} detected. Select a camera source above to configure for live detection.`
+                }
               </Text>
 
               <Group>

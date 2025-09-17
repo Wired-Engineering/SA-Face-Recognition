@@ -324,8 +324,30 @@ export const webcamUtils = {
   // Get list of video input devices
   async getVideoDevices() {
     try {
-      const devices = await navigator.mediaDevices.enumerateDevices();
-      return devices.filter((device) => device.kind === 'videoinput');
+      // First check if we have any video devices (this works without permission)
+      let devices = await navigator.mediaDevices.enumerateDevices();
+      const videoDevices = devices.filter((device) => device.kind === 'videoinput');
+
+      // If devices don't have labels, we need to request permission first
+      if (videoDevices.length > 0 && !videoDevices[0].label) {
+        console.log('📹 Requesting camera permission to get device labels...');
+        try {
+          // Request camera permission
+          const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+          // Stop the stream immediately after getting permission
+          stream.getTracks().forEach(track => track.stop());
+
+          // Now enumerate again with permission
+          devices = await navigator.mediaDevices.enumerateDevices();
+          return devices.filter((device) => device.kind === 'videoinput');
+        } catch (permissionError) {
+          console.warn('Camera permission denied:', permissionError);
+          // Return empty array when permission denied to respect user's choice
+          return [];
+        }
+      }
+
+      return videoDevices;
     } catch (error) {
       console.error('Error getting video devices:', error);
       return [];

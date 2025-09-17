@@ -34,8 +34,8 @@ async def lifespan(app: FastAPI):
     print("📊 Database initialized")
     print("🤖 AI models loaded")
     print("📷 Camera system ready")
-    print("✅ API ready at http://localhost:8000")
-    print("📚 API docs available at http://localhost:8000/docs")
+    print("✅ API ready at http://localhost:8000/api")
+    print("📚 API docs available at http://localhost:8000/api/docs")
 
     # Ensure required directories exist
     os.makedirs("images", exist_ok=True)
@@ -65,9 +65,9 @@ app = FastAPI(
     description="Face recognition system for person attendance",
     version="1.0.0",
     lifespan=lifespan,
-    docs_url="/docs",
+    docs_url="/api/docs",
     redoc_url=None,
-    openapi_url="/openapi.json"
+    openapi_url="/api/openapi.json"
 )
 
 # CORS middleware for React frontend
@@ -293,28 +293,28 @@ async def request_background_image(sid, data):
         print(f"❌ Error sending background image to {sid}: {e}")
 
 @sio.event
-async def process_frame(sid, data):
+async def process_frame_binary(sid, data):
     """
-    LEGACY: Process video frame via base64 - kept for backwards compatibility
-    Modern approach uses streaming endpoints for both webcam and RTSP
+    Process video frame from browser webcam via binary data - more efficient than base64
+    Browser captures webcam → sends binary frames → backend processes → returns processed frame
     """
-    # This handler is now deprecated in favor of streaming endpoints
-    # which eliminate base64 overhead and provide better performance
-    print(f"⚠️ Legacy frame processing called by {sid} - consider using streaming endpoints")
+   #print(f"📹 Binary frame processing for client {sid}")
 
     try:
         # Check if detection is active for this client
         if not detection_active.get(sid, False):
             return
 
-        # Decode base64 image (SLOW - adds 20-30ms latency)
-        image_data = data['frame']
-        if image_data.startswith('data:image'):
-            image_data = image_data.split(',')[1]
+        # Get binary frame data
+        frame_bytes = data['frame']
 
-        image_bytes = base64.b64decode(image_data)
-        image = Image.open(BytesIO(image_bytes))
-        cv_frame = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+        # Convert binary data to numpy array
+        nparr = np.frombuffer(frame_bytes, np.uint8)
+        cv_frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+        if cv_frame is None:
+            print(f"❌ Failed to decode frame for {sid}")
+            return
 
         # Run face detection
         frame_features, faces = face_recognizer.recognize_face(cv_frame)
@@ -355,6 +355,7 @@ async def process_frame(sid, data):
                         result.update({
                             'person_id': best_match['person_id'],
                             'person_name': best_match['person_name'],
+                            'person_title': best_match['person_title'],
                             'match_confidence': best_match['confidence'],
                             'recognized': True
                         })
@@ -388,19 +389,26 @@ async def process_frame(sid, data):
 
                 detection_results.append(result)
 
-        # Send detection results with coordinates for frontend overlay rendering
-        await sio.emit('face_detection_result', {
+        # Draw overlays on frame for browser webcam
+        if detection_results:
+            cv_frame = draw_detection_overlays_on_frame(cv_frame, detection_results)
+
+        # Send just the detection results, let frontend handle video display
+        # No need to send processed frames back - frontend can overlay detection results
+        await sio.emit('frame_processed_binary', {
             "faces": detection_results,
             "timestamp": time.time(),
             "frame_size": {"width": cv_frame.shape[1], "height": cv_frame.shape[0]}
+            # No processed_frame - frontend will overlay detection results on live video
         }, to=sid)
 
-        if len(detection_results) > 0:
-            print(f"🔍 Sent {len(detection_results)} detection results to {sid}")
+        #if len(detection_results) > 0:
+            #print(f"🔍 Sent {len(detection_results)} detection results with binary frame to {sid}")
 
     except Exception as e:
-        print(f"❌ Error processing frame for {sid}: {e}")
+        print(f"❌ Error processing binary frame for {sid}: {e}")
         await sio.emit('detection_error', {"error": str(e)}, to=sid)
+
 
 
 def draw_detection_overlays_on_frame(frame, faces):
@@ -681,10 +689,6 @@ class DisplaySettings(BaseModel):
 
 class FaceDetectionRequest(BaseModel):
     image_data: str
-
-# SocketIO Models
-class FrameData(BaseModel):
-    frame: str  # base64 encoded image
 
 
 # Authentication endpoints
@@ -1077,49 +1081,14 @@ async def update_camera_settings(request: CameraSettings):
 
 @app.get("/api/camera/devices")
 async def get_camera_devices():
-    """List available camera devices with enhanced macOS support"""
+    """Camera devices should be enumerated by the browser, not the backend.
+    This endpoint returns empty to respect browser camera permissions."""
     try:
+        # Return empty device list - the frontend will handle camera enumeration
+        # via navigator.mediaDevices.enumerateDevices() which respects browser permissions
         devices = []
-        print("🔍 Enumerating camera devices...")
 
-        # Try to detect camera devices (0-9)
-        for i in range(10):
-            try:
-                cap = cv2.VideoCapture(i, cv2.CAP_AVFOUNDATION)
-                if cap.isOpened():
-                    # Try to read a frame to verify it's working
-                    ret, _ = cap.read()
-                    if ret:
-                        # Get device name if possible
-                        device_name = f"Camera {i}"
-
-                        # Try to get more device info for macOS
-                        try:
-                            # Get backend name
-                            backend_name = cap.getBackendName()
-                            device_name = f"Camera {i} ({backend_name})"
-                        except:
-                            pass
-
-                        devices.append({
-                            'device_id': str(i),
-                            'name': device_name,
-                            'index': i,
-                            'compatible': True
-                        })
-                        print(f"✅ Found camera device: {i} - {device_name}")
-                    cap.release()
-            except Exception as e:
-                print(f"❌ Error checking camera {i}: {e}")
-
-        # If we found devices, also add a note about macOS device IDs
-        if devices:
-            devices.append({
-                'device_id': 'help',
-                'name': 'Note: macOS long device IDs will map to available camera indices',
-                'index': -1,
-                'compatible': False
-            })
+        print("📱 Camera enumeration delegated to browser (respects permissions)")
 
         return {
             'success': True,
@@ -1148,24 +1117,18 @@ async def test_camera(request: CameraSettings):
             # Use device_id if specified, otherwise default to 0
             if request.device_id:
                 try:
-                    source = int(request.device_id)  # Try to convert to int for device index
-                    print(f"📹 Testing webcam device index: {source}")
-                except ValueError:
-                    # Use the working device mapping from before
-                    if request.device_id.startswith('d16a9c26'):
-                        source = 0  # Logitech BRIO → OpenCV index 0
-                        print(f"📹 Detected Logitech BRIO → using camera index 0")
-                    elif request.device_id.startswith('883bf618'):
-                        source = 1  # MacBook Air → OpenCV index 1
-                        print(f"📹 Detected MacBook Air Camera → using camera index 1")
+                    # Check if it's in "index:deviceId" format from camera testing
+                    if ':' in request.device_id:
+                        camera_index, _ = request.device_id.split(':', 1)
+                        source = int(camera_index)
+                        print(f"📹 Testing specific camera index: {source}")
                     else:
-                        # For other devices, use a simple hash to map to different indices
-                        import hashlib
-                        device_hash = int(hashlib.md5(request.device_id.encode()).hexdigest()[:8], 16)
-                        source = device_hash % 3  # Map to 0, 1, or 2
-                        print(f"📹 Unknown device → hash mapping to camera index {source}")
-
-                    print(f"📹 Device {request.device_id[:12]}... → camera index: {source}")
+                        source = int(request.device_id)  # Try to convert to int for device index
+                        print(f"📹 Testing webcam device index: {source}")
+                except ValueError:
+                    # If device_id is not a number, fall back to default camera
+                    source = 0
+                    print(f"📹 Device {request.device_id[:12]}... → falling back to camera index: {source}")
             else:
                 source = 0  # Default webcam
                 print(f"📹 Testing default webcam (index 0)")
@@ -1189,16 +1152,30 @@ async def test_camera(request: CameraSettings):
                     }
                 else:
                     print(f"❌ Camera opened but couldn't read frame from source: {source}")
-                    return {
-                        'success': False,
-                        'message': f'Camera opened but no video signal (source: {source})'
-                    }
+                    # In Docker/headless environments, this is expected for non-RTSP sources
+                    if request.source != 'rtsp':
+                        return {
+                            'success': True,
+                            'message': f'Camera configuration saved. Testing may be limited in Docker/headless environments. (source: {source})'
+                        }
+                    else:
+                        return {
+                            'success': False,
+                            'message': f'Camera opened but no video signal (source: {source})'
+                        }
             else:
                 print(f"❌ Couldn't open camera source: {source}")
-                return {
-                    'success': False,
-                    'message': f'Failed to open camera (source: {source})'
-                }
+                # In Docker/headless environments, this is expected for non-RTSP sources
+                if request.source != 'rtsp':
+                    return {
+                        'success': True,
+                        'message': f'Camera configuration saved. Testing may be limited in Docker/headless environments. (source: {source})'
+                    }
+                else:
+                    return {
+                        'success': False,
+                        'message': f'Failed to open camera (source: {source})'
+                    }
         finally:
             cap.release()
 
@@ -1594,21 +1571,29 @@ async def process_webcam_with_overlay(output_queue, stream_id):
                 camera_index = int(device_id)  # Try to convert to int for device index
                 print(f"📹 Using webcam device index: {camera_index}")
             except ValueError:
-                # Use the working device mapping from before
-                if device_id.startswith('d16a9c26'):
-                    camera_index = 0  # Logitech BRIO → OpenCV index 0
-                    print(f"📹 Detected Logitech BRIO → using camera index 0")
-                elif device_id.startswith('883bf618'):
-                    camera_index = 1  # MacBook Air → OpenCV index 1
-                    print(f"📹 Detected MacBook Air Camera → using camera index 1")
-                else:
-                    # For other devices, use a simple hash to map to different indices
-                    import hashlib
-                    device_hash = int(hashlib.md5(device_id.encode()).hexdigest()[:8], 16)
-                    camera_index = device_hash % 3  # Map to 0, 1, or 2
-                    print(f"📹 Unknown device → hash mapping to camera index {camera_index}")
+                # Try to find a working camera index dynamically
+                # Since browser provides device IDs but backend needs indices,
+                # we'll try available camera indices until we find one that works
+                camera_index = None
 
-                print(f"📹 Device {device_id[:12]}... → camera index: {camera_index}")
+                # Test cameras 0-9 to find available ones
+                for i in range(10):
+                    try:
+                        test_cap = cv2.VideoCapture(i, cv2.CAP_AVFOUNDATION)
+                        if test_cap.isOpened():
+                            ret, _ = test_cap.read()
+                            if ret:
+                                if camera_index is None:  # Use first available camera as fallback
+                                    camera_index = i
+                        test_cap.release()
+                    except:
+                        pass
+
+                if camera_index is None:
+                    camera_index = 0  # Fallback to default
+                    print(f"⚠️ No cameras found, using default index 0")
+                else:
+                    print(f"📹 Device {device_id[:12]}... → using available camera index: {camera_index}")
         else:
             camera_index = 0  # Default webcam
             print(f"📹 Using default webcam (index 0)")
@@ -1989,8 +1974,8 @@ if __name__ == "__main__":
     print("📊 Database initialized")
     print("🤖 AI models loaded")
     print("📷 Camera system ready")
-    print("✅ API ready at http://localhost:8000")
-    print("📚 API docs available at http://localhost:8000/docs")
+    print("✅ API ready at http://localhost:8000/api")
+    print("📚 API docs available at http://localhost:8000/api/docs")
 
     try:
         # Run the server with SocketIO

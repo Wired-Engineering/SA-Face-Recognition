@@ -17,3 +17,8 @@ build
 .prettier*
 .editorconfig
 .DS_Store
+
+src/python/images
+src/python/system
+src/python/.venv
+src/python/__pycache__

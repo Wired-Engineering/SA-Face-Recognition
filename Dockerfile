@@ -15,22 +15,24 @@ RUN pnpm install --frozen-lockfile
 # Copy source and build (with cache busting)
 COPY . .
 RUN rm -rf dist node_modules/.cache .vite
-RUN pnpm build --force
+RUN pnpm build
 
-# Production stage with Python base
+# # Production stage with Python base
+# FROM python:3.13-alpine
 FROM python:3.13-slim
 
-# Install nginx and system dependencies
 RUN apt-get update && apt-get install -y \
     nginx \
     supervisor \
     && rm -rf /var/lib/apt/lists/*
+    
+# # Install nginx and system dependencies
+# RUN apk add --no-cache nginx supervisor build-base cmake linux-headers jpeg-dev
 
 WORKDIR /app
 
 # Copy Python requirements and install
 COPY src/python/requirements.txt ./
-#RUN pip3 install --upgrade pip setuptools wheel
 RUN pip3 install --no-cache-dir -r requirements.txt
 
 # Copy Python source code

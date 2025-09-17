@@ -1,6 +1,6 @@
 # 🛡️ Signature Aviation - Face Recognition System
 
-A modern, full-stack face recognition application for person attendance and access control, built with React, Express.js, and FastAPI.
+A face recognition application for welcoming guests into an area - built with React, Express.js, and FastAPI.
 
 ## 🏗️ Architecture
 
@@ -23,17 +23,6 @@ A modern, full-stack face recognition application for person attendance and acce
     │ Media API   │                              │ Face Data   │
     └─────────────┘                              └─────────────┘
 ```
-
-## ✨ Features
-
-- 🎯 **Real-time Face Recognition** - Webcam & RTSP stream support
-- 👤 **person Management** - Register, update, delete people
-- 🔐 **Admin Authentication** - Secure login with password management
-- 📊 **Attendance Tracking** - Automatic logging with timestamps
-- ⚙️ **System Settings** - Camera configuration, display preferences
-- 📱 **Responsive UI** - Modern interface with Mantine components
-- 🚀 **RESTful API** - Clean separation with comprehensive endpoints
-- 🤖 **AI-Powered** - ONNX models for detection and recognition
 
 ## 🚀 Quick Start
 
@@ -84,69 +73,7 @@ pnpm python-api
 | **React App** | http://localhost:5173 | Main application interface |
 | **Express API** | http://localhost:3001 | Middleware and file uploads |
 | **FastAPI Docs** | http://localhost:8000/docs | Interactive API documentation |
-| **Health Check** | http://localhost:3001/health | System status |
-
-## 📚 API Reference
-
-### 🔐 Authentication
-```http
-POST /api/auth/login
-POST /api/auth/change-password
-```
-
-### 👥 person Management
-```http
-GET    /api/people
-POST   /api/people/register
-DELETE /api/people/{id}
-```
-
-### 🎯 Face Recognition
-```http
-POST /api/recognition/detect
-POST /api/upload/face-image
-```
-
-### 📷 Camera Management
-```http
-GET  /api/camera/settings
-POST /api/camera/settings
-POST /api/camera/test
-```
-
-### ⚙️ System Status
-```http
-GET /api/system/status
-GET /api/system/health
-```
-
-## 🗂️ Project Structure
-
-```
-SA-Face-Recognition/
-├── 📁 src/
-│   ├── 📁 components/          # React components
-│   │   ├── AppShell.jsx        # Main layout
-│   │   ├── LoginPage.jsx       # Authentication
-│   │   ├── RegistrationPage.jsx# person registration
-│   │   ├── DetectionPage.jsx   # Face recognition
-│   │   ├── SettingsPage.jsx    # System settings
-│   │   └── WelcomeScreen.jsx   # Dashboard
-│   ├── 📁 services/
-│   │   └── api.js              # API client & utilities
-│   └── 📁 python/              # Python backend
-│       ├── main.py             # FastAPI server
-│       ├── face_recognition_api.py # Core AI logic
-│       ├── DatabaseManager.py  # Database operations
-│       ├── utils.py            # Helper functions
-│       ├── 📁 model/           # AI models (ONNX)
-│       ├── 📁 images/          # person face images
-│       └── 📁 system/          # Config & database
-├── 📄 server.js                # Express middleware
-├── 📄 package.json             # Node.js dependencies
-├── 📄 ICON_MAPPING.md          # UI icon reference
-└── 📄 README.md               # This file
-```
+| **Health Check** | http://localhost:3001/api/system/health | System status |
 
 ## 🤖 AI Models
 
@@ -156,25 +83,6 @@ The system uses pre-trained ONNX models for optimal performance:
 - **Face Recognition**: Fast Recognition Model (7.3MB)
 - **Format**: ONNX (cross-platform)
 - **Performance**: Real-time on CPU
-
-## 💾 Database Schema
-
-### Admin Table
-```sql
-CREATE TABLE ADMIN (
-    Name TEXT,
-    ID TEXT,
-    Password TEXT
-);
-```
-
-### person Table
-```sql
-CREATE TABLE person (
-    Id TEXT PRIMARY KEY,
-    Name TEXT
-);
-```
 
 Default admin: `admin` / `1234`
 
@@ -188,7 +96,7 @@ Default admin: `admin` / `1234`
 ### Face Recognition
 - **Detection Confidence**: 90%
 - **Recognition Threshold**: 0.363
-- **Image Format**: JPEG/PNG/WebP
+- **Image Format**: JPEG/PNG
 - **Max File Size**: 10MB
 
 ## 🛠️ Development
@@ -240,7 +148,7 @@ Private project for Signature Aviation
 
 ## 🤝 Support
 
-- 📚 **API Docs**: http://localhost:8000/docs
+- 📚 **API Docs**: http://localhost:8000/api/docs
 - 🔍 **Debug**: Check browser console and server logs
 - 🛠️ **Issues**: Contact development team
 
