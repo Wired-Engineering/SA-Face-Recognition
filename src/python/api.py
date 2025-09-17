@@ -1289,10 +1289,14 @@ async def upload_background_image(file: UploadFile = File(...)):
                     'useBackgroundImage': True
                 }, to=screen_sid)
 
+        # Add cache buster to force refresh
+        import time
+        cache_buster = int(time.time() * 1000)
+
         return {
             'success': True,
             'message': 'Background image uploaded successfully',
-            'image_url': '/api/display/background-image'
+            'image_url': f'/api/display/background-image?t={cache_buster}'
         }
     except Exception as e:
         print(f"❌ Upload error: {e}")

@@ -226,7 +226,9 @@ class ApiService {
   }
 
   getBackgroundImage() {
-    return '/api/display/background-image';
+    // Add cache buster to ensure fresh image
+    const cacheBuster = Date.now();
+    return `/api/display/background-image?t=${cacheBuster}`;
   }
 }
 

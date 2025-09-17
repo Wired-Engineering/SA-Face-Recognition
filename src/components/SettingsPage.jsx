@@ -39,7 +39,7 @@ import {
   IconUsersGroup,
 } from '@tabler/icons-react';
 import apiService, { webcamUtils } from '../services/api';
-import { testWelcomePopup, closeWelcomePopup, isWelcomePopupOpen } from '../services/welcomePopup';
+import welcomePopupService, { testWelcomePopup, closeWelcomePopup, isWelcomePopupOpen } from '../services/welcomePopup';
 
 export function SettingsPage({ onSaveSettings }) {
   const theme = useMantineTheme();
@@ -260,13 +260,12 @@ export function SettingsPage({ onSaveSettings }) {
 
         setSuccess('Canvas Settings saved successfully!');
 
-        // If test popup is open, close and reopen with new saved settings
-        if (testPopupOpen && isWelcomePopupOpen()) {
-          console.log('💾 Settings saved, updating test popup');
-          closeWelcomePopup();
-          setTimeout(() => {
-            testWelcomePopup(settings);
-          }, 100);
+        // If popup is open, send updated settings to it
+        if (isWelcomePopupOpen()) {
+          console.log('💾 Settings saved, updating welcome popup');
+          // Send settings update to existing popup window
+          welcomePopupService.updateSettings(settings);
+          welcomePopupService.sendSettingsUpdate();
         }
 
         onSaveSettings?.({
@@ -307,7 +306,23 @@ export function SettingsPage({ onSaveSettings }) {
       const result = await apiService.uploadBackgroundImage(file);
       if (result.success) {
         setBackgroundImagePreview(result.image_url);
+        setUseBackgroundImage(true);
         setSuccess('Background image uploaded successfully!');
+
+        // If popup is open, send updated settings to it
+        if (isWelcomePopupOpen()) {
+          const settings = {
+            backgroundColor,
+            fontColor,
+            timer: displayTimer,
+            useBackgroundImage: true,
+            backgroundImage: result.image_url,
+            fontFamily,
+            fontSize
+          };
+          welcomePopupService.updateSettings(settings);
+          welcomePopupService.sendSettingsUpdate();
+        }
       } else {
         setError(result.message || 'Failed to upload background image');
       }
@@ -325,6 +340,21 @@ export function SettingsPage({ onSaveSettings }) {
         setBackgroundImagePreview(null);
         setUseBackgroundImage(false);
         setSuccess('Background image deleted successfully!');
+
+        // If popup is open, update it to remove the background image
+        if (isWelcomePopupOpen()) {
+          const settings = {
+            backgroundColor,
+            fontColor,
+            timer: displayTimer,
+            useBackgroundImage: false,
+            backgroundImage: null,
+            fontFamily,
+            fontSize
+          };
+          welcomePopupService.updateSettings(settings);
+          welcomePopupService.sendSettingsUpdate();
+        }
       } else {
         setError(result.message || 'Failed to delete background image');
       }

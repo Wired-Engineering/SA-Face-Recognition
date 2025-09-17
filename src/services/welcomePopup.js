@@ -47,13 +47,36 @@ class WelcomePopupService {
   }
 
   // Open Welcome Canvas popup (only if not already open)
-  open(displaySettings = {}, kioskMode = false) {
+  async open(displaySettings = {}, kioskMode = false) {
     // If popup is already open, just update settings and return existing window
     if (this.isPopupOpen()) {
       this.updateSettings(displaySettings);
       this.sendSettingsUpdate();
       console.log('✅ Welcome Canvas popup already open, updated settings');
       return this.popupWindow;
+    }
+
+    // Fetch latest settings from backend if not provided
+    if (Object.keys(displaySettings).length === 0) {
+      try {
+        const response = await fetch(`${this.detectApiBaseUrl()}/api/display/settings`);
+        if (response.ok) {
+          const data = await response.json();
+          if (data.success) {
+            displaySettings = {
+              backgroundColor: data.background_color,
+              fontColor: data.font_color,
+              timer: data.timer,
+              useBackgroundImage: data.use_background_image,
+              fontFamily: data.font_family,
+              fontSize: data.font_size
+            };
+            console.log('📋 Fetched display settings from backend:', displaySettings);
+          }
+        }
+      } catch (error) {
+        console.warn('Failed to fetch display settings:', error);
+      }
     }
 
     // Update settings
@@ -300,12 +323,12 @@ class WelcomePopupService {
 const welcomePopupService = new WelcomePopupService();
 
 // Helper functions for easy access
-export const openWelcomePopup = (displaySettings, kioskMode = false) => {
-  return welcomePopupService.open(displaySettings, kioskMode);
+export const openWelcomePopup = async (displaySettings, kioskMode = false) => {
+  return await welcomePopupService.open(displaySettings, kioskMode);
 };
 
-export const openWelcomePopupKiosk = (displaySettings) => {
-  return welcomePopupService.open(displaySettings, true);
+export const openWelcomePopupKiosk = async (displaySettings) => {
+  return await welcomePopupService.open(displaySettings, true);
 };
 
 export const enableWelcomePopupKiosk = () => {

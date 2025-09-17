@@ -342,8 +342,11 @@
                 this.isPersistent = false;
                 this.isKioskMode = false;
 
-                this.loadSettings();
-                this.applySettings();
+                // Load settings asynchronously and then apply them
+                this.loadSettings().then(() => {
+                    this.applySettings();
+                    console.log('✅ Settings loaded and applied');
+                });
                 this.setupKioskMode();
                 this.connectSocketIO();
                 this.setupFallbackPolling();
@@ -378,7 +381,7 @@
                 return apiBase;
             }
 
-            loadSettings() {
+            async loadSettings() {
                 // Try to get settings from URL parameters
                 const urlParams = new URLSearchParams(window.location.search);
                 if (urlParams.has('backgroundColor')) {
@@ -408,14 +411,42 @@
                     this.settings.fontSize = urlParams.get('fontSize');
                 }
 
-                // Try to load from localStorage as fallback
-                const savedSettings = localStorage.getItem('faceRecognitionDisplaySettings');
-                if (savedSettings) {
-                    try {
-                        const parsed = JSON.parse(savedSettings);
-                        this.settings = { ...this.settings, ...parsed };
-                    } catch (e) {
-                        console.warn('Failed to parse saved settings:', e);
+                // Fetch latest settings from the backend API
+                try {
+                    const apiUrl = this.apiBase + '/api/display/settings';
+                    const response = await fetch(apiUrl);
+                    if (response.ok) {
+                        const data = await response.json();
+                        if (data.success) {
+                            console.log('📋 Loaded display settings from API:', data);
+                            // Update settings with backend values
+                            this.settings.backgroundColor = data.background_color || this.settings.backgroundColor;
+                            this.settings.fontColor = data.font_color || this.settings.fontColor;
+                            this.settings.timer = data.timer || this.settings.timer;
+                            this.settings.useBackgroundImage = data.use_background_image || false;
+                            this.settings.fontFamily = data.font_family || this.settings.fontFamily;
+                            this.settings.fontSize = data.font_size || this.settings.fontSize;
+
+                            // If background image is enabled and exists on server, fetch it
+                            if (data.use_background_image && data.has_background_image) {
+                                // Add cache buster to ensure fresh image
+                                const cacheBuster = Date.now();
+                                this.settings.backgroundImage = `${this.apiBase}/api/display/background-image?t=${cacheBuster}`;
+                                console.log('🖼️ Background image URL:', this.settings.backgroundImage);
+                            }
+                        }
+                    }
+                } catch (error) {
+                    console.warn('Failed to fetch display settings from API:', error);
+                    // Fall back to localStorage if API fails
+                    const savedSettings = localStorage.getItem('faceRecognitionDisplaySettings');
+                    if (savedSettings) {
+                        try {
+                            const parsed = JSON.parse(savedSettings);
+                            this.settings = { ...this.settings, ...parsed };
+                        } catch (e) {
+                            console.warn('Failed to parse saved settings:', e);
+                        }
                     }
                 }
             }
