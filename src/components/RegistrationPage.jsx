@@ -28,6 +28,7 @@ export function RegistrationPage({ onRegister }) {
   const [stream, setStream] = useState(null);
   const [opened, { open, close }] = useDisclosure(false);
   const [cameraSettings, setCameraSettings] = useState(null);
+  const [photoFileUrl, setPhotoFileUrl] = useState(null);
 
   const videoRef = useRef(null);
 
@@ -48,6 +49,22 @@ export function RegistrationPage({ onRegister }) {
 
     fetchCameraSettings();
   }, []);
+
+  // Handle photo file URL creation and cleanup
+  useEffect(() => {
+    if (photoFile) {
+      const url = URL.createObjectURL(photoFile);
+      setPhotoFileUrl(url);
+
+      // Cleanup function to revoke the blob URL
+      return () => {
+        URL.revokeObjectURL(url);
+        setPhotoFileUrl(null);
+      };
+    } else {
+      setPhotoFileUrl(null);
+    }
+  }, [photoFile]);
 
 
   const handleStartCapture = async () => {
@@ -92,6 +109,7 @@ export function RegistrationPage({ onRegister }) {
       const imageData = imageUtils.captureFromVideo(videoRef.current);
       setCapturedPhoto(imageData);
       setPhotoFile(null);
+      setPhotoFileUrl(null);
       handleStopCapture();
     }
   };
@@ -133,6 +151,7 @@ export function RegistrationPage({ onRegister }) {
         setpersonName('');
         setpersonTitle('');
         setPhotoFile(null);
+        setPhotoFileUrl(null);
         setCapturedPhoto(null);
 
         // Call parent callback if provided
@@ -310,7 +329,7 @@ export function RegistrationPage({ onRegister }) {
                       />
                     </Box>
                   )}
-                  {photoFile && (
+                  {photoFile && photoFileUrl && (
                     <Box
                       style={{
                         width: 150,
@@ -322,7 +341,7 @@ export function RegistrationPage({ onRegister }) {
                       }}
                     >
                       <Image
-                        src={URL.createObjectURL(photoFile)}
+                        src={photoFileUrl}
                         alt="Uploaded photo"
                         fit="cover"
                         h={146}

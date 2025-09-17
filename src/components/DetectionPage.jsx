@@ -142,7 +142,7 @@ export function DetectionPage({ onDetection }) {
         if (permission.state === 'denied') {
           throw new Error('Camera access has been denied. Please enable camera permissions in your browser settings and reload the page.');
         }
-      } catch (permErr) {
+      } catch {
         // Permissions API not supported in all browsers, continue with getUserMedia
         console.log('📹 Permissions API not supported, proceeding with getUserMedia');
       }
@@ -886,7 +886,7 @@ export function DetectionPage({ onDetection }) {
                     <span> HTTPS connection required.</span>
                   )}
                   <br />
-                  Please allow camera permission when prompted.
+                  Please allow camera permission if prompted.
                 </Text>
               )}
 
