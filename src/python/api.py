@@ -57,20 +57,23 @@ async def lifespan(app: FastAPI):
 # Create SocketIO server
 sio = socketio.AsyncServer(
     async_mode='asgi',
-    cors_allowed_origins=["http://localhost:3000", "http://localhost:5173", "http://localhost:5174"]
+    cors_allowed_origins=["http://localhost:3000", "http://localhost:5173", "http://localhost:5174", "http://localhost", "http://localhost:80", "*"]
 )
 
 app = FastAPI(
     title="Signature Aviation Face Recognition API",
     description="Face recognition system for person attendance",
     version="1.0.0",
-    lifespan=lifespan
+    lifespan=lifespan,
+    docs_url="/docs",
+    redoc_url=None,
+    openapi_url="/openapi.json"
 )
 
 # CORS middleware for React frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:5173", "http://localhost:5174"],
+    allow_origins=["http://localhost:3000", "http://localhost:5173", "http://localhost:5174", "http://localhost", "http://localhost:80", "*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

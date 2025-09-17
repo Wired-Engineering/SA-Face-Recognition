@@ -946,7 +946,7 @@ export function SettingsPage({ onSaveSettings }) {
                             <Group>
                               {person.has_image ? (
                                 <Image
-                                  src={`http://localhost:8000${person.image_path}`}
+                                  src={`${person.image_path}`}
                                   alt={`${person.name} reference photo`}
                                   w={60}
                                   h={60}

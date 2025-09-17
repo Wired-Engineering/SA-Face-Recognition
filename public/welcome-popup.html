@@ -370,8 +370,12 @@
 
                 // Second priority: derive from current window location
                 const origin = window.location.origin;
-                console.log('🌐 Using current window origin as API base:', origin);
-                return origin;
+                // In development, use FastAPI backend directly
+                // In production (Docker), use current origin (nginx proxy)
+                const isDevelopment = window.location.port === '5173';
+                const apiBase = isDevelopment ? 'http://localhost:8000' : origin;
+                console.log('🌐 Using API base:', apiBase, '(development:', isDevelopment, ')');
+                return apiBase;
             }
 
             loadSettings() {
@@ -588,10 +592,14 @@
 
             connectSocketIO() {
                 try {
-                    // Use dynamic API base with port 8000 for Socket.IO
-                    const socketUrl = this.apiBase.replace(/:\d+$/, '') + ':8000';
+                    // Use dynamic API base for Socket.IO
+                    const socketUrl = this.apiBase;
                     console.log('🔌 Connecting to Socket.IO at:', socketUrl);
-                    this.socket = io(socketUrl);
+                    this.socket = io(socketUrl, {
+                        transports: ['polling', 'websocket'],
+                        forceNew: true,
+                        timeout: 20000
+                    });
 
                     this.socket.on('connect', () => {
                         console.log('✅ Connected to SocketIO server');
@@ -655,8 +663,8 @@
                     if (this.isConnected) return; // Skip if SocketIO is working
 
                     try {
-                        // Use dynamic API base with port 8000 for HTTP API
-                        const apiUrl = this.apiBase.replace(/:\d+$/, '') + ':8000/api/recognition/latest';
+                        // Use dynamic API base for HTTP API
+                        const apiUrl = this.apiBase + '/api/recognition/latest';
                         const response = await fetch(apiUrl);
                         if (response.ok) {
                             const data = await response.json();

@@ -21,11 +21,12 @@ import {
   IconHome,
 } from '@tabler/icons-react';
 import apiService from '../services/api';
-import { io } from 'socket.io-client';
+import { useSocket } from '../hooks/useSocket';
 import { openWelcomePopup } from '../services/welcomePopup';
 
 export function DetectionPage({ onDetection }) {
   const theme = useMantineTheme();
+  const { isConnected, connectionState, connect, disconnect, on, emit } = useSocket();
   const [isVideoStarted, setIsVideoStarted] = useState(false);
   const [isDetecting, setIsDetecting] = useState(false);
   const [detectedPerson, setDetectedPerson] = useState(null);
@@ -34,10 +35,8 @@ export function DetectionPage({ onDetection }) {
   const [error, setError] = useState(null);
   const [actualCameraSource, setActualCameraSource] = useState('default');
   const rtspImageRef = useRef(null);
-  const socketRef = useRef(null);
   const frameProcessingIntervalRef = useRef(null);
   const isDetectingRef = useRef(false);
-  const [connectionState, setConnectionState] = useState('disconnected');
   const [isStreamLoading, setIsStreamLoading] = useState(false);
 
   // Handle detection results for UI updates
@@ -98,111 +97,65 @@ export function DetectionPage({ onDetection }) {
     }
   }, [onDetection]);
 
-  // Pure SocketIO setup for frame processing
+  // Setup SocketIO connection using the socket provider
   const setupSocketIOConnection = useCallback(async () => {
     console.log('🔌 Setting up SocketIO connection...');
 
     try {
-      // Check if socket already exists and is connected
-      if (socketRef.current && socketRef.current.connected) {
+      // Check if socket is already connected
+      if (isConnected) {
         console.log('🔌 Socket already connected, reusing existing connection');
 
         // Start detection immediately
         console.log('🎯 Emitting start_detection...');
-        socketRef.current.emit('start_detection', {});
+        emit('start_detection', {});
 
         setIsDetecting(true);
         isDetectingRef.current = true;
-        setConnectionState('connected');
         return;
       }
 
-      // Clean up any existing disconnected socket
-      if (socketRef.current) {
-        socketRef.current.disconnect();
-        socketRef.current = null;
+      // Connect using the socket provider - this now returns a Promise
+      console.log('🔌 Initiating connection via provider...');
+      const socket = await connect();
+
+      if (!socket) {
+        throw new Error('Failed to establish socket connection');
       }
 
-      // Connect to SocketIO server
-      const socket = io('http://localhost:8000');
-      socketRef.current = socket;
-
-      console.log('🔌 SocketIO client created, waiting for connection...');
-
-      // Wait for connection with Promise
-      await new Promise((resolve, reject) => {
-        socket.on('connect', () => {
-          console.log('🔌 Connected to SocketIO server:', socket.id);
-          setConnectionState('connected');
-          resolve();
-        });
-
-        socket.on('connect_error', (error) => {
-          console.error('🔌 SocketIO connection error:', error);
-          setConnectionState('error');
-          reject(error);
-        });
-
-        // Timeout after 10 seconds (increased for more reliable connection)
-        setTimeout(() => {
-          if (!socket.connected) {
-            reject(new Error('Socket connection timeout'));
-          }
-        }, 10000);
-      });
+      console.log('🔌 Socket connection established');
 
       // Start detection after successful connection
       console.log('🎯 Emitting start_detection...');
-      socket.emit('start_detection', {});
+      emit('start_detection', {});
 
       console.log('🎯 Setting isDetecting to true...');
       setIsDetecting(true);
       isDetectingRef.current = true;
-
-      // Set up socket event handlers
-      socket.on('disconnect', () => {
-        console.log('🔌 Disconnected from SocketIO server');
-        setConnectionState('disconnected');
-
-        // Stop frame processing
-        if (frameProcessingIntervalRef.current) {
-          clearInterval(frameProcessingIntervalRef.current);
-          frameProcessingIntervalRef.current = null;
-        }
-      });
-
-      // Handle face detection results from SocketIO (for welcome screen events)
-      socket.on('face_detection_result', (data) => {
-        // console.log('🔍 Received face detection results:', data);
-        handleDetectionResult(data);
-      });
-
-      console.log('📡 Streaming mode - backend handles everything, no frame processing needed');
-
-
-      socket.on('detection_started', (data) => {
-        console.log('🎯 Detection started:', data);
-      });
-
-      socket.on('detection_stopped', (data) => {
-        console.log('🛑 Detection stopped:', data);
-      });
-
-      socket.on('detection_error', (error) => {
-        console.error('❌ Detection error:', error);
-        setError(`Detection error: ${error.error}`);
-      });
-
-      socket.on('error', (error) => {
-        console.error('🔌 SocketIO error:', error);
-      });
 
       console.log('🔌 SocketIO setup complete');
     } catch (error) {
       console.error('🔌 Failed to setup SocketIO:', error);
       setError(`Connection setup failed: ${error.message}`);
     }
-  }, [handleDetectionResult]);
+  }, [isConnected, connect, emit]);
+
+  const handleStopDetection = useCallback((adminStop = false) => {
+    setIsDetecting(false);
+    isDetectingRef.current = false;
+    setDetectedPerson(null);
+
+    // Stop frame processing
+    if (frameProcessingIntervalRef.current) {
+      clearInterval(frameProcessingIntervalRef.current);
+      frameProcessingIntervalRef.current = null;
+    }
+
+    // Tell backend to stop detection
+    if (isConnected) {
+      emit('stop_detection', { admin_stop: adminStop });
+    }
+  }, [isConnected, emit]);
 
   const handleStartVideo = useCallback(async () => {
     try {
@@ -239,7 +192,7 @@ export function DetectionPage({ onDetection }) {
             }
           }, 100);
 
-          // Use existing Socket.IO connection for welcome screen recognition events only
+          // Use Socket.IO connection for welcome screen recognition events only
           await setupSocketIOConnection();
           return; // Skip getUserMedia for RTSP
         } else if (cameraSettings.source === 'webcam' || cameraSettings.source === 'device' || cameraSettings.source === 'default') {
@@ -275,7 +228,7 @@ export function DetectionPage({ onDetection }) {
             }
           }, 100);
 
-          // Use Socket.IO only for welcome screen events
+          // Use Socket.IO for welcome screen events
           await setupSocketIOConnection();
           return; // Skip getUserMedia for webcam streaming
         }
@@ -320,11 +273,8 @@ export function DetectionPage({ onDetection }) {
     }
 
     // Close SocketIO connection
-    if (socketRef.current) {
-      console.log('🔌 Closing SocketIO connection...');
-      socketRef.current.disconnect();
-      socketRef.current = null;
-    }
+    console.log('🔌 Closing SocketIO connection...');
+    disconnect();
 
     // Stop frame processing
     if (frameProcessingIntervalRef.current) {
@@ -343,40 +293,18 @@ export function DetectionPage({ onDetection }) {
     setVideoStatus('Stopped');
     setDetectedPerson(null);
     setError(null);
-    setConnectionState('disconnected');
     setIsStreamLoading(false);
-  }, [actualCameraSource]);
-
-
-  const handleStopDetection = (adminStop = false) => {
-    setIsDetecting(false);
-    isDetectingRef.current = false;
-    setDetectedPerson(null);
-
-    // Stop frame processing
-    if (frameProcessingIntervalRef.current) {
-      clearInterval(frameProcessingIntervalRef.current);
-      frameProcessingIntervalRef.current = null;
-    }
-
-    // Tell backend to stop detection
-    if (socketRef.current) {
-      socketRef.current.emit('stop_detection', { admin_stop: adminStop });
-    }
-  };
+  }, [actualCameraSource, disconnect, handleStopDetection]);
 
 
   // Check for persistent detection state on mount
   useEffect(() => {
     const checkAutoStart = async () => {
       try {
-        const response = await fetch('http://localhost:8000/api/system/detection-status');
-        if (response.ok) {
-          const status = await response.json();
-          if (status.should_auto_start && !isVideoStarted) {
-            console.log('🔄 Auto-starting detection from persistent state');
-            await handleStartVideo();
-          }
+        const status = await apiService.getDetectionStatus();
+        if (status.should_auto_start && !isVideoStarted) {
+          console.log('🔄 Auto-starting detection from persistent state');
+          await handleStartVideo();
         }
       } catch (error) {
         console.error('❌ Error checking auto-start status:', error);
@@ -386,18 +314,49 @@ export function DetectionPage({ onDetection }) {
     checkAutoStart();
   }, [handleStartVideo, isVideoStarted]); // Include dependencies
 
+  // Setup socket event listeners
+  useEffect(() => {
+    if (!isConnected) return;
+
+    // Handle face detection results from SocketIO (for welcome screen events)
+    const cleanupDetectionResult = on('face_detection_result', (data) => {
+      handleDetectionResult(data);
+    });
+
+    const cleanupDetectionStarted = on('detection_started', (data) => {
+      console.log('🎯 Detection started:', data);
+    });
+
+    const cleanupDetectionStopped = on('detection_stopped', (data) => {
+      console.log('🛑 Detection stopped:', data);
+    });
+
+    const cleanupDetectionError = on('detection_error', (error) => {
+      console.error('❌ Detection error:', error);
+      setError(`Detection error: ${error.error}`);
+    });
+
+    const cleanupError = on('error', (error) => {
+      console.error('🔌 SocketIO error:', error);
+    });
+
+    // Cleanup function
+    return () => {
+      cleanupDetectionResult?.();
+      cleanupDetectionStarted?.();
+      cleanupDetectionStopped?.();
+      cleanupDetectionError?.();
+      cleanupError?.();
+    };
+  }, [isConnected, on, handleDetectionResult]);
+
   // Cleanup on unmount
   useEffect(() => {
     return () => {
       console.log('🧹 Component cleanup triggered - preserving detection state');
       // Only disconnect socket, do NOT send stop_detection to preserve detection for welcome screens
-      if (socketRef.current) {
-        socketRef.current.disconnect();
-        socketRef.current = null;
-      }
       setIsVideoStarted(false);
       setIsDetecting(false);
-      setConnectionState('disconnected');
     };
   }, []); // Empty dependency array - only run on mount/unmount
 
@@ -429,11 +388,11 @@ export function DetectionPage({ onDetection }) {
                   Camera Feed
                 </Title>
                 <Badge
-                  color={connectionState === 'connected' ? 'green' : connectionState === 'connecting' ? 'yellow' : 'red'}
+                  color={isConnected ? 'green' : connectionState === 'connecting' ? 'yellow' : 'red'}
                   variant="filled"
                   size="lg"
                 >
-                  {connectionState === 'connected' ? 'SocketIO Connected' :
+                  {isConnected ? 'SocketIO Connected' :
                    connectionState === 'connecting' ? 'Connecting...' :
                    connectionState === 'disconnected' ? 'Disconnected' :
                    videoStatus}

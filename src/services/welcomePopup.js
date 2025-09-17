@@ -31,6 +31,16 @@ class WelcomePopupService {
     return origin;
   }
 
+  // Detect API base URL for SocketIO connection
+  detectApiBaseUrl() {
+    // In development, use FastAPI backend directly
+    // In production (Docker), use current origin (nginx proxy)
+    const isDevelopment = window.location.port === '5173';
+    const apiBase = isDevelopment ? 'http://localhost:8000' : window.location.origin;
+    console.log('🌐 Detected API base URL for welcome popup:', apiBase, '(development:', isDevelopment, ')');
+    return apiBase;
+  }
+
   // Update display settings
   updateSettings(newSettings) {
     this.settings = { ...this.settings, ...newSettings };
@@ -186,8 +196,8 @@ class WelcomePopupService {
       fontFamily: this.settings.fontFamily || 'Inter',
       fontSize: this.settings.fontSize || 'medium',
       kiosk: isKioskMode ? 'true' : 'false',
-      // Pass the base URL so popup knows where to connect
-      apiBase: this.baseUrl
+      // Pass the API base URL so popup knows where to connect for SocketIO
+      apiBase: this.detectApiBaseUrl()
     });
 
     const popupUrl = `${this.baseUrl}/welcome-popup.html?${params.toString()}`;

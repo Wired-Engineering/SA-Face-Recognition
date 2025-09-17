@@ -27,7 +27,7 @@ const upload = multer({
 
 // Proxy middleware for FastAPI backend
 const apiProxy = createProxyMiddleware({
-  target: 'http://localhost:8000',
+  target: process.env.API_BASE_URL || 'http://localhost:8000',
   changeOrigin: true,
   // Remove the pathRewrite that was incorrectly prepending /api/
   onError: (err, req, res) => {
@@ -72,7 +72,7 @@ app.post('/api/upload/face-image', upload.single('image'), async (req, res) => {
     const imageData = `data:${mimeType};base64,${base64Image}`;
 
     // Forward to Python backend for processing
-    const response = await fetch('http://localhost:8000/api/recognition/detect', {
+    const response = await fetch(`${process.env.API_BASE_URL || 'http://localhost:8000'}/api/recognition/detect`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -119,7 +119,7 @@ process.on('SIGINT', () => {
 server.listen(PORT, () => {
   console.log('🚀 Express Proxy Server starting...');
   console.log(`📡 Server running on http://localhost:${PORT}`);
-  console.log('🔄 Proxying /api/* requests to FastAPI backend (http://localhost:8000)');
+  console.log(`🔄 Proxying /api/* requests to FastAPI backend (${process.env.API_BASE_URL || 'http://localhost:8000'})`);
   console.log('📁 File upload endpoint: POST /api/upload/face-image');
   console.log('💓 Health check: GET /health');
   console.log('🎯 CORS enabled for React frontend');

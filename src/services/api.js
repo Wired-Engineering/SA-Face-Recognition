@@ -1,6 +1,6 @@
 // API service for communicating with Express/FastAPI backend
 
-const BASE_URL = 'http://localhost:8000';
+const BASE_URL = window.location.origin;
 
 class ApiService {
   constructor() {
@@ -158,6 +158,10 @@ class ApiService {
   // System methods
   async getSystemStatus() {
     return this.request('/api/system/status');
+  }
+
+  async getDetectionStatus() {
+    return this.request('/api/system/detection-status');
   }
 
   async healthCheck() {
