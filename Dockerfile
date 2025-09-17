@@ -24,6 +24,7 @@ FROM python:3.13-slim
 RUN apt-get update && apt-get install -y \
     nginx \
     supervisor \
+    openssl \
     && rm -rf /var/lib/apt/lists/*
     
 # # Install nginx and system dependencies
@@ -44,6 +45,17 @@ COPY --from=build /app/dist /var/www/html
 # Copy nginx configuration
 COPY nginx.conf /etc/nginx/nginx.conf
 
+# Generate self-signed SSL certificate for testing (works with any IP/domain)
+RUN mkdir -p /etc/nginx/ssl && \
+    openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+    -keyout /etc/nginx/ssl/nginx.key \
+    -out /etc/nginx/ssl/nginx.crt \
+    -subj "/C=US/ST=Florida/L=Orlando/O=Wired Engineering/CN=*" \
+    -addext "subjectAltName=DNS:localhost,DNS:*.local,IP:0.0.0.0" && \
+    chmod 644 /etc/nginx/ssl/nginx.crt && \
+    chmod 600 /etc/nginx/ssl/nginx.key && \
+    chown -R www-data:www-data /etc/nginx/ssl
+
 # Create directories and set permissions
 RUN mkdir -p /app/src/python/system \
              /app/src/python/images \
@@ -60,6 +72,6 @@ COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 
 VOLUME ["/app/src/python/system", "/app/src/python/images"]
 
-EXPOSE 80
+EXPOSE 443
 
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
