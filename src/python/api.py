@@ -54,10 +54,10 @@ async def lifespan(app: FastAPI):
     detection_active.clear()
     print("✅ Cleanup complete")
 
-# Create SocketIO server
+# Create SocketIO server - Allow all origins
 sio = socketio.AsyncServer(
     async_mode='asgi',
-    cors_allowed_origins=["http://localhost:3000", "http://localhost:5173", "http://localhost:5174", "http://localhost", "http://localhost:80", "*"]
+    cors_allowed_origins="*"  # Allow any origin including device IPs
 )
 
 app = FastAPI(
@@ -70,10 +70,10 @@ app = FastAPI(
     openapi_url="/api/openapi.json"
 )
 
-# CORS middleware for React frontend
+# CORS middleware for React frontend - Allow all origins
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:5173", "http://localhost:5174", "http://localhost", "http://localhost:80", "*"],
+    allow_origins=["*"],  # Allow any origin including device IPs
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
