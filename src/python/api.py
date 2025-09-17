@@ -1262,10 +1262,21 @@ async def upload_background_image(file: UploadFile = File(...)):
         # Create backgrounds directory if it doesn't exist
         os.makedirs("images/backgrounds", exist_ok=True)
 
+        # Remove any existing background images first
+        backgrounds_dir = "images/backgrounds"
+        replaced_existing = False
+        if os.path.exists(backgrounds_dir):
+            for existing_file in os.listdir(backgrounds_dir):
+                if existing_file.startswith("welcome_background"):
+                    old_file_path = os.path.join(backgrounds_dir, existing_file)
+                    os.remove(old_file_path)
+                    replaced_existing = True
+                    print(f"🗑️ Removed existing background: {old_file_path}")
+
         # Read and save the file
         contents = await file.read()
 
-        # Save to file system
+        # Save to file system with new file
         file_extension = file.filename.split('.')[-1]
         file_path = f"images/backgrounds/welcome_background.{file_extension}"
         with open(file_path, "wb") as f:
@@ -1295,7 +1306,7 @@ async def upload_background_image(file: UploadFile = File(...)):
 
         return {
             'success': True,
-            'message': 'Background image uploaded successfully',
+            'message': 'Background image replaced successfully' if replaced_existing else 'Background image uploaded successfully',
             'image_url': f'/api/display/background-image?t={cache_buster}'
         }
     except Exception as e:

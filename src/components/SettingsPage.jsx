@@ -307,7 +307,7 @@ export function SettingsPage({ onSaveSettings }) {
       if (result.success) {
         setBackgroundImagePreview(result.image_url);
         setUseBackgroundImage(true);
-        setSuccess('Background image uploaded successfully!');
+        setSuccess(result.message || 'Background image uploaded successfully!');
 
         // If popup is open, send updated settings to it
         if (isWelcomePopupOpen()) {
