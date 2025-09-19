@@ -54,6 +54,7 @@ export function SettingsPage({ onSaveSettings }) {
   const [displayTimer, setDisplayTimer] = useState(5);
   const [backgroundColor, setBackgroundColor] = useState(theme.colors.accent[1]);
   const [fontColor, setFontColor] = useState(theme.other.signatureNavy);
+  const [cloudColor, setCloudColor] = useState('#4ECDC4');
   const [useBackgroundImage, setUseBackgroundImage] = useState(false);
   const [backgroundImagePreview, setBackgroundImagePreview] = useState(null);
   const [fontFamily, setFontFamily] = useState('Inter');
@@ -142,6 +143,7 @@ export function SettingsPage({ onSaveSettings }) {
           setDisplayTimer(displaySettings.timer || 5);
           setBackgroundColor(displaySettings.background_color || theme.colors.accent[1]);
           setFontColor(displaySettings.font_color || theme.other.signatureNavy);
+          setCloudColor(displaySettings.cloud_color || '#4ECDC4');
           setUseBackgroundImage(displaySettings.use_background_image || false);
           setFontFamily(displaySettings.font_family || 'Inter');
           setFontSize(displaySettings.font_size || 'medium');
@@ -236,6 +238,7 @@ export function SettingsPage({ onSaveSettings }) {
       timer: displayTimer,
       backgroundColor,
       fontColor,
+      cloudColor,
       useBackgroundImage,
       backgroundImage: backgroundImagePreview,
       fontFamily,
@@ -248,6 +251,7 @@ export function SettingsPage({ onSaveSettings }) {
         displayTimer,
         backgroundColor,
         fontColor,
+        cloudColor,
         useBackgroundImage,
         null, // Don't send image data
         fontFamily,
@@ -285,6 +289,7 @@ export function SettingsPage({ onSaveSettings }) {
     const currentSettings = {
       backgroundColor,
       fontColor,
+      cloudColor,
       timer: displayTimer,
       useBackgroundImage,
       backgroundImage: backgroundImagePreview,
@@ -314,6 +319,7 @@ export function SettingsPage({ onSaveSettings }) {
           const settings = {
             backgroundColor,
             fontColor,
+            cloudColor,
             timer: displayTimer,
             useBackgroundImage: true,
             backgroundImage: result.image_url,
@@ -346,6 +352,7 @@ export function SettingsPage({ onSaveSettings }) {
           const settings = {
             backgroundColor,
             fontColor,
+            cloudColor,
             timer: displayTimer,
             useBackgroundImage: false,
             backgroundImage: null,
@@ -689,7 +696,8 @@ export function SettingsPage({ onSaveSettings }) {
               </Title>
 
               <NumberInput
-                label="Set Display Timer (seconds)"
+                label="Cloud Persistence Timer (seconds)"
+                description="How long name clouds remain visible after person leaves detection frame"
                 placeholder="Enter timer value"
                 value={displayTimer}
                 onChange={setDisplayTimer}
@@ -771,7 +779,6 @@ export function SettingsPage({ onSaveSettings }) {
                   )}
                 </Stack>
               ) : (
-                <Group grow>
                 <Box>
                   <Text size="sm" fw={500} mb="xs">
                     Background Color
@@ -793,10 +800,40 @@ export function SettingsPage({ onSaveSettings }) {
                     />
                   </Group>
                 </Box>
+              )}
+
+              <Divider my="sm" label="Cloud Settings" labelPosition="left" />
+
+              <Group grow>
+                <Box>
+                  <Text size="sm" fw={500} mb="xs">
+                    Cloud Color
+                  </Text>
+                  <Text size="xs" c="dimmed" mb="sm">
+                    Color of the clouds that display user names
+                  </Text>
+                  <Group>
+                    <ColorPicker
+                      format="hex"
+                      value={cloudColor}
+                      onChange={setCloudColor}
+                      size="sm"
+                    />
+                    <TextInput
+                      value={cloudColor}
+                      onChange={(event) => setCloudColor(event.currentTarget.value)}
+                      leftSection={<IconColorPicker size={16} />}
+                      style={{ flex: 1 }}
+                    />
+                  </Group>
+                </Box>
 
                 <Box>
                   <Text size="sm" fw={500} mb="xs">
                     Font Color
+                  </Text>
+                  <Text size="xs" c="dimmed" mb="sm">
+                    Color of the text displayed on clouds
                   </Text>
                   <Group>
                     <ColorPicker
@@ -814,7 +851,6 @@ export function SettingsPage({ onSaveSettings }) {
                   </Group>
                 </Box>
               </Group>
-              )}
 
               <Divider my="sm" label="Font Settings" labelPosition="left" />
 

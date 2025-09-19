@@ -109,77 +109,15 @@
             display: none;
         }
 
-        .welcome-card {
-            background: white;
-            border-radius: 16px;
-            padding: 40px;
-            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.1);
-            border: 3px solid var(--font-color, #00243D);
-            min-width: 500px;
-            text-align: center;
-        }
-
-        .success-icon {
-            width: 80px;
-            height: 80px;
-            border-radius: 50%;
-            background-color: #51cf66;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            margin: 0 auto 30px;
-        }
-
-        .welcome-title {
-            color: var(--font-color, #00243D);
-            font-size: var(--title-font-size, 3rem);
-            font-weight: bold;
-            margin: 0 0 30px 0;
-            font-family: var(--font-family, 'Inter'), sans-serif;
-        }
-
-        .user-avatar {
-            width: 120px;
-            height: 120px;
-            border-radius: 50%;
-            border: 4px solid var(--font-color, #00243D);
-            margin: 20px auto;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            overflow: hidden;
-            background-color: #f8f9fa;
-        }
-
-        .user-avatar img {
+        #cloudCanvas {
+            position: absolute;
+            top: 0;
+            left: 0;
             width: 100%;
             height: 100%;
-            object-fit: cover;
+            z-index: 1;
         }
 
-        .user-name {
-            color: var(--font-color, #00243D);
-            font-size: var(--name-font-size, 2.2rem);
-            font-weight: normal;
-            line-height: 1.2;
-            margin: 20px 0 10px 0;
-            font-family: var(--font-family, 'Inter'), sans-serif;
-        }
-
-        .user-department {
-            color: var(--font-color, #00243D);
-            font-size: var(--info-font-size, 1.1rem);
-            opacity: 0.7;
-            margin: 10px 0;
-            font-family: var(--font-family, 'Inter'), sans-serif;
-        }
-
-        .timer-text {
-            color: var(--font-color, #00243D);
-            font-size: 0.9rem;
-            opacity: 0.6;
-            margin-top: 30px;
-        }
 
         /* Kiosk Mode Enhancements */
         .kiosk-mode {
@@ -231,7 +169,17 @@
         }
 
         .waiting-state {
-            padding: 40px 0;
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            z-index: 2;
+            background: rgba(255, 255, 255, 0.9);
+            border-radius: 16px;
+            padding: 40px;
+            text-align: center;
+            backdrop-filter: blur(10px);
+            border: 2px solid var(--font-color, #00243D);
         }
 
         .loader {
@@ -296,61 +244,490 @@
             <span>Kiosk Mode</span>
         </button>
 
-        <!-- Welcome Card -->
-        <div class="welcome-card">
-            <!-- User Recognized State -->
-            <div id="recognizedState" class="hidden">
+        <!-- Cloud Canvas -->
+        <canvas id="cloudCanvas" width="1920" height="1080"></canvas>
 
-                <h1 class="welcome-title">Welcome,</h1>
-
-                <div id="userName" class="user-name">Unknown User</div>
-                <div id="userTitle" class="user-department hidden"></div>
-                <div id="timerText" class="timer-text hidden"></div>
-            </div>
-
-            <!-- Waiting State -->
-            <div id="waitingState" class="waiting-state">
-                <div class="loader"></div>
-                <h2 class="waiting-title">Waiting for face recognition...</h2>
-                <p class="waiting-subtitle">Position yourself in front of the camera</p>
-            </div>
+        <!-- Waiting State Overlay -->
+        <div id="waitingState" class="waiting-state">
+            <div class="loader"></div>
+            <h2 class="waiting-title">Welcome to Signature Aviation</h2>
+            <p class="waiting-subtitle">Position yourself in front of the camera</p>
         </div>
     </div>
 
     <!-- Socket.IO Client Library -->
     <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
 
+
     <script>
+        class Cloud {
+            constructor(name, title, color, canvas, cloudImages, settings = {}) {
+                this.name = name;
+                this.title = title; // User title/department
+                this.color = color;
+                this.canvas = canvas;
+                this.ctx = canvas.getContext('2d');
+                this.settings = settings;
+                this.lastSeen = Date.now();
+                this.fadeOut = false;
+                this.alpha = 1;
+                this.fontSize = settings.fontSize || 'medium';
+
+                // Select random cloud shape
+                this.cloudImage = null;
+                if (cloudImages && cloudImages.length > 0) {
+                    const imageIndex = Math.floor(Math.random() * cloudImages.length);
+                    this.cloudImage = cloudImages[imageIndex];
+                    console.log(`☁️ Cloud for "${name}" using SVG shape ${imageIndex + 1}`);
+                } else {
+                    console.log(`⚠️ Cloud for "${name}" - no cloud images available`);
+                }
+
+                // Calculate text dimensions to determine proper cloud scaling
+                this.calculateTextDimensions();
+                this.calculateCloudDimensions();
+
+                // Define height layers for depth - clouds at different altitudes
+                const heightLayers = [
+                    { min: 0.1, max: 0.25, speed: 0.8 },    // High clouds (slow, small)
+                    { min: 0.25, max: 0.5, speed: 1.0 },    // Mid clouds (medium)
+                    { min: 0.5, max: 0.75, speed: 1.2 },    // Low clouds (faster, larger)
+                ];
+
+                // Randomly select a height layer
+                this.layer = heightLayers[Math.floor(Math.random() * heightLayers.length)];
+
+                // Position will be set by the collision system
+                this.x = -this.width; // Start off-screen left (will be adjusted)
+                this.y = 0; // Will be set by positioning system
+
+                // Cloud movement - speed varies by layer (parallax effect)
+                this.vx = this.layer.speed + Math.random() * 0.4; // Layer-based speed
+                this.vy = (Math.random() - 0.5) * 0.1; // Very slight vertical drift
+
+                // Mark as needing positioning
+                this.needsPositioning = true;
+
+                // Animation properties for gentle floating effect
+                this.animationTime = Math.random() * Math.PI * 2;
+                this.floatAmplitude = 1 + Math.random() * 2; // 1-3 pixel float range
+                this.floatSpeed = 0.01 + Math.random() * 0.01; // Slow gentle movement
+            }
+
+            calculateTextDimensions() {
+                // Get base font sizes based on the fontSize setting
+                const baseFontSizes = {
+                    small: { name: 18, title: 14 },
+                    medium: { name: 22, title: 16 },
+                    large: { name: 26, title: 18 },
+                    xlarge: { name: 30, title: 22 }
+                };
+
+                const baseSize = baseFontSizes[this.fontSize] || baseFontSizes.medium;
+
+                // Set initial font sizes - these will be dynamically adjusted
+                this.baseName = baseSize.name;
+                this.baseTitle = baseSize.title;
+                this.nameFontSize = this.baseName;
+                this.titleFontSize = this.baseTitle;
+
+                // Measure actual text dimensions with base fonts
+                this.ctx.save();
+
+                const fontFamily = this.settings.fontFamily || 'Inter';
+                this.ctx.font = `bold ${this.nameFontSize}px ${fontFamily}, sans-serif`;
+                const nameMetrics = this.ctx.measureText(this.name);
+                this.nameWidth = nameMetrics.width;
+
+                this.titleWidth = 0;
+                if (this.title) {
+                    this.ctx.font = `${this.titleFontSize}px ${fontFamily}, sans-serif`;
+                    const titleMetrics = this.ctx.measureText(this.title);
+                    this.titleWidth = titleMetrics.width;
+                }
+
+                // Calculate total text dimensions with base sizes
+                this.textWidth = Math.max(this.nameWidth, this.titleWidth);
+                this.textHeight = this.title ? (this.nameFontSize + this.titleFontSize + 10) : this.nameFontSize;
+
+                this.ctx.restore();
+            }
+
+            calculateCloudDimensions() {
+                // Get actual cloud path dimensions from SVG viewBox
+                const cloudDimensions = this.getCloudPathDimensions();
+
+                // Apply font size scaling to cloud dimensions
+                const sizeScales = {
+                    small: 0.8,
+                    medium: 1.0,
+                    large: 1.2,
+                    xlarge: 1.4
+                };
+
+                const scale = sizeScales[this.fontSize] || 1.0;
+                this.width = cloudDimensions.width * scale;
+                this.height = cloudDimensions.height * scale;
+
+                // Calculate usable text area within the actual cloud shape
+                // Use conservative estimates based on typical cloud shapes
+                this.textAreaWidth = cloudDimensions.textAreaWidth * scale;
+                this.textAreaHeight = cloudDimensions.textAreaHeight * scale;
+
+                // Now fit text to these precise dimensions
+                this.fitTextToCloud();
+            }
+
+            getCloudPathDimensions() {
+                // Define precise dimensions for each cloud SVG based on their actual paths
+                // These are extracted from the viewBox and path analysis of each cloud
+                const cloudSpecs = {
+                    // Cloud 1: viewBox="115 63 55 35" (ratio: 1.57) - compact, rounded
+                    0: {
+                        width: 200,
+                        height: 127,  // Maintains actual aspect ratio
+                        textAreaWidth: 140, // ~70% of width for safe text area
+                        textAreaHeight: 85   // ~67% of height for safe text area
+                    },
+                    // Cloud 2: viewBox="33 65 55 32" (ratio: 1.72) - wider, flatter
+                    1: {
+                        width: 220,
+                        height: 128,  // Maintains actual aspect ratio
+                        textAreaWidth: 160, // ~73% of width
+                        textAreaHeight: 82   // ~64% of height
+                    },
+                    // Cloud 3: viewBox="110 18 70 35" (ratio: 2.0) - longest, most elongated
+                    2: {
+                        width: 240,
+                        height: 120,  // Maintains actual aspect ratio
+                        textAreaWidth: 180, // ~75% of width
+                        textAreaHeight: 75   // ~63% of height
+                    },
+                    // Cloud 4: viewBox="33 17 63 32" (ratio: 1.97) - wide like cloud 3
+                    3: {
+                        width: 235,
+                        height: 119,  // Maintains actual aspect ratio
+                        textAreaWidth: 175, // ~74% of width
+                        textAreaHeight: 75   // ~63% of height
+                    },
+                    // Cloud 5: viewBox="107 114 80 31" (ratio: 2.58) - extremely wide
+                    4: {
+                        width: 260,
+                        height: 101,  // Maintains actual aspect ratio
+                        textAreaWidth: 200, // ~77% of width (more generous for very wide cloud)
+                        textAreaHeight: 65   // ~64% of height
+                    }
+                };
+
+                // Get cloud index from cloudImage if available
+                let cloudIndex = 0;
+                if (this.cloudImage && this.cloudImage.src) {
+                    const match = this.cloudImage.src.match(/cloud(\d+)\.svg/);
+                    if (match) {
+                        cloudIndex = parseInt(match[1]) - 1; // Convert from 1-5 to 0-4 index
+                        // Ensure the index is valid (0-4)
+                        cloudIndex = Math.max(0, Math.min(4, cloudIndex));
+                    }
+                }
+
+                // Return the specifications for this cloud, or default to cloud 1
+                return cloudSpecs[cloudIndex] || cloudSpecs[0];
+            }
+
+            fitTextToCloud() {
+                // Calculate how much text space we need vs. what we have available
+                const fontFamily = this.settings.fontFamily || 'Inter';
+
+                // Measure text at base sizes
+                this.ctx.save();
+
+                // Calculate optimal font sizes to fit within cloud
+                let nameFontSize = this.baseName;
+                let titleFontSize = this.baseTitle;
+
+                // Calculate total text height needed
+                const lineSpacing = 8; // Space between name and title
+                const totalTextHeight = this.title ?
+                    (nameFontSize + titleFontSize + lineSpacing) : nameFontSize;
+
+                // Fit text vertically first
+                if (totalTextHeight > this.textAreaHeight) {
+                    const scaleFactor = this.textAreaHeight / totalTextHeight;
+                    nameFontSize = Math.max(10, Math.floor(this.baseName * scaleFactor));
+                    titleFontSize = Math.max(8, Math.floor(this.baseTitle * scaleFactor));
+                }
+
+                // Prepare name and title text (with potential truncation for very long text)
+                this.displayName = this.truncateText(this.name, this.textAreaWidth, nameFontSize, fontFamily, true);
+                this.displayTitle = this.title ?
+                    this.truncateText(this.title, this.textAreaWidth, titleFontSize, fontFamily, false) : null;
+
+                // Now fit text horizontally with the (potentially truncated) text
+                let iterations = 0;
+                const maxIterations = 10;
+
+                while (iterations < maxIterations) {
+                    // Measure name width
+                    this.ctx.font = `bold ${nameFontSize}px ${fontFamily}, sans-serif`;
+                    const nameMetrics = this.ctx.measureText(this.displayName);
+                    const nameWidth = nameMetrics.width;
+
+                    // Measure title width if exists
+                    let titleWidth = 0;
+                    if (this.displayTitle) {
+                        this.ctx.font = `${titleFontSize}px ${fontFamily}, sans-serif`;
+                        const titleMetrics = this.ctx.measureText(this.displayTitle);
+                        titleWidth = titleMetrics.width;
+                    }
+
+                    const maxTextWidth = Math.max(nameWidth, titleWidth);
+
+                    // Check if text fits within available width
+                    if (maxTextWidth <= this.textAreaWidth) {
+                        break; // Text fits!
+                    }
+
+                    // Scale down fonts to fit horizontally
+                    const horizontalScale = this.textAreaWidth / maxTextWidth;
+                    nameFontSize = Math.max(10, Math.floor(nameFontSize * horizontalScale * 0.95));
+                    titleFontSize = Math.max(8, Math.floor(titleFontSize * horizontalScale * 0.95));
+
+                    // Re-calculate truncated text with new font sizes
+                    this.displayName = this.truncateText(this.name, this.textAreaWidth, nameFontSize, fontFamily, true);
+                    this.displayTitle = this.title ?
+                        this.truncateText(this.title, this.textAreaWidth, titleFontSize, fontFamily, false) : null;
+
+                    iterations++;
+                }
+
+                // Apply the calculated font sizes
+                this.nameFontSize = nameFontSize;
+                this.titleFontSize = titleFontSize;
+
+                // Update text dimensions with final sizes
+                this.ctx.font = `bold ${this.nameFontSize}px ${fontFamily}, sans-serif`;
+                const nameMetrics = this.ctx.measureText(this.displayName);
+                this.nameWidth = nameMetrics.width;
+
+                this.titleWidth = 0;
+                if (this.displayTitle) {
+                    this.ctx.font = `${this.titleFontSize}px ${fontFamily}, sans-serif`;
+                    const titleMetrics = this.ctx.measureText(this.displayTitle);
+                    this.titleWidth = titleMetrics.width;
+                }
+
+                this.textWidth = Math.max(this.nameWidth, this.titleWidth);
+                this.textHeight = this.displayTitle ?
+                    (this.nameFontSize + this.titleFontSize + lineSpacing) : this.nameFontSize;
+
+                this.ctx.restore();
+
+                console.log(`📏 Fitted "${this.name}" text: name=${this.nameFontSize}px, title=${this.titleFontSize}px (cloud: ${this.width}x${this.height})`);
+            }
+
+            truncateText(text, maxWidth, fontSize, fontFamily, isBold) {
+                // Helper function to truncate text that's too long, adding ellipsis
+                this.ctx.save();
+                this.ctx.font = `${isBold ? 'bold ' : ''}${fontSize}px ${fontFamily}, sans-serif`;
+
+                const metrics = this.ctx.measureText(text);
+
+                if (metrics.width <= maxWidth) {
+                    this.ctx.restore();
+                    return text; // Text fits as-is
+                }
+
+                // Text is too long, need to truncate with ellipsis
+                const ellipsis = '...';
+                const ellipsisWidth = this.ctx.measureText(ellipsis).width;
+                const availableWidth = maxWidth - ellipsisWidth;
+
+                // Binary search for the longest substring that fits
+                let left = 0;
+                let right = text.length;
+                let bestFit = '';
+
+                while (left <= right) {
+                    const mid = Math.floor((left + right) / 2);
+                    const substring = text.substring(0, mid);
+                    const substringWidth = this.ctx.measureText(substring).width;
+
+                    if (substringWidth <= availableWidth) {
+                        bestFit = substring;
+                        left = mid + 1;
+                    } else {
+                        right = mid - 1;
+                    }
+                }
+
+                this.ctx.restore();
+                return bestFit + ellipsis;
+            }
+
+            update() {
+                // Move cloud across screen
+                this.x += this.vx;
+                this.y += this.vy;
+
+                // Add gentle floating animation
+                this.animationTime += this.floatSpeed;
+                const floatOffset = Math.sin(this.animationTime) * this.floatAmplitude;
+                this.currentY = this.y + floatOffset;
+
+                // Gentle wind variance - occasionally change speed slightly
+                if (Math.random() < 0.005) { // 0.5% chance per frame
+                    this.vx += (Math.random() - 0.5) * 0.1;
+                    this.vx = Math.max(0.3, Math.min(2, this.vx)); // Keep within bounds
+                }
+
+                // Reset position when cloud goes off-screen (infinite loop)
+                if (this.x > this.canvas.width + 50) {
+                    this.x = -this.width - 50;
+                    this.y = Math.random() * (this.canvas.height - this.height - 100) + 50;
+                    // Randomize cloud slightly for variation
+                    this.vx = 0.5 + Math.random() * 1;
+                }
+
+                // Handle fadeout
+                if (this.fadeOut) {
+                    this.alpha -= 0.015; // Slower fade for clouds
+                    if (this.alpha <= 0) {
+                        return false; // Mark for removal
+                    }
+                }
+
+                return true; // Continue existing
+            }
+
+            drawCloud() {
+                this.ctx.save();
+                this.ctx.globalAlpha = this.alpha;
+
+                if (this.cloudImage) {
+                    // FIXED: Use isolated canvas approach to prevent composite operation conflicts
+                    // Create a temporary canvas for this cloud to avoid affecting other clouds
+                    const tempCanvas = document.createElement('canvas');
+                    tempCanvas.width = this.width + 20; // Add padding for safety
+                    tempCanvas.height = this.height + 20;
+                    const tempCtx = tempCanvas.getContext('2d');
+
+                    // Draw the SVG to the temporary canvas
+                    tempCtx.drawImage(this.cloudImage, 10, 10, this.width, this.height);
+
+                    // Apply color overlay using source-in on the isolated canvas
+                    tempCtx.globalCompositeOperation = 'source-in';
+                    tempCtx.fillStyle = this.color || '#4ECDC4';
+                    tempCtx.fillRect(0, 0, tempCanvas.width, tempCanvas.height);
+
+                    // Draw the colored cloud to the main canvas
+                    this.ctx.drawImage(tempCanvas, this.x - 10, this.currentY - 10);
+                }
+
+                this.ctx.restore();
+            }
+
+            draw() {
+                // Draw cloud shape
+                this.drawCloud();
+
+
+                // Draw name and title text in center of cloud
+                this.ctx.save();
+                this.ctx.globalAlpha = this.alpha;
+                this.ctx.textAlign = 'center';
+
+                // Get font settings
+                const fontFamily = this.settings.fontFamily || 'Inter';
+                const fontColor = this.settings.fontColor || '#00243D';
+
+                // Add text shadow for better readability
+                this.ctx.shadowColor = 'rgba(0, 0, 0, 0.3)';
+                this.ctx.shadowBlur = 4;
+                this.ctx.shadowOffsetX = 1;
+                this.ctx.shadowOffsetY = 1;
+
+                const centerX = this.x + this.width/2;
+                const centerY = this.currentY + this.height/2;
+
+                if (this.displayTitle) {
+                    // Draw both name and title using calculated font sizes
+                    // Draw name (larger, bold) - perfectly centered above
+                    this.ctx.fillStyle = fontColor;
+                    this.ctx.font = `bold ${this.nameFontSize}px ${fontFamily}, sans-serif`;
+                    this.ctx.textBaseline = 'bottom';
+                    this.ctx.fillText(this.displayName, centerX, centerY - 2);
+
+                    // Draw title (smaller, regular) - perfectly centered below
+                    this.ctx.fillStyle = fontColor;
+                    this.ctx.globalAlpha = this.alpha * 0.85; // Slightly more transparent
+                    this.ctx.font = `${this.titleFontSize}px ${fontFamily}, sans-serif`;
+                    this.ctx.textBaseline = 'top';
+                    this.ctx.fillText(this.displayTitle, centerX, centerY + 2);
+                } else {
+                    // Draw only name (perfectly centered) using calculated font size
+                    this.ctx.fillStyle = fontColor;
+                    this.ctx.font = `bold ${this.nameFontSize}px ${fontFamily}, sans-serif`;
+                    this.ctx.textBaseline = 'middle';
+                    this.ctx.fillText(this.displayName, centerX, centerY);
+                }
+
+                this.ctx.restore();
+            }
+
+            startFadeOut() {
+                this.fadeOut = true;
+            }
+
+            // Check if cloud has moved off screen (for cleanup)
+            isOffScreen() {
+                return this.x > this.canvas.width + 100;
+            }
+        }
+
         class WelcomeScreenPopup {
             constructor() {
                 this.socket = null;
                 this.isConnected = false;
-                this.currentUser = null;
-                this.userQueue = [];  // Queue of users to cycle through
+                this.clouds = new Map(); // Map of person_id to Cloud
+                this.recognitionQueue = new Map(); // Map of person_id to recognition data with timestamps
+                this.queueProcessInterval = null;
                 this.apiBase = this.detectApiBase();
                 this.settings = {
                     backgroundColor: '#E1EBFF',
                     fontColor: '#00243D',
+                    cloudColor: '#4ECDC4',
                     timer: 5,
                     useBackgroundImage: false,
                     backgroundImage: null,
                     fontFamily: 'Inter',
                     fontSize: 'medium'
                 };
-                this.timeLeft = 0;
-                this.timerInterval = null;
                 this.isPersistent = false;
                 this.isKioskMode = false;
+
+                // Canvas setup
+                this.canvas = document.getElementById('cloudCanvas');
+                this.ctx = this.canvas.getContext('2d');
+                this.animationFrame = null;
+
+                // Cloud images from individual SVGs
+                this.cloudImages = [];
+                this.cloudImagesLoaded = false;
 
                 // Load settings asynchronously and then apply them
                 this.loadSettings().then(() => {
                     this.applySettings();
-                    console.log('✅ Settings loaded and applied');
+                    this.setupCanvas();
+                    this.loadCloudImages().then(() => {
+                        this.startAnimation();
+                        console.log('✅ Settings loaded and cloud SVG images ready');
+                    });
                 });
                 this.setupKioskMode();
                 this.connectSocketIO();
                 this.setupFallbackPolling();
                 this.setupMessageListener();
+                this.startQueueProcessor();
 
                 // Close window on escape key (only if not persistent)
                 document.addEventListener('keydown', (e) => {
@@ -358,6 +735,281 @@
                         window.close();
                     }
                 });
+
+                // Handle window resize
+                window.addEventListener('resize', () => {
+                    this.setupCanvas();
+                });
+            }
+
+            setupCanvas() {
+                // Set canvas size to window size
+                this.canvas.width = window.innerWidth;
+                this.canvas.height = window.innerHeight;
+            }
+
+            startQueueProcessor() {
+                // Process the recognition queue every 500ms
+                this.queueProcessInterval = setInterval(() => {
+                    this.processRecognitionQueue();
+                }, 500);
+            }
+
+            processRecognitionQueue() {
+                const now = Date.now();
+                const queueTimeout = 10000; // 10 seconds - allow for backend cooldown delays
+                const displayDelay = 1000; // 1 second delay before showing cloud (to accumulate multiple people)
+
+                // Clean up people who have left the frame
+                for (const [personId, queueData] of this.recognitionQueue) {
+                    if (now - queueData.lastSeen > queueTimeout) {
+                        this.recognitionQueue.delete(personId);
+                        if (this.clouds.has(personId)) {
+                            this.removeCloud(personId);
+                        }
+                    }
+                }
+
+                // Process all people in queue: create new clouds or refresh existing ones
+                for (const [personId, queueData] of this.recognitionQueue) {
+                    if (!this.clouds.has(personId)) {
+                        // Create new cloud if person has been in queue long enough
+                        if (now - queueData.firstSeen > displayDelay) {
+                            this.addCloud(queueData.user);
+                        }
+                    } else {
+                        // Refresh existing cloud
+                        this.addCloud(queueData.user);
+                    }
+                }
+            }
+
+            addToRecognitionQueue(user) {
+                const personId = user.person_id || user.personId;
+                const now = Date.now();
+
+                if (this.recognitionQueue.has(personId)) {
+                    // Update existing queue entry
+                    const queueData = this.recognitionQueue.get(personId);
+                    queueData.lastSeen = now;
+                    queueData.user = user;
+                } else {
+                    // Add new queue entry
+                    this.recognitionQueue.set(personId, {
+                        user: user,
+                        firstSeen: now,
+                        lastSeen: now
+                    });
+                }
+            }
+
+            async loadCloudImages() {
+                // Load SVG files directly from public/clouds folder
+                this.cloudImages = [];
+
+                for (let i = 1; i <= 5; i++) {
+                    const img = new Image();
+                    const cloudPath = `clouds/cloud${i}.svg`;
+
+                    try {
+                        // Load SVG as image
+                        const svgPromise = new Promise((resolve, reject) => {
+                            img.onload = () => resolve(img);
+                            img.onerror = () => reject(new Error(`Failed to load ${cloudPath}`));
+                            img.src = cloudPath;
+                        });
+
+                        const loadedImg = await svgPromise;
+                        this.cloudImages.push(loadedImg);
+                        console.log(`☁️ Loaded cloud${i}.svg`);
+                    } catch (error) {
+                        console.warn(`⚠️ Failed to load ${cloudPath}:`, error);
+                    }
+                }
+
+                this.cloudImagesLoaded = true;
+                console.log(`☁️ Loaded ${this.cloudImages.length} cloud SVG images`);
+            }
+
+
+            startAnimation() {
+                const animate = () => {
+                    this.updateClouds();
+                    this.drawClouds();
+                    this.animationFrame = requestAnimationFrame(animate);
+                };
+                animate();
+            }
+
+            updateClouds() {
+                const cloudsToRemove = [];
+
+                // Position clouds sequentially (one per frame) to avoid race conditions
+                let positionedCount = 0;
+                const maxPositionsPerFrame = 1; // Only position one cloud per frame
+                for (const [personId, cloud] of this.clouds) {
+                    if (cloud.needsPositioning && positionedCount < maxPositionsPerFrame) {
+                        console.log(`📍 Positioning cloud "${cloud.name}" (${positionedCount + 1}/${maxPositionsPerFrame} this frame)`);
+                        this.positionCloud(cloud);
+                        cloud.needsPositioning = false;
+                        positionedCount++;
+                    }
+                }
+
+                // Update each cloud
+                for (const [personId, cloud] of this.clouds) {
+                    if (!cloud.update()) {
+                        cloudsToRemove.push(personId);
+                        continue;
+                    }
+
+                    // Check for timeouts - only timeout if person is not in the recognition queue
+                    if (!cloud.fadeOut && !this.recognitionQueue.has(personId)) {
+                        cloud.startFadeOut();
+                    }
+                }
+
+                // Remove faded out clouds
+                for (const personId of cloudsToRemove) {
+                    this.clouds.delete(personId);
+                }
+            }
+
+            positionCloud(newCloud) {
+                const padding = 100; // Increased minimum distance between clouds for better separation
+                const availableHeight = this.canvas.height - newCloud.height - 100; // Top and bottom padding
+                const layerHeight = availableHeight * (newCloud.layer.max - newCloud.layer.min);
+                const layerStart = availableHeight * newCloud.layer.min + 50;
+
+                // Try to find a non-overlapping position
+                let attempts = 0;
+                const maxAttempts = 20;
+                let foundPosition = false;
+
+                console.log(`🎯 Positioning cloud "${newCloud.name}" - looking for non-overlapping Y position`);
+                console.log(`   Available height: ${availableHeight}, Layer: ${layerStart} to ${layerStart + layerHeight}`);
+                console.log(`   Existing clouds: ${Array.from(this.clouds.values()).filter(c => c !== newCloud).map(c => `${c.name}@(${Math.round(c.x)},${Math.round(c.y)})`).join(', ')}`);
+
+                while (!foundPosition && attempts < maxAttempts) {
+                    // Try a random Y position within the layer
+                    const testY = layerStart + Math.random() * layerHeight;
+
+                    // Check for overlaps with existing clouds
+                    let hasOverlap = false;
+                    for (const [_, existingCloud] of this.clouds) {
+                        if (existingCloud === newCloud) continue; // Skip self
+
+                        // For clouds that still need positioning, use a conservative estimate
+                        let existingY = existingCloud.y;
+                        if (existingCloud.needsPositioning) {
+                            // Assume worst case - they might be positioned anywhere in their layer
+                            console.log(`   Skipping collision check with ${existingCloud.name} (still being positioned)`);
+                            continue;
+                        }
+
+                        const distance = this.getCloudDistance(
+                            { x: newCloud.x, y: testY, width: newCloud.width, height: newCloud.height },
+                            { x: existingCloud.x, y: existingCloud.y, width: existingCloud.width, height: existingCloud.height }
+                        );
+
+                        if (distance < padding) {
+                            hasOverlap = true;
+                            break;
+                        }
+                    }
+
+                    if (!hasOverlap) {
+                        newCloud.y = testY;
+                        newCloud.currentY = testY;
+                        foundPosition = true;
+                    }
+
+                    attempts++;
+                }
+
+                // If we couldn't find a non-overlapping position, use a fallback
+                if (!foundPosition) {
+                    // Spread clouds vertically across the available space
+                    const cloudCount = this.clouds.size;
+                    const spacing = availableHeight / Math.max(cloudCount, 1);
+                    const index = Array.from(this.clouds.values()).indexOf(newCloud);
+                    newCloud.y = 50 + (index * spacing);
+                    newCloud.currentY = newCloud.y;
+                }
+            }
+
+            getCloudDistance(cloud1, cloud2) {
+                // Calculate distance between cloud centers
+                const center1X = cloud1.x + cloud1.width / 2;
+                const center1Y = cloud1.y + cloud1.height / 2;
+                const center2X = cloud2.x + cloud2.width / 2;
+                const center2Y = cloud2.y + cloud2.height / 2;
+
+                return Math.sqrt(
+                    Math.pow(center1X - center2X, 2) +
+                    Math.pow(center1Y - center2Y, 2)
+                );
+            }
+
+            drawClouds() {
+                // Clear canvas
+                this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+
+                // Draw all clouds
+                for (const cloud of this.clouds.values()) {
+                    cloud.draw();
+                }
+
+                // Show waiting state if no clouds
+                if (this.clouds.size === 0) {
+                    document.getElementById('waitingState').classList.remove('hidden');
+                } else {
+                    document.getElementById('waitingState').classList.add('hidden');
+                }
+            }
+
+            addCloud(user) {
+                const personId = user.person_id || user.personId;
+                const name = user.name || user.person_name || 'Unknown';
+                const title = user.userTitle || user.title || null;
+
+                if (this.clouds.has(personId)) {
+                    // Update existing cloud - refresh its timer
+                    const cloud = this.clouds.get(personId);
+                    cloud.lastSeen = Date.now();
+                    cloud.fadeOut = false;
+                    cloud.alpha = 1;
+                } else {
+                    // Create new cloud for new person
+                    const color = this.settings.cloudColor;
+                    const startX = this.findStartingPosition();
+
+                    const cloud = new Cloud(name, title, color, this.canvas, this.cloudImages, this.settings);
+                    cloud.x = startX;
+                    this.clouds.set(personId, cloud);
+                }
+            }
+
+            findStartingPosition() {
+                const existingClouds = Array.from(this.clouds.values());
+
+                if (existingClouds.length === 0) {
+                    return -200; // Standard starting position
+                }
+
+                // Find the leftmost cloud position
+                const leftmostX = Math.min(...existingClouds.map(cloud => cloud.x));
+
+                // Start new clouds further left to avoid immediate collision
+                const spacing = 250; // Horizontal spacing between clouds
+                return Math.min(leftmostX - spacing, -200);
+            }
+
+            removeCloud(personId) {
+                if (this.clouds.has(personId)) {
+                    const cloud = this.clouds.get(personId);
+                    cloud.startFadeOut();
+                }
             }
 
             // Dynamically detect API base URL for deployment flexibility
@@ -389,6 +1041,9 @@
                 }
                 if (urlParams.has('fontColor')) {
                     this.settings.fontColor = urlParams.get('fontColor');
+                }
+                if (urlParams.has('cloudColor')) {
+                    this.settings.cloudColor = urlParams.get('cloudColor');
                 }
                 if (urlParams.has('timer')) {
                     this.settings.timer = parseInt(urlParams.get('timer')) || 5;
@@ -422,6 +1077,7 @@
                             // Update settings with backend values
                             this.settings.backgroundColor = data.background_color || this.settings.backgroundColor;
                             this.settings.fontColor = data.font_color || this.settings.fontColor;
+                            this.settings.cloudColor = data.cloud_color || this.settings.cloudColor;
                             this.settings.timer = data.timer || this.settings.timer;
                             this.settings.useBackgroundImage = data.use_background_image || false;
                             this.settings.fontFamily = data.font_family || this.settings.fontFamily;
@@ -646,23 +1302,25 @@
                     });
 
                     this.socket.on('recognition_result', (data) => {
-                        console.log('🎯 Recognition result received:', data);
-                        console.log('📊 Event data details:', JSON.stringify(data, null, 2));
-                        if (data.type === 'recognition' && data.user) {
-                            console.log('✅ Valid recognition data, adding to queue:', data.user.name || data.user.person_name);
-                            this.addUserToQueue(data.user);
-                        } else {
-                            console.warn('⚠️ Invalid recognition data format:', data);
+                        if (data.type === 'batch_recognition' && data.users && Array.isArray(data.users)) {
+                            for (const user of data.users) {
+                                this.addToRecognitionQueue(user);
+                            }
+                        } else if (data.type === 'recognition' && data.user) {
+                            this.addToRecognitionQueue(data.user);
                         }
                     });
 
                     this.socket.on('welcome_screen_registered', (data) => {
-                        console.log('📺 Welcome Canvas registered successfully');
+                        console.log('📺 Welcome Canvas registered successfully:', data);
 
                         // Request background image settings if needed
                         if (this.settings.useBackgroundImage && !this.settings.backgroundImage) {
                             this.socket.emit('request_background_image', {});
                         }
+
+                        // Check detection status after registration
+                        this.checkDetectionStatus();
                     });
 
                     this.socket.on('background_image_data', (data) => {
@@ -675,6 +1333,13 @@
                             this.settings.backgroundImage = null;
                             this.settings.useBackgroundImage = false;
                         }
+                        this.applySettings();
+                    });
+
+                    this.socket.on('display_settings_updated', (settings) => {
+                        console.log('📋 Received updated display settings:', settings);
+                        // Update current settings with new values
+                        this.settings = { ...this.settings, ...settings };
                         this.applySettings();
                     });
 
@@ -700,7 +1365,7 @@
                         if (response.ok) {
                             const data = await response.json();
                             if (data.user && data.timestamp) {
-                                this.addUserToQueue(data.user);
+                                this.addToRecognitionQueue(data.user);
                             }
                         }
                     } catch (error) {
@@ -726,148 +1391,38 @@
                 }
             }
 
-            addUserToQueue(user) {
-                // Check if user is already in queue (prevent duplicates)
-                const userId = user.person_id || user.personId;
-                const existingIndex = this.userQueue.findIndex(u =>
-                    (u.person_id || u.personId) === userId
-                );
+            async checkDetectionStatus() {
+                try {
+                    console.log('🔍 Checking detection status...');
+                    const response = await fetch(`${this.apiBase}/api/system/detection-status`);
+                    if (response.ok) {
+                        const status = await response.json();
+                        console.log('📊 Detection status:', {
+                            detection_active: status.detection_active,
+                            welcome_screens_connected: status.welcome_screens_connected,
+                            admin_clients_connected: status.admin_clients_connected,
+                            should_auto_start: status.should_auto_start
+                        });
 
-                if (existingIndex !== -1) {
-                    // Update existing user in queue
-                    this.userQueue[existingIndex] = user;
-                    console.log(`🔄 Updated ${user.name || user.person_name} in queue`);
-                } else {
-                    // Add new user to queue
-                    this.userQueue.push(user);
-                    console.log(`➕ Added ${user.name || user.person_name} to queue`);
-                }
-
-                // If no user is currently displayed, show the first user
-                if (!this.currentUser) {
-                    this.showNextUser();
-                }
-            }
-
-            showNextUser() {
-                if (this.userQueue.length === 0) {
-                    this.showWaitingState();
-                    return;
-                }
-
-                // Get the next user from queue
-                const user = this.userQueue.shift();
-                this.showUser(user);
-            }
-
-            showUser(user) {
-                console.log('🔍 showUser called with user data:', JSON.stringify(user, null, 2));
-                this.currentUser = user;
-                this.timeLeft = this.settings.timer;
-
-                // Hide waiting state, show recognized state
-                document.getElementById('waitingState').classList.add('hidden');
-                document.getElementById('recognizedState').classList.remove('hidden');
-
-                // Update user information
-                const userNameEl = document.getElementById('userName');
-                const userTitleEl = document.getElementById('userTitle');
-                const userPhotoEl = document.getElementById('userPhoto');
-                const userIconEl = document.getElementById('userIcon');
-
-                // Set user name
-                userNameEl.textContent = user.name || user.person_name || 'Unknown User';
-
-                // Set title
-                console.log('🏷️ Checking userTitle:', user.userTitle);
-                if (user.userTitle) {
-                    console.log('✅ Setting userTitle:', user.userTitle);
-                    userTitleEl.textContent = user.userTitle;
-                    userTitleEl.classList.remove('hidden');
-                } else {
-                    console.log('❌ No userTitle found, hiding element');
-                    userTitleEl.classList.add('hidden');
-                }
-
-                // Set user photo (with null checks for missing elements)
-                if (user.photo && userPhotoEl && userIconEl) {
-                    userPhotoEl.src = user.photo;
-                    userPhotoEl.classList.remove('hidden');
-                    userIconEl.classList.add('hidden');
-                } else if (userPhotoEl && userIconEl) {
-                    userPhotoEl.classList.add('hidden');
-                    userIconEl.classList.remove('hidden');
-                }
-
-                // Start countdown timer
-                this.startTimer();
-                console.log(`👋 Showing ${user.name || user.person_name} for ${this.settings.timer} seconds`);
-            }
-
-            showWaitingState() {
-                this.currentUser = null;
-
-                // Show waiting state, hide recognized state
-                document.getElementById('recognizedState').classList.add('hidden');
-                document.getElementById('waitingState').classList.remove('hidden');
-
-                console.log('⏳ Showing waiting state - no users in queue');
-            }
-
-            startTimer() {
-                const timerEl = document.getElementById('timerText');
-                console.log('⏰ Starting timer - isPersistent:', this.isPersistent, 'timeLeft:', this.timeLeft, 'timerEl:', timerEl);
-
-                if (this.isPersistent) {
-                    // In persistent mode, show next user after timer
-                    if (timerEl) {
-                        timerEl.classList.remove('hidden');
-                        timerEl.textContent = `Next in ${this.timeLeft} seconds...`;
-                    }
-
-                    if (this.timerInterval) {
-                        clearInterval(this.timerInterval);
-                    }
-
-                    this.timerInterval = setInterval(() => {
-                        if (this.timeLeft > 0) {
-                            if (timerEl) {
-                                timerEl.textContent = `Next in ${this.timeLeft} seconds...`;
-                            }
-                            this.timeLeft--;
+                        if (status.detection_active) {
+                            console.log('✅ Detection is active - welcome screen should receive recognition events');
                         } else {
-                            console.log('⏰ Timer expired, showing next user');
-                            clearInterval(this.timerInterval);
-                            this.showNextUser();
+                            console.log('⚠️ Detection is inactive - need admin to start detection');
                         }
-                    }, 1000);
-                } else {
-                    // Legacy mode - close window
-                    if (timerEl) {
-                        timerEl.classList.remove('hidden');
-                        timerEl.textContent = `Closing in ${this.timeLeft} seconds...`;
+                    } else {
+                        console.warn('⚠️ Failed to fetch detection status:', response.status);
                     }
-
-                    if (this.timerInterval) {
-                        clearInterval(this.timerInterval);
-                    }
-
-                    this.timerInterval = setInterval(() => {
-                        if (this.timeLeft > 0) {
-                            if (timerEl) {
-                                timerEl.textContent = `Closing in ${this.timeLeft} seconds...`;
-                            }
-                            this.timeLeft--;
-                        } else {
-                            this.closeWindow();
-                        }
-                    }, 1000);
+                } catch (error) {
+                    console.warn('⚠️ Error checking detection status:', error);
                 }
             }
 
             closeWindow() {
-                if (this.timerInterval) {
-                    clearInterval(this.timerInterval);
+                if (this.animationFrame) {
+                    cancelAnimationFrame(this.animationFrame);
+                }
+                if (this.queueProcessInterval) {
+                    clearInterval(this.queueProcessInterval);
                 }
                 if (this.socket) {
                     this.socket.emit('unregister_welcome_screen', {});

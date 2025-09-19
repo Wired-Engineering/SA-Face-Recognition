@@ -110,6 +110,104 @@ def set_independent_detection_active(active: bool):
     """Set detection state and persist to config"""
     return config_manager.set_detection_active(active)
 
+# Consolidated recognition and broadcasting functions
+async def broadcast_recognition_to_welcome_screens(person_name: str, recognition_data: dict, source_type: str = ""):
+    """Broadcast recognition data to all connected welcome screens"""
+    if not welcome_screens:
+        return
+
+    source_prefix = f"{source_type}: " if source_type else ""
+    print(f"🎯 {source_prefix}Broadcasting recognition to {len(welcome_screens)} welcome screens: {person_name}")
+
+    # Create tasks for broadcasting to avoid blocking the detection loop
+    tasks = []
+    for welcome_screen_sid in list(welcome_screens.keys()):
+        print(f"📺 {source_prefix}Sending recognition_result to welcome screen {welcome_screen_sid}")
+        task = asyncio.create_task(
+            sio.emit('recognition_result', recognition_data, to=welcome_screen_sid)
+        )
+        tasks.append(task)
+
+    # Optional: Wait for all broadcasts to complete (but don't block on failures)
+    try:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    except Exception as e:
+        print(f"⚠️ Some recognition broadcasts failed: {e}")
+
+def create_recognition_data(best_match: dict, current_time: float) -> dict:
+    """Create standardized recognition data structure"""
+    return {
+        'type': 'recognition',
+        'user': {
+            'person_id': best_match['person_id'],
+            'person_name': best_match['person_name'],
+            'name': best_match['person_name'],
+            'userTitle': best_match.get('person_title'),
+            'confidence': best_match['confidence'],
+            'photo': None
+        },
+        'timestamp': current_time
+    }
+
+def should_broadcast_recognition(person_name: str, current_time: float, cooldown: float = 10.0) -> bool:
+    """Check if enough time has passed to broadcast recognition (prevents spam)"""
+    global last_detected_name, last_recognition_time
+
+    time_since_last = current_time - last_recognition_time
+    should_broadcast = (person_name != last_detected_name and time_since_last > cooldown) or last_detected_name == ""
+
+    if should_broadcast:
+        last_detected_name = person_name
+        last_recognition_time = current_time
+
+    return should_broadcast
+
+async def start_background_processing_for_camera_type():
+    """Start appropriate background processing based on camera configuration"""
+    camera_config = config_manager.get_camera_config()
+    camera_source = camera_config.get('source')
+
+    if camera_source == 'rtsp' and camera_config.get('rtsp_url'):
+        if not any('welcome_screen_bg' in stream_id for stream_id in ffmpeg_streams.keys()):
+            print(f"🎬 Starting background RTSP stream for recognition")
+            asyncio.create_task(start_background_rtsp_for_welcome_screens())
+        else:
+            print(f"🎬 Background RTSP stream already running")
+    elif camera_source in ['webcam', 'device', 'default']:
+        if not any('welcome_screen_bg' in stream_id for stream_id in webcam_streams.keys()):
+            print(f"📹 Starting background webcam stream for recognition")
+            asyncio.create_task(start_background_webcam_for_welcome_screens())
+        else:
+            print(f"📹 Background webcam stream already running")
+    else:
+        print(f"❌ Unsupported camera source for background recognition: {camera_source}")
+
+async def run_with_auto_retry(process_func, stream_id: str, source_type: str, max_retries: int = 10, retry_delay: int = 5):
+    """Generic auto-retry wrapper for background processing functions"""
+    retry_count = 0
+
+    while retry_count <= max_retries and get_independent_detection_active():
+        try:
+            print(f"🎬 Starting {source_type} background processing (attempt {retry_count + 1}/{max_retries + 1})")
+            await process_func()
+            break  # If successful, exit retry loop
+        except Exception as e:
+            retry_count += 1
+            print(f"❌ Background {source_type} processing error (attempt {retry_count}/{max_retries + 1}): {e}")
+
+            if retry_count <= max_retries and get_independent_detection_active():
+                print(f"🔄 Retrying background {source_type} processing in {retry_delay} seconds...")
+                await asyncio.sleep(retry_delay)
+            else:
+                print(f"🛑 Background {source_type} processing failed permanently after {max_retries + 1} attempts")
+                break
+
+    # Clean up stream tracking based on source type
+    stream_dict = ffmpeg_streams if source_type.lower() == 'rtsp' else webcam_streams
+    if stream_id in stream_dict:
+        del stream_dict[stream_id]
+    print(f"🛑 Background {source_type} processing stopped")
+
 # Recognition timing globals (inspired by original PyQt5 implementation)
 last_detected_name = ""
 last_recognition_time = 0.0
@@ -163,23 +261,7 @@ async def start_detection(sid, data):
         camera_config = config_manager.get_camera_config()
         print(f"🔍 Camera config: source={camera_config.get('source')}, rtsp_url={camera_config.get('rtsp_url')}")
 
-        if camera_config.get('source') == 'rtsp' and camera_config.get('rtsp_url'):
-            # Start background RTSP processing for welcome screens
-            if not any('welcome_screen_bg' in stream_id for stream_id in ffmpeg_streams.keys()):
-                print(f"🎬 Starting background RTSP stream for recognition")
-                asyncio.create_task(start_background_rtsp_for_welcome_screens())
-            else:
-                print(f"🎬 Background RTSP stream already running")
-        elif camera_config.get('source') in ['webcam', 'device', 'default']:
-            # Start background webcam processing for welcome screens
-            if not any('welcome_screen_bg' in stream_id for stream_id in webcam_streams.keys()):
-                print(f"📹 Starting background webcam stream for recognition")
-                print(f"📹 Current webcam streams: {list(webcam_streams.keys())}")
-                asyncio.create_task(start_background_webcam_for_welcome_screens())
-            else:
-                print(f"📹 Background webcam stream already running: {list(webcam_streams.keys())}")
-        else:
-            print(f"❌ Unsupported camera source for background recognition: {camera_config.get('source')}")
+        await start_background_processing_for_camera_type()
 
     await sio.emit('detection_started', {'status': 'started'}, to=sid)
 
@@ -210,23 +292,23 @@ async def stop_detection(sid, data):
         detection_session_id = None
         print(f"🛑 Admin explicitly stopped detection - setting detection.active = false")
 
-        # Stop background streams when admin explicitly stops detection
-        background_streams_to_stop = [sid for sid in list(ffmpeg_streams.keys()) if 'welcome_screen_bg' in sid]
-        for stream_id in background_streams_to_stop:
-            del ffmpeg_streams[stream_id]
-            print(f"🛑 Stopped background stream: {stream_id}")
+        # Stop ALL streams when admin explicitly stops detection (not just background)
+        rtsp_stream_count = len(rtsp_streams)
+        ffmpeg_stream_count = len(ffmpeg_streams)
+        webcam_stream_count = len(webcam_streams)
 
-        background_webcam_streams_to_stop = [sid for sid in list(webcam_streams.keys()) if 'welcome_screen_bg' in sid]
-        for stream_id in background_webcam_streams_to_stop:
-            del webcam_streams[stream_id]
-            print(f"🛑 Stopped background webcam stream: {stream_id}")
+        rtsp_streams.clear()
+        ffmpeg_streams.clear()
+        webcam_streams.clear()
+
+        total_stopped = rtsp_stream_count + ffmpeg_stream_count + webcam_stream_count
+        print(f"🛑 Admin stop: Cleared {rtsp_stream_count} RTSP, {ffmpeg_stream_count} FFmpeg, {webcam_stream_count} webcam streams (total: {total_stopped})")
 
     elif len(welcome_screens) == 0 and len(detection_active) == 0:
-        # Only auto-stop if no welcome screens are waiting for recognition events
-        print(f"🔄 No connected clients, but keeping detection active for potential welcome screens")
         # Detection remains active in config - welcome screens can still connect and receive events
+        print(f"🔄 No connected clients, but keeping detection active (persistent state: {get_independent_detection_active()}) for potential welcome screens")
     else:
-        print(f"🔄 Keeping independent detection active - {len(welcome_screens)} welcome screens, {len(detection_active)} admin clients")
+        print(f"🔄 Keeping independent detection active (persistent state: {get_independent_detection_active()}) - {len(welcome_screens)} welcome screens, {len(detection_active)} admin clients")
 
     await sio.emit('detection_stopped', {'status': 'stopped'}, to=sid)
 
@@ -236,9 +318,37 @@ async def register_welcome_screen(sid, data):
     print(f"📺 Welcome screen registered: {sid}")
     welcome_screens[sid] = True
 
-    # Welcome screens should NOT auto-start detection
-    # Detection should only be started explicitly by admin users
-    print(f"📋 Welcome screen registered - detection must be started manually by admin")
+    # Check if detection should be maintained/started for welcome screens
+    detection_state = get_independent_detection_active()
+    admin_clients = len(detection_active)
+
+    if detection_state:
+        print(f"📋 Welcome screen registered - detection already active (persistent state: True, admin clients: {admin_clients})")
+
+        # Check if background processing should be restarted (in case it stopped due to errors)
+        print(f"🔄 Welcome screen connected - checking if background processing needs restart...")
+        await start_background_processing_for_camera_type()
+    else:
+        print(f"📋 Welcome screen registered - detection inactive (persistent state: False, admin clients: {admin_clients})")
+        print(f"📋 Welcome screen will receive recognition events once an admin starts detection")
+
+    # Send current display settings to the newly connected welcome screen
+    try:
+        display_config = config_manager.get_display_config()
+        current_settings = {
+            'timer': display_config.get('timer', 5),
+            'background_color': display_config.get('background_color', '#FFE8D4'),
+            'font_color': display_config.get('font_color', '#032F5C'),
+            'cloud_color': display_config.get('cloud_color', '#4ECDC4'),
+            'use_background_image': display_config.get('use_background_image', False),
+            'font_family': display_config.get('font_family', 'Inter'),
+            'font_size': display_config.get('font_size', 'medium')
+        }
+
+        print(f"📋 Sending current display settings to welcome screen {sid}")
+        await sio.emit('display_settings_updated', current_settings, to=sid)
+    except Exception as e:
+        print(f"❌ Error sending display settings to welcome screen {sid}: {e}")
 
     await sio.emit('welcome_screen_registered', {'status': 'registered'}, to=sid)
 
@@ -438,10 +548,7 @@ def draw_detection_overlays_on_frame(frame, faces):
         thickness = 2
         (text_width, text_height), _ = cv2.getTextSize(label, font, font_scale, thickness)
 
-        # Draw background rectangle for text
-        cv2.rectangle(overlay_frame, (x1, y1 - text_height - 10), (x1 + text_width, y1), bg_color, -1)
-
-        # Draw text
+        # Draw text (without background rectangle)
         cv2.putText(overlay_frame, label, (x1, y1 - 5), font, font_scale, label_color, thickness)
 
     return overlay_frame
@@ -471,7 +578,8 @@ async def process_rtsp_with_ffmpeg_overlay(rtsp_url, output_queue, stop_event):
         frame_count = 0
         detection_results_cache = []
 
-        while not stop_event.is_set() and (get_independent_detection_active() or len(welcome_screens) > 0):
+        # Keep detection running as long as it's marked active OR there are welcome screens waiting
+        while not stop_event.is_set() and get_independent_detection_active():
             # Read frame in thread to avoid blocking
             ret, frame = await loop.run_in_executor(None, cap.read)
             if not ret:
@@ -544,41 +652,20 @@ async def process_rtsp_with_ffmpeg_overlay(rtsp_url, output_queue, stop_event):
                                         'recognized': True
                                     })
 
-                                    # Recognition cooldown timer logic (inspired by original PyQt5)
-                                    global last_detected_name, last_recognition_time
+                                    # Recognition cooldown and broadcasting logic
                                     current_time = time.time()
                                     person_name = best_match['person_name']
 
                                     # Only broadcast if enough time has passed since last recognition
-                                    # or if it's a different person (prevents rapid flickering)
-                                    time_since_last = current_time - last_recognition_time
-                                    if (person_name != last_detected_name and time_since_last > recognition_cooldown) or last_detected_name == "":
-                                        # Store latest recognition and broadcast to welcome screens
-                                        recognition_data = {
-                                            'type': 'recognition',
-                                            'user': {
-                                                'person_id': best_match['person_id'],
-                                                'person_name': person_name,
-                                                'name': person_name,
-                                                'userTitle': best_match['person_title'],
-                                                'confidence': best_match['confidence'],
-                                                'photo': None
-                                            },
-                                            'timestamp': current_time
-                                        }
+                                    if should_broadcast_recognition(person_name, current_time, recognition_cooldown):
+                                        # Create standardized recognition data
+                                        recognition_data = create_recognition_data(best_match, current_time)
 
+                                        # Store latest recognition
                                         latest_recognition.update(recognition_data)
-                                        last_detected_name = person_name
-                                        last_recognition_time = current_time
 
                                         # Broadcast to welcome screens via SocketIO
-                                        print(f"🎯 Broadcasting recognition to {len(welcome_screens)} welcome screens: {person_name}")
-                                        # Create tasks for broadcasting to avoid blocking the detection loop
-                                        for welcome_screen_sid in list(welcome_screens.keys()):
-                                            print(f"📺 Sending recognition_result to welcome screen {welcome_screen_sid}")
-                                            asyncio.create_task(
-                                                sio.emit('recognition_result', recognition_data, to=welcome_screen_sid)
-                                            )
+                                        await broadcast_recognition_to_welcome_screens(person_name, recognition_data, "RTSP")
 
                             detection_results_cache.append(result)
 
@@ -682,6 +769,7 @@ class DisplaySettings(BaseModel):
     timer: Optional[int] = 5
     background_color: Optional[str] = "#FFE8D4"
     font_color: Optional[str] = "#032F5C"
+    cloud_color: Optional[str] = "#4ECDC4"
     use_background_image: Optional[bool] = False
     background_image: Optional[str] = None
     font_family: Optional[str] = "Inter"
@@ -1199,6 +1287,7 @@ async def get_display_settings():
             'timer': display_config.get('timer', 5),
             'background_color': display_config.get('background_color', '#FFE8D4'),
             'font_color': display_config.get('font_color', '#032F5C'),
+            'cloud_color': display_config.get('cloud_color', '#4ECDC4'),
             'use_background_image': display_config.get('use_background_image', False),
             'has_background_image': bool(display_config.get('background_image') and
                                        os.path.exists(display_config.get('background_image', ''))),
@@ -1216,6 +1305,7 @@ async def update_display_settings(request: DisplaySettings):
             timer=request.timer,
             background_color=request.background_color,
             font_color=request.font_color,
+            cloud_color=request.cloud_color,
             use_background_image=request.use_background_image,
             background_image=request.background_image,
             font_family=request.font_family,
@@ -1223,6 +1313,22 @@ async def update_display_settings(request: DisplaySettings):
         )
 
         if success:
+            # Broadcast updated settings to all connected welcome screens
+            if welcome_screens:
+                updated_settings = {
+                    'timer': request.timer,
+                    'background_color': request.background_color,
+                    'font_color': request.font_color,
+                    'cloud_color': request.cloud_color,
+                    'use_background_image': request.use_background_image,
+                    'font_family': request.font_family,
+                    'font_size': request.font_size
+                }
+
+                print(f"📋 Broadcasting updated display settings to {len(welcome_screens)} welcome screens")
+                for screen_sid in welcome_screens.keys():
+                    await sio.emit('display_settings_updated', updated_settings, to=screen_sid)
+
             return {
                 'success': True,
                 'message': 'Display settings updated successfully'
@@ -1424,37 +1530,18 @@ async def trigger_test_recognition():
             "message": "No welcome screens connected"
         }
 
-    # Create test recognition data
-    test_recognition_data = {
-        'type': 'recognition',
-        'user': {
-            'person_id': 'TEST_ID',
-            'person_name': 'Test User',
-            'name': 'Test User',
-            'userTitle': 'Test Title',
-            'confidence': 0.95,
-            'photo': None
-        },
-        'timestamp': time.time()
+    # Create test recognition data using consolidated function
+    test_best_match = {
+        'person_id': 'TEST_ID',
+        'person_name': 'Test User',
+        'person_title': 'Test Title',
+        'confidence': 0.95
     }
 
-    # Broadcast to all welcome screens using tasks to avoid blocking
-    tasks = []
-    for welcome_screen_sid in list(welcome_screens.keys()):
-        print(f"📺 Sending TEST recognition_result to welcome screen {welcome_screen_sid}")
-        task = asyncio.create_task(
-            sio.emit('recognition_result', test_recognition_data, to=welcome_screen_sid)
-        )
-        tasks.append(task)
+    test_recognition_data = create_recognition_data(test_best_match, time.time())
 
-    # Wait for all tasks to complete with timeout
-    try:
-        await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=5.0)
-        print(f"✅ Successfully broadcasted to all welcome screens")
-    except asyncio.TimeoutError:
-        print(f"⚠️ Broadcast timed out after 5 seconds")
-    except Exception as e:
-        print(f"❌ Error during broadcast: {e}")
+    # Broadcast to all welcome screens using consolidated function
+    await broadcast_recognition_to_welcome_screens("Test User", test_recognition_data, "TEST")
 
     return {
         "success": True,
@@ -1490,7 +1577,7 @@ async def rtsp_stream_with_overlay(request: Request):
 
     def generate_frames():
         try:
-            while ffmpeg_streams.get(stream_id, False) and (get_independent_detection_active() or len(welcome_screens) > 0):
+            while ffmpeg_streams.get(stream_id, False) and get_independent_detection_active():
                 try:
                     # Get frame from queue with minimal timeout for responsiveness
                     frame_data = frame_queue.get(timeout=0.01)
@@ -1545,7 +1632,7 @@ async def webcam_stream_with_overlay(request: Request):
 
     def generate_frames():
         try:
-            while webcam_streams.get(stream_id, False) and (get_independent_detection_active() or len(welcome_screens) > 0):
+            while webcam_streams.get(stream_id, False) and get_independent_detection_active():
                 try:
                     # Get frame from queue with minimal timeout
                     frame_data = frame_queue.get(timeout=0.01)
@@ -1636,7 +1723,7 @@ async def process_webcam_with_overlay(output_queue, stream_id):
         detection_results_cache = []
         frame_count = 0
 
-        while webcam_streams.get(stream_id, False) and (get_independent_detection_active() or len(welcome_screens) > 0):
+        while webcam_streams.get(stream_id, False) and get_independent_detection_active():
             # Read frame in thread to avoid blocking
             ret, frame = await loop.run_in_executor(None, cap.read)
             if not ret:
@@ -1710,42 +1797,20 @@ async def process_webcam_with_overlay(output_queue, stream_id):
                                     'recognized': True
                                 })
 
-                                # Recognition cooldown timer logic (inspired by original PyQt5)
-                                global last_detected_name, last_recognition_time
+                                # Recognition cooldown and broadcasting logic
                                 current_time = time.time()
                                 person_name = best_match['person_name']
 
                                 # Only broadcast if enough time has passed since last recognition
-                                # or if it's a different person (prevents rapid flickering)
-                                time_since_last = current_time - last_recognition_time
-                                if (person_name != last_detected_name and time_since_last > recognition_cooldown) or last_detected_name == "":
-                                    # Store latest recognition and broadcast to welcome screens
-                                    recognition_data = {
-                                        'type': 'recognition',
-                                        'user': {
-                                            'person_id': best_match['person_id'],
-                                            'person_name': person_name,
-                                            'name': person_name,
-                                            'userTitle': best_match['person_title'],
-                                            'confidence': best_match['confidence'],
-                                            'photo': None
-                                        },
-                                        'timestamp': current_time
-                                    }
+                                if should_broadcast_recognition(person_name, current_time, recognition_cooldown):
+                                    # Create standardized recognition data
+                                    recognition_data = create_recognition_data(best_match, current_time)
 
+                                    # Store latest recognition
                                     latest_recognition.update(recognition_data)
-                                    last_detected_name = person_name
-                                    last_recognition_time = current_time
 
-                                    # Broadcast to welcome screens
-                                    print(f"🎯 BACKGROUND WEBCAM: Broadcasting recognition to {len(welcome_screens)} welcome screens: {person_name}")
-                                    print(f"🎯 BACKGROUND WEBCAM: Recognition data: {recognition_data}")
-                                    # Create tasks for broadcasting to avoid blocking the detection loop
-                                    for welcome_screen_sid in list(welcome_screens.keys()):
-                                        print(f"📺 BACKGROUND WEBCAM: Sending recognition_result to welcome screen {welcome_screen_sid}")
-                                        asyncio.create_task(
-                                            sio.emit('recognition_result', recognition_data, to=welcome_screen_sid)
-                                        )
+                                    # Broadcast to welcome screens via SocketIO
+                                    await broadcast_recognition_to_welcome_screens(person_name, recognition_data, "WEBCAM")
 
                         detection_results_cache.append(result)
 
@@ -1939,14 +2004,11 @@ async def start_background_rtsp_for_welcome_screens():
     dummy_queue = queue.Queue(maxsize=1)  # Small queue since we're not outputting video
     stop_event = asyncio.Event()
 
-    try:
+    # Use the consolidated auto-retry wrapper
+    async def rtsp_process_func():
         await process_rtsp_with_ffmpeg_overlay(rtsp_url, dummy_queue, stop_event)
-    except Exception as e:
-        print(f"❌ Background RTSP processing error: {e}")
-    finally:
-        if stream_id in ffmpeg_streams:
-            del ffmpeg_streams[stream_id]
-        print("🛑 Background RTSP processing stopped")
+
+    await run_with_auto_retry(rtsp_process_func, stream_id, "RTSP")
 
 async def start_background_webcam_for_welcome_screens():
     """Start background webcam processing specifically for welcome screen recognition"""
@@ -1958,14 +2020,11 @@ async def start_background_webcam_for_welcome_screens():
     # Create a dummy queue since we don't need video output, just recognition events
     dummy_queue = queue.Queue(maxsize=1)  # Small queue since we're not outputting video
 
-    try:
+    # Use the consolidated auto-retry wrapper
+    async def webcam_process_func():
         await process_webcam_with_overlay(dummy_queue, stream_id)
-    except Exception as e:
-        print(f"❌ Background webcam processing error: {e}")
-    finally:
-        if stream_id in webcam_streams:
-            del webcam_streams[stream_id]
-        print("🛑 Background webcam processing stopped")
+
+    await run_with_auto_retry(webcam_process_func, stream_id, "WEBCAM")
 
 def signal_handler(signum, _):
     """Handle shutdown signals gracefully"""

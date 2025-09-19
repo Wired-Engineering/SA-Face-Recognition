@@ -28,8 +28,8 @@ export function DetectionPage({ onDetection }) {
   const theme = useMantineTheme();
   const { isConnected, connectionState, connect, disconnect, on, emit } = useSocket();
   const [isVideoStarted, setIsVideoStarted] = useState(false);
-  const [isDetecting, setIsDetecting] = useState(false);
-  const [detectedPerson, setDetectedPerson] = useState(null);
+  const [isDetecting, setIsDetecting] = useState(false); // eslint-disable-line no-unused-vars
+  const [detectedPerson, setDetectedPerson] = useState(null); // eslint-disable-line no-unused-vars
   const [detectionHistory, setDetectionHistory] = useState([]);
   const [videoStatus, setVideoStatus] = useState('Stopped');
   const [error, setError] = useState(null);
@@ -45,6 +45,80 @@ export function DetectionPage({ onDetection }) {
   const currentBlobUrlRef = useRef(null);
   const [faceDetections, setFaceDetections] = useState([]);
   const videoContainerRef = useRef(null);
+
+  // Handle batch recognition results (multiple users simultaneously)
+  const handleBatchRecognitionResult = useCallback((users) => {
+    console.log(`🎯 Processing batch recognition with ${users.length} users:`, users);
+
+    if (users.length === 0) return;
+
+    // For the detection page UI, show the user with highest confidence
+    const bestUser = users.reduce((best, current) =>
+      current.confidence > best.confidence ? current : best
+    );
+
+    const detectedPerson = {
+      id: bestUser.person_id,
+      name: bestUser.person_name || bestUser.name,
+      title: bestUser.userTitle,
+      confidence: Math.round(bestUser.confidence * 100),
+      totalDetected: users.length // Show how many people were detected
+    };
+
+    setDetectedPerson(detectedPerson);
+
+    // Add all users to detection history
+    const now = new Date().toLocaleString();
+    const rawTimestamp = Date.now();
+
+    setDetectionHistory(prev => {
+      const newEntries = users.map(user => ({
+        id: user.person_id,
+        name: user.person_name || user.name,
+        title: user.userTitle,
+        confidence: Math.round(user.confidence * 100),
+        timestamp: now,
+        rawTimestamp: rawTimestamp
+      }));
+
+      // Combine with existing history and keep last 10
+      return [...newEntries, ...prev].slice(0, 10);
+    });
+
+    onDetection?.(detectedPerson);
+  }, [onDetection]);
+
+  // Handle individual recognition results (legacy support)
+  const handleIndividualRecognitionResult = useCallback((user) => {
+    console.log('🎯 Processing individual recognition:', user);
+
+    const detectedPerson = {
+      id: user.person_id,
+      name: user.person_name || user.name,
+      title: user.userTitle,
+      confidence: Math.round(user.confidence * 100),
+      totalDetected: 1
+    };
+
+    setDetectedPerson(detectedPerson);
+
+    const now = new Date().toLocaleString();
+    setDetectionHistory(prev => {
+      const lastDetection = prev[0];
+      if (!lastDetection ||
+          lastDetection.id !== detectedPerson.id ||
+          Date.now() - new Date(lastDetection.rawTimestamp || 0).getTime() > 5000) {
+        return [{
+          ...detectedPerson,
+          timestamp: now,
+          rawTimestamp: Date.now()
+        }, ...prev.slice(0, 9)];
+      }
+      return prev;
+    });
+
+    onDetection?.(detectedPerson);
+  }, [onDetection]);
 
   // Handle detection results for UI updates (welcome screens and UI state only)
   const handleDetectionResult = useCallback((data) => {
@@ -118,7 +192,22 @@ export function DetectionPage({ onDetection }) {
       setDetectedPerson(null);
     }
   }, [handleDetectionResult]);
+  const handleStopDetection = useCallback((adminStop = false) => {
+    setIsDetecting(false);
+    isDetectingRef.current = false;
+    setDetectedPerson(null);
 
+    // Stop frame processing
+    if (frameProcessingIntervalRef.current) {
+      cancelAnimationFrame(frameProcessingIntervalRef.current);
+      frameProcessingIntervalRef.current = null;
+    }
+
+    // Tell backend to stop detection
+    if (isConnected) {
+      emit('stop_detection', { admin_stop: adminStop });
+    }
+  }, [isConnected, emit]);
   // Browser webcam capture and frame processing
   const startBrowserWebcam = useCallback(async (deviceId = null) => {
     try {
@@ -174,7 +263,7 @@ export function DetectionPage({ onDetection }) {
 
           // Clear the invalid device settings to prevent future auto-restart issues
           try {
-            await apiService.setCameraSettings('default', null, null);
+            await apiService.updateCameraSettings('default', null, null);
             console.log('🔄 Cleared invalid device settings, set to default camera');
           } catch (settingsError) {
             console.warn('Failed to clear invalid camera settings:', settingsError);
@@ -285,7 +374,7 @@ export function DetectionPage({ onDetection }) {
       setError(`Failed to access camera: ${errorMessage}`);
       throw error;
     }
-  }, [emit]);
+  }, [emit, handleStopDetection]);
 
   const stopBrowserWebcam = useCallback(() => {
     console.log('🛑 Stopping browser webcam...');
@@ -359,22 +448,6 @@ export function DetectionPage({ onDetection }) {
     }
   }, [isConnected, connect, emit]);
 
-  const handleStopDetection = useCallback((adminStop = false) => {
-    setIsDetecting(false);
-    isDetectingRef.current = false;
-    setDetectedPerson(null);
-
-    // Stop frame processing
-    if (frameProcessingIntervalRef.current) {
-      cancelAnimationFrame(frameProcessingIntervalRef.current);
-      frameProcessingIntervalRef.current = null;
-    }
-
-    // Tell backend to stop detection
-    if (isConnected) {
-      emit('stop_detection', { admin_stop: adminStop });
-    }
-  }, [isConnected, emit]);
 
   const handleStartVideo = useCallback(async () => {
     try {
@@ -446,11 +519,19 @@ export function DetectionPage({ onDetection }) {
       setVideoStatus('Error');
       setIsVideoStarted(false);
     }
-  }, [setupSocketIOConnection]);
+  }, [setupSocketIOConnection, startBrowserWebcam]);
 
   const handleStopVideo = useCallback(async () => {
     // console.log('🛑 handleStopVideo called');
     // console.trace('🛑 Stop video called from:');
+
+    // Clear the stream image source immediately to stop camera usage
+    if (rtspImageRef.current) {
+      console.log('🖼️ Clearing RTSP image source immediately');
+      rtspImageRef.current.src = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7'; // 1x1 transparent GIF
+      rtspImageRef.current.onload = null;
+      rtspImageRef.current.onerror = null;
+    }
 
     // Stop detection if active (admin explicit stop)
     if (isDetectingRef.current) {
@@ -463,13 +544,19 @@ export function DetectionPage({ onDetection }) {
       if (actualCameraSource === 'browser') {
         console.log('🛑 Stopping browser webcam...');
         stopBrowserWebcam();
+        // Also stop backend webcam streams to release camera completely
+        try {
+          await apiService.stopWebcamStreams();
+          console.log('✅ Backend webcam streams stopped');
+        } catch (error) {
+          console.warn('⚠️ Error stopping backend webcam streams:', error);
+        }
         console.log('✅ Browser webcam stopped');
       } else if (actualCameraSource === 'rtsp') {
         console.log('🛑 Stopping RTSP streams...');
         await apiService.stopRtspStreams();
         console.log('✅ RTSP streams stopped');
       }
-      // Note: All non-RTSP sources now use browser webcam, so no need for backend stream stopping
     } catch (error) {
       console.error('❌ Error stopping streams:', error);
     }
@@ -485,10 +572,6 @@ export function DetectionPage({ onDetection }) {
       frameProcessingIntervalRef.current = null;
     }
 
-    // Clear the stream image source to prevent stale frames
-    if (rtspImageRef.current) {
-      rtspImageRef.current.src = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7'; // 1x1 transparent GIF
-    }
 
     setIsVideoStarted(false);
     setIsDetecting(false);
@@ -539,6 +622,22 @@ export function DetectionPage({ onDetection }) {
       }
     });
 
+    // Handle recognition results from all sources (batch and individual)
+    const cleanupRecognitionResult = on('recognition_result', (data) => {
+      console.log('🎯 Recognition result received on DetectionPage:', data);
+
+      if (data.type === 'batch_recognition' && data.users && Array.isArray(data.users)) {
+        // Handle batch recognition (multiple users simultaneously)
+        // Only update UI for new detections, but always process for welcome screen
+        if (data.is_new !== false) {  // Treat undefined as new for backward compatibility
+          handleBatchRecognitionResult(data.users);
+        }
+      } else if (data.type === 'recognition' && data.user) {
+        // Handle individual recognition (legacy support)
+        handleIndividualRecognitionResult(data.user);
+      }
+    });
+
     const cleanupDetectionStarted = on('detection_started', (data) => {
       console.log('🎯 Detection started:', data);
     });
@@ -560,18 +659,23 @@ export function DetectionPage({ onDetection }) {
     return () => {
       cleanupBinaryFrameResult?.();
       cleanupFaceDetectionResult?.();
+      cleanupRecognitionResult?.();
       cleanupDetectionStarted?.();
       cleanupDetectionStopped?.();
       cleanupDetectionError?.();
       cleanupError?.();
     };
-  }, [isConnected, on, handleBinaryFrameResult, handleDetectionResult, actualCameraSource]);
+  }, [isConnected, on, handleBinaryFrameResult, handleDetectionResult, handleBatchRecognitionResult, handleIndividualRecognitionResult, actualCameraSource]);
 
   // Cleanup on unmount
   useEffect(() => {
     return () => {
       console.log('🧹 Component cleanup triggered - preserving detection state');
-      // Only disconnect socket, do NOT send stop_detection to preserve detection for welcome screens
+
+      // IMPORTANT: Do NOT call disconnect() here to preserve detection state
+      // The SocketProvider will handle disconnection, but the backend detection should continue
+
+      // Only clean up local UI state
       setIsVideoStarted(false);
       setIsDetecting(false);
 
@@ -580,6 +684,8 @@ export function DetectionPage({ onDetection }) {
         URL.revokeObjectURL(currentBlobUrlRef.current);
         currentBlobUrlRef.current = null;
       }
+
+      console.log('🔄 Detection should continue running independently for welcome screens');
     };
   }, []); // Empty dependency array - only run on mount/unmount
 
@@ -787,38 +893,6 @@ export function DetectionPage({ onDetection }) {
                       </Box>
                     )}
 
-                    {/* Detection Overlay */}
-                    {isDetecting && detectedPerson && (
-                      <Box
-                        style={{
-                          position: 'absolute',
-                          top: 20,
-                          left: 20,
-                          backgroundColor: 'white',
-                          color: 'white',
-                          padding: '10px',
-                          borderRadius: '8px',
-                          border: `2px solid ${
-                            detectedPerson.confidence > 80 ? 'green' : 'orange'
-                          }`,
-                        }}
-                      >
-                        <Text size="sm" fw={700}>
-                          {detectedPerson.name}
-                        </Text>
-                        {detectedPerson.title && (
-                          <Text size="xs">
-                            {detectedPerson.title}
-                          </Text>
-                        )}
-                        <Text size="xs">
-                          Confidence: {detectedPerson.confidence}%
-                        </Text>
-                        <Text size="xs">
-                          ID: {detectedPerson.id}
-                        </Text>
-                      </Box>
-                    )}
                   </Box>
                 )}
               </Box>
@@ -897,43 +971,6 @@ export function DetectionPage({ onDetection }) {
         {/* Detection Info Section */}
         <Grid.Col span={3}>
           <Stack gap="md">
-            {/* Current Detection */}
-            <Card shadow="md" radius="md" withBorder>
-              <Title order={5} mb="md">
-                Current Detection
-              </Title>
-
-              {detectedPerson ? (
-                <Stack gap="xs">
-                  <Group justify="space-between">
-                    <Text fw={600}>Name:</Text>
-                    <Text>{detectedPerson.name}</Text>
-                  </Group>
-                  <Group justify="space-between">
-                    <Text fw={600}>ID:</Text>
-                    <Text>{detectedPerson.id}</Text>
-                  </Group>
-                  {detectedPerson.title && (
-                    <Group justify="space-between">
-                      <Text fw={600}>Title:</Text>
-                      <Text>{detectedPerson.title}</Text>
-                    </Group>
-                  )}
-                  <Group justify="space-between">
-                    <Text fw={600}>Confidence:</Text>
-                    <Badge
-                      color={detectedPerson.confidence > 80 ? 'green' : 'orange'}
-                    >
-                      {detectedPerson.confidence}%
-                    </Badge>
-                  </Group>
-                </Stack>
-              ) : (
-                <Text ta="center" py="md">
-                  {isDetecting ? 'Scanning for faces...' : 'No detection active'}
-                </Text>
-              )}
-            </Card>
 
             {/* Detection History */}
             <Card shadow="md" radius="md" withBorder>

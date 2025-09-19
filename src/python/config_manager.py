@@ -94,7 +94,7 @@ class ConfigManager:
         return self.config.get('display', {})
 
     def set_display_config(self, timer: int = None, background_color: str = None, font_color: str = None,
-                          use_background_image: bool = None, background_image: str = None,
+                          cloud_color: str = None, use_background_image: bool = None, background_image: str = None,
                           font_family: str = None, font_size: str = None) -> bool:
         """Set display configuration"""
         display_config = self.get_display_config()
@@ -104,6 +104,8 @@ class ConfigManager:
             display_config['background_color'] = background_color
         if font_color is not None:
             display_config['font_color'] = font_color
+        if cloud_color is not None:
+            display_config['cloud_color'] = cloud_color
         if use_background_image is not None:
             display_config['use_background_image'] = use_background_image
         if background_image is not None:
@@ -142,6 +144,7 @@ class ConfigManager:
                 'timer': 5,
                 'background_color': '#FFE8D4',
                 'font_color': '#032F5C',
+                'cloud_color': '#4ECDC4',
                 'use_background_image': False,
                 'background_image': None,
                 'font_family': 'Inter',
