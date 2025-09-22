@@ -1012,6 +1012,46 @@ export function DetectionPage({ onDetection }) {
                 )}
               </Stack>
             </Card>
+
+            {/* MediaPipe Landmark Debug Info */}
+            {faceDetections.length > 0 && (
+              <Card shadow="md" radius="md" withBorder>
+                <Title order={5} mb="md">
+                  MediaPipe Debug Info
+                </Title>
+                <Stack gap="xs">
+                  {faceDetections.map((face, index) => (
+                    <Paper key={index} p="xs" withBorder>
+                      <Group justify="space-between" gap="xs">
+                        <Box style={{ flex: 1 }}>
+                          <Text size="sm" fw={600}>
+                            Face {index + 1}
+                          </Text>
+                          <Text size="xs">
+                            Confidence: {(face.confidence * 100).toFixed(1)}%
+                          </Text>
+                          <Text size="xs">
+                            Quality: {(face.quality_score * 100).toFixed(1)}%
+                          </Text>
+                          {face.landmarks && (
+                            <Text size="xs" c="blue">
+                              📍 Landmarks: {face.landmark_count || face.landmarks.length} points
+                            </Text>
+                          )}
+                        </Box>
+                        <Badge
+                          size="sm"
+                          color={face.landmarks ? 'green' : 'orange'}
+                        >
+                          {face.landmarks ? '468pt' : 'No LM'}
+                        </Badge>
+                      </Group>
+                    </Paper>
+                  ))}
+                </Stack>
+              </Card>
+            )}
+
           </Stack>
         </Grid.Col>
       </Grid>

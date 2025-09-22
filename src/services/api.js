@@ -285,9 +285,9 @@ export const webcamUtils = {
   async getUserMedia(constraints = {}) {
     const defaultConstraints = {
       video: {
-        width: { ideal: 1280 },
-        height: { ideal: 720 },
-        frameRate: { ideal: 30 },
+        width: { ideal: 1920, max: 4096 },   // Default to 1080p, allow up to 4K
+        height: { ideal: 1080, max: 2304 },  // Default to 1080p, allow up to 4K
+        frameRate: { ideal: 30, min: 15 },
         facingMode: 'user',
       },
       audio: false,

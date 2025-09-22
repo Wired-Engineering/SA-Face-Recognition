@@ -29,7 +29,7 @@ A face recognition application for welcoming guests into an area - built with Re
 ### Prerequisites
 
 - **Node.js** 18+ and **ppnpm**
-- **Python** 3.8+ with pip
+- **Python** 3.8+ < 3.12 with pip
 - **Webcam** or RTSP camera access
 
 ### Installation

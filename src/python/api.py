@@ -23,7 +23,7 @@ import socketio
 
 from DatabaseManager import MySqlite3Manager
 from utils import get_current_datetime_other_format
-from My_Face_recognizer import FaceRecognizer
+from MediaPipe_Face_recognizer import MediaPipeFaceRecognizer as FaceRecognizer
 from config_manager import config_manager
 
 # Lifespan manager for startup and shutdown
@@ -84,11 +84,10 @@ socket_app = socketio.ASGIApp(sio, app)
 
 # Initialize components
 db = MySqlite3Manager()
-# Load recognition settings from config
-recognition_config = config_manager.get_recognition_config()
+# Initialize MediaPipe face recognizer with default settings
 face_recognizer = FaceRecognizer(
-    thresold=recognition_config.get('threshold', 0.45),
-    draw=recognition_config.get('draw_boxes', True)
+    thresold=0.5,  # Default threshold for MediaPipe
+    draw=True      # Enable drawing overlays
 )
 
 # SocketIO globals
@@ -174,11 +173,9 @@ async def start_background_processing_for_camera_type():
         else:
             print(f"🎬 Background RTSP stream already running")
     elif camera_source in ['webcam', 'device', 'default']:
-        if not any('welcome_screen_bg' in stream_id for stream_id in webcam_streams.keys()):
-            print(f"📹 Starting background webcam stream for recognition")
-            asyncio.create_task(start_background_webcam_for_welcome_screens())
-        else:
-            print(f"📹 Background webcam stream already running")
+        print(f"📹 Using browser-based camera selection for {camera_source} source")
+        print(f"📹 Recognition will be handled via frontend camera frames (process_frame_binary)")
+        # No background stream needed - frontend will send frames via Socket.IO
     else:
         print(f"❌ Unsupported camera source for background recognition: {camera_source}")
 
@@ -432,15 +429,26 @@ async def process_frame_binary(sid, data):
         # Process detection results
         detection_results = []
         if faces is not None and len(faces) > 0:
-            for i, face in enumerate(faces):
-                # Get bounding box and convert to regular Python ints
-                x1, y1, w, h = face[:4].astype(int)
+            for i, face_detection in enumerate(faces):
+                # Get bounding box from FaceDetection object
+                x1, y1, w, h = face_detection.bbox
                 x2, y2 = x1 + w, y1 + h
 
                 result = {
                     'bbox': [int(x1), int(y1), int(x2), int(y2)],
-                    'confidence': float(face[14]) if len(face) > 14 else 0.0
+                    'confidence': float(face_detection.confidence),
+                    'quality_score': float(face_detection.quality_score),
+                    'face_area': int(face_detection.face_area),
+                    'is_frontal': bool(face_detection.is_frontal)
                 }
+
+                # Include 468 landmark points if enabled (for visualization/debugging)
+                if face_recognizer.include_landmarks and face_detection.landmarks is not None:
+                    # Convert landmarks to list format for JSON serialization
+                    # Each landmark is [x, y, z] where x,y are normalized coordinates (0-1)
+                    landmarks_list = face_detection.landmarks.tolist()
+                    result['landmarks'] = landmarks_list
+                    result['landmark_count'] = len(landmarks_list)
 
                 # Check for face recognition match
                 if i < len(frame_features) and face_recognizer.dictionary:
@@ -450,7 +458,7 @@ async def process_frame_binary(sid, data):
 
                     for person_id, ref_feature in face_recognizer.dictionary.items():
                         score = face_recognizer.face_recognizer.match(feature, ref_feature)
-                        if score > face_recognizer.thresold and score > highest_score:
+                        if score > face_recognizer.threshold and score > highest_score:
                             highest_score = score
                             person_name = db.get_person_name(person_id)
                             person_title = db.get_person_title(person_id)
@@ -606,8 +614,8 @@ async def process_rtsp_with_ffmpeg_overlay(rtsp_url, output_queue, stop_event):
                         scale_x = original_width / 800.0
                         scale_y = original_height / 600.0
 
-                        for i, face in enumerate(faces):
-                            x1, y1, w, h = face[:4].astype(int)
+                        for i, face_detection in enumerate(faces):
+                            x1, y1, w, h = face_detection.bbox
                             x2, y2 = x1 + w, y1 + h
 
                             # Scale bounding box back to original frame size
@@ -618,7 +626,10 @@ async def process_rtsp_with_ffmpeg_overlay(rtsp_url, output_queue, stop_event):
 
                             result = {
                                 'bbox': [x1_scaled, y1_scaled, x2_scaled, y2_scaled],
-                                'confidence': float(face[14]) if len(face) > 14 else 0.0,
+                                'confidence': float(face_detection.confidence),
+                                'quality_score': float(face_detection.quality_score),
+                                'face_area': int(face_detection.face_area),
+                                'is_frontal': bool(face_detection.is_frontal),
                                 'recognized': False,
                                 'person_name': 'Unknown',
                                 'match_confidence': 0.0
@@ -633,7 +644,7 @@ async def process_rtsp_with_ffmpeg_overlay(rtsp_url, output_queue, stop_event):
                                 for person_id, ref_feature in face_recognizer.dictionary.items():
                                     score = face_recognizer.face_recognizer.match(feature, ref_feature)
 
-                                    if score > face_recognizer.thresold and score > highest_score:
+                                    if score > face_recognizer.threshold and score > highest_score:
                                         highest_score = score
                                         person_name = db.get_person_name(person_id)
                                         person_title = db.get_person_title(person_id)
@@ -774,6 +785,16 @@ class DisplaySettings(BaseModel):
     background_image: Optional[str] = None
     font_family: Optional[str] = "Inter"
     font_size: Optional[str] = "medium"
+
+class MediaPipeSettings(BaseModel):
+    detection_confidence: Optional[float] = 0.5
+    tracking_confidence: Optional[float] = 0.5
+    max_faces: Optional[int] = 20
+    model_selection: Optional[int] = 0  # 0 = short-range (2m), 1 = full-range (5m)
+    refine_landmarks: Optional[bool] = True
+    unlimited_faces: Optional[bool] = False
+    auto_optimize_resolution: Optional[bool] = True
+    include_landmarks: Optional[bool] = False  # Include 468 landmarks in API response
 
 class FaceDetectionRequest(BaseModel):
     image_data: str
@@ -1029,14 +1050,17 @@ async def detect_faces(request: FaceDetectionRequest):
 
         results = []
         if faces is not None:
-            for i, face in enumerate(faces):
-                # Get bounding box
-                x1, y1, w, h = face[:4].astype(int)
+            for i, face_detection in enumerate(faces):
+                # Get bounding box from FaceDetection object
+                x1, y1, w, h = face_detection.bbox
                 x2, y2 = x1 + w, y1 + h
 
                 result = {
                     'bbox': [x1, y1, x2, y2],
-                    'confidence': float(face[14]) if len(face) > 14 else 0.0
+                    'confidence': float(face_detection.confidence),
+                    'quality_score': float(face_detection.quality_score),
+                    'face_area': int(face_detection.face_area),
+                    'is_frontal': bool(face_detection.is_frontal)
                 }
 
                 # Check if we have features and can match
@@ -1048,7 +1072,7 @@ async def detect_faces(request: FaceDetectionRequest):
                     # Compare with all known faces
                     for person_id, ref_feature in face_recognizer.dictionary.items():
                         score = face_recognizer.face_recognizer.match(feature, ref_feature)
-                        if score > face_recognizer.thresold and score > highest_score:
+                        if score > face_recognizer.threshold and score > highest_score:
                             highest_score = score
                             person_name = db.get_person_name(person_id)
                             person_title = db.get_person_title(person_id)
@@ -1162,6 +1186,170 @@ async def update_camera_settings(request: CameraSettings):
             return {
                 'success': False,
                 'message': 'Failed to save camera settings'
+            }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# MediaPipe configuration endpoints
+@app.get("/api/mediapipe/settings")
+async def get_mediapipe_settings():
+    """Get current MediaPipe settings"""
+    try:
+        mediapipe_config = config_manager.get_mediapipe_config()
+        performance_stats = face_recognizer.get_performance_stats()
+
+        # Include current face recognizer settings
+        current_settings = mediapipe_config.copy()
+        current_settings['include_landmarks'] = face_recognizer.include_landmarks
+
+        return {
+            'success': True,
+            'settings': current_settings,
+            'performance': {
+                'avg_detection_time_ms': performance_stats.get('avg_detection_time_ms', 0),
+                'registered_faces': performance_stats.get('registered_faces', 0),
+                'total_detections': performance_stats.get('total_detections', 0)
+            }
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/mediapipe/settings")
+async def update_mediapipe_settings(request: MediaPipeSettings):
+    """Update MediaPipe settings"""
+    try:
+        # Update config file
+        success = config_manager.set_mediapipe_config(
+            detection_confidence=request.detection_confidence,
+            tracking_confidence=request.tracking_confidence,
+            max_faces=request.max_faces,
+            model_selection=request.model_selection,
+            refine_landmarks=request.refine_landmarks,
+            unlimited_faces=request.unlimited_faces,
+            auto_optimize_resolution=request.auto_optimize_resolution
+        )
+
+        if success:
+            # Apply settings to face recognizer
+            face_recognizer.configure_mediapipe(
+                detection_confidence=request.detection_confidence,
+                tracking_confidence=request.tracking_confidence,
+                max_faces=request.max_faces,
+                model_selection=request.model_selection,
+                refine_landmarks=request.refine_landmarks,
+                unlimited_faces=request.unlimited_faces,
+                include_landmarks=request.include_landmarks
+            )
+
+            return {
+                'success': True,
+                'message': 'MediaPipe settings updated successfully'
+            }
+        else:
+            return {
+                'success': False,
+                'message': 'Failed to save MediaPipe settings'
+            }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/mediapipe/optimize-resolution")
+async def optimize_mediapipe_for_resolution(request: dict):
+    """Automatically optimize MediaPipe settings for camera resolution"""
+    try:
+        width = request.get('width', 1280)
+        height = request.get('height', 720)
+        target_fps = request.get('target_fps', 30)
+
+        # Optimize MediaPipe settings
+        face_recognizer.optimize_for_resolution(width, height, target_fps)
+
+        # Save optimized settings to config
+        face_recognizer.save_current_config()
+
+        # Get updated settings
+        mediapipe_config = config_manager.get_mediapipe_config()
+
+        return {
+            'success': True,
+            'message': f'MediaPipe optimized for {width}x{height} @ {target_fps}fps',
+            'optimized_settings': mediapipe_config
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/mediapipe/presets")
+async def get_mediapipe_presets():
+    """Get predefined MediaPipe configuration presets"""
+    try:
+        presets = {
+            'few_people': {
+                'name': '👥 Less than 5 People',
+                'description': 'Optimized for small groups, high accuracy and quality',
+                'settings': {
+                    'detection_confidence': 0.6,
+                    'tracking_confidence': 0.6,
+                    'max_faces': 5,
+                    'model_selection': 1,  # Full-range model for better quality
+                    'refine_landmarks': True,  # High-quality landmarks
+                    'unlimited_faces': False,
+                    'auto_optimize_resolution': True
+                }
+            },
+            'many_people': {
+                'name': '👥👥 5+ People (Groups)',
+                'description': 'Optimized for larger groups, balanced performance',
+                'settings': {
+                    'detection_confidence': 0.5,
+                    'tracking_confidence': 0.5,
+                    'max_faces': 20,
+                    'model_selection': 0,  # Short-range model for speed
+                    'refine_landmarks': True,  # Keep high-quality landmarks
+                    'unlimited_faces': False,
+                    'auto_optimize_resolution': True
+                }
+            }
+        }
+
+        return {
+            'success': True,
+            'presets': presets
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/mediapipe/apply-preset")
+async def apply_mediapipe_preset(request: dict):
+    """Apply a predefined MediaPipe configuration preset"""
+    try:
+        preset_name = request.get('preset')
+        presets_response = await get_mediapipe_presets()
+        presets = presets_response['presets']
+
+        if preset_name not in presets:
+            return {
+                'success': False,
+                'message': f'Preset "{preset_name}" not found'
+            }
+
+        preset_settings = presets[preset_name]['settings']
+
+        # Apply preset to config
+        success = config_manager.set_mediapipe_config(**preset_settings)
+
+        if success:
+            # Apply to face recognizer
+            face_recognizer.configure_mediapipe(**preset_settings)
+
+            return {
+                'success': True,
+                'message': f'Applied preset: {presets[preset_name]["name"]}',
+                'applied_settings': preset_settings
+            }
+        else:
+            return {
+                'success': False,
+                'message': 'Failed to apply preset'
             }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -1484,21 +1672,38 @@ async def get_background_image():
 # System endpoints
 @app.get("/api/system/status")
 async def get_system_status():
-    """Get system status"""
+    """Get enhanced system status with MediaPipe performance metrics"""
     try:
         people = await get_people()
+        performance_stats = face_recognizer.get_performance_stats()
+
         return {
             "status": "online",
             "total_people": people.get("total", 0),
             "models_loaded": True,
-            "database_connected": True
+            "database_connected": True,
+            "recognition_system": {
+                "detection_method": performance_stats.get("detection_method", "MediaPipe"),
+                "recognition_method": performance_stats.get("recognition_method", "OpenCV"),
+                "threshold": performance_stats.get("threshold", 0.5),
+                "registered_faces": performance_stats.get("registered_faces", 0),
+                "avg_detection_time_ms": performance_stats.get("avg_detection_time_ms", 0),
+                "avg_recognition_time_ms": performance_stats.get("avg_recognition_time_ms", 0),
+                "face_quality_threshold": performance_stats.get("face_quality_threshold", 0.3),
+                "cache_enabled": performance_stats.get("cache_enabled", True)
+            }
         }
     except Exception as e:
         return {
             "status": "error",
             "message": str(e),
             "models_loaded": False,
-            "database_connected": False
+            "database_connected": False,
+            "recognition_system": {
+                "detection_method": "Error",
+                "recognition_method": "Error",
+                "error": str(e)
+            }
         }
 
 @app.get("/api/system/health")
@@ -1517,6 +1722,30 @@ async def get_detection_status():
         "should_auto_start": get_independent_detection_active(),  # Frontend should auto-start if backend is active
         "timestamp": get_current_datetime_other_format()
     }
+
+@app.post("/api/system/invalidate-cache")
+async def invalidate_face_cache():
+    """Invalidate face encoding cache and rebuild from images"""
+    try:
+        # Invalidate cache
+        face_recognizer.invalidate_cache()
+
+        # Rebuild face dictionary
+        face_recognizer.create_features()
+
+        performance_stats = face_recognizer.get_performance_stats()
+
+        return {
+            "success": True,
+            "message": "Face encoding cache invalidated and rebuilt",
+            "registered_faces": performance_stats.get("registered_faces", 0),
+            "cache_enabled": performance_stats.get("cache_enabled", True)
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "message": f"Failed to invalidate cache: {str(e)}"
+        }
 
 @app.post("/api/test/trigger-recognition")
 async def trigger_test_recognition():
@@ -1751,8 +1980,8 @@ async def process_webcam_with_overlay(output_queue, stream_id):
                     scale_x = original_width / 800.0
                     scale_y = original_height / 600.0
 
-                    for i, face in enumerate(faces):
-                        x1, y1, w, h = face[:4].astype(int)
+                    for i, face_detection in enumerate(faces):
+                        x1, y1, w, h = face_detection.bbox
                         x2, y2 = x1 + w, y1 + h
 
                         # Scale bounding box back to original frame size
@@ -1763,7 +1992,10 @@ async def process_webcam_with_overlay(output_queue, stream_id):
 
                         result = {
                             'bbox': [x1_scaled, y1_scaled, x2_scaled, y2_scaled],
-                            'confidence': float(face[14]) if len(face) > 14 else 0.0,
+                            'confidence': float(face_detection.confidence),
+                            'quality_score': float(face_detection.quality_score),
+                            'face_area': int(face_detection.face_area),
+                            'is_frontal': bool(face_detection.is_frontal),
                             'recognized': False,
                             'person_name': 'Unknown',
                             'match_confidence': 0.0
@@ -1778,7 +2010,7 @@ async def process_webcam_with_overlay(output_queue, stream_id):
                             for person_id, ref_feature in face_recognizer.dictionary.items():
                                 score = face_recognizer.face_recognizer.match(feature, ref_feature)
 
-                                if score > face_recognizer.thresold and score > highest_score:
+                                if score > face_recognizer.threshold and score > highest_score:
                                     highest_score = score
                                     person_name = db.get_person_name(person_id)
                                     person_title = db.get_person_title(person_id)
@@ -1863,13 +2095,40 @@ async def test_webcam():
     """Test webcam connection without streaming"""
     camera_config = config_manager.get_camera_config()
 
-    if camera_config.get('source') != 'webcam':
-        return {"success": False, "error": "Webcam not configured as source"}
+    if camera_config.get('source') not in ['webcam', 'device', 'default']:
+        return {"success": False, "error": "Webcam/device not configured as source"}
 
     print(f"📹 Testing webcam connection")
 
     try:
-        cap = cv2.VideoCapture(0)
+        # Use same camera selection logic as other functions
+        device_id = camera_config.get('device_id')
+        camera_index = 0  # Default
+
+        # Use device_id if specified, otherwise default to 0
+        if device_id:
+            try:
+                camera_index = int(device_id)  # Try to convert to int for device index
+                print(f"📹 Testing webcam device index: {camera_index}")
+            except ValueError:
+                # Try to find a working camera index dynamically
+                print(f"📹 Device ID {device_id[:12]}... not numeric, finding available camera")
+                for i in range(10):
+                    try:
+                        test_cap = cv2.VideoCapture(i, cv2.CAP_AVFOUNDATION)
+                        if test_cap.isOpened():
+                            ret, _ = test_cap.read()
+                            if ret:
+                                camera_index = i
+                                print(f"📹 Found working camera at index: {camera_index}")
+                                break
+                        test_cap.release()
+                    except:
+                        pass
+        else:
+            print(f"📹 Testing default webcam (index 0)")
+
+        cap = cv2.VideoCapture(camera_index, cv2.CAP_AVFOUNDATION)
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
         if not cap.isOpened():

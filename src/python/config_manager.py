@@ -116,9 +116,6 @@ class ConfigManager:
             display_config['font_size'] = font_size
         return self.update_section('display', display_config)
 
-    def get_recognition_config(self) -> Dict[str, Any]:
-        """Get face recognition configuration"""
-        return self.config.get('recognition', {})
 
     def get_detection_config(self) -> Dict[str, Any]:
         """Get detection system configuration"""
@@ -131,6 +128,38 @@ class ConfigManager:
     def is_detection_active(self) -> bool:
         """Get detection active state from config"""
         return self.get('detection.active', False)
+
+    def get_mediapipe_config(self) -> Dict[str, Any]:
+        """Get MediaPipe configuration"""
+        return self.config.get('mediapipe', {})
+
+    def set_mediapipe_config(self,
+                            detection_confidence: float = None,
+                            tracking_confidence: float = None,
+                            max_faces: int = None,
+                            model_selection: int = None,
+                            refine_landmarks: bool = None,
+                            unlimited_faces: bool = None,
+                            auto_optimize_resolution: bool = None) -> bool:
+        """Set MediaPipe configuration"""
+        mediapipe_config = self.get_mediapipe_config()
+
+        if detection_confidence is not None:
+            mediapipe_config['detection_confidence'] = detection_confidence
+        if tracking_confidence is not None:
+            mediapipe_config['tracking_confidence'] = tracking_confidence
+        if max_faces is not None:
+            mediapipe_config['max_faces'] = max_faces
+        if model_selection is not None:
+            mediapipe_config['model_selection'] = model_selection
+        if refine_landmarks is not None:
+            mediapipe_config['refine_landmarks'] = refine_landmarks
+        if unlimited_faces is not None:
+            mediapipe_config['unlimited_faces'] = unlimited_faces
+        if auto_optimize_resolution is not None:
+            mediapipe_config['auto_optimize_resolution'] = auto_optimize_resolution
+
+        return self.update_section('mediapipe', mediapipe_config)
 
     def get_default_config(self) -> Dict[str, Any]:
         """Get default configuration"""
@@ -150,9 +179,14 @@ class ConfigManager:
                 'font_family': 'Inter',
                 'font_size': 'medium'
             },
-            'recognition': {
-                'threshold': 0.5,
-                'draw_boxes': True
+            'mediapipe': {
+                'detection_confidence': 0.5,
+                'tracking_confidence': 0.5,
+                'max_faces': 20,
+                'model_selection': 0,
+                'refine_landmarks': True,
+                'unlimited_faces': False,
+                'auto_optimize_resolution': True
             },
             'detection': {
                 'active': False

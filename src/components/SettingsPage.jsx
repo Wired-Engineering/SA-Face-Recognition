@@ -1,6 +1,5 @@
 import { useState, useEffect } from 'react';
 import {
-  Paper,
   Stack,
   Title,
   TextInput,
@@ -37,6 +36,10 @@ import {
   IconPhoto,
   IconRefresh,
   IconUsersGroup,
+  IconSettings,
+  IconMoodSmile,
+  IconInfoCircle,
+  IconRocket,
 } from '@tabler/icons-react';
 import apiService, { webcamUtils } from '../services/api';
 import welcomePopupService, { testWelcomePopup, closeWelcomePopup, isWelcomePopupOpen } from '../services/welcomePopup';
@@ -68,6 +71,21 @@ export function SettingsPage({ onSaveSettings }) {
   // Data management state
   const [people, setPeople] = useState([]);
   const [peopleLoading, setPeopleLoading] = useState(false);
+
+  // MediaPipe settings state
+  const [mediapipeSettings, setMediapipeSettings] = useState({
+    detection_confidence: 0.5,
+    tracking_confidence: 0.5,
+    max_faces: 20,
+    model_selection: 0,
+    refine_landmarks: true,
+    unlimited_faces: false,
+    auto_optimize_resolution: true,
+    include_landmarks: false
+  });
+  const [mediapipePresets, setMediapipePresets] = useState({});
+  const [mediapipePerformance, setMediapipePerformance] = useState({});
+  const [mediapipeLoading, setMediapipeLoading] = useState(false);
 
   // Loading and error states
   const [adminLoading, setAdminLoading] = useState(false);
@@ -158,6 +176,9 @@ export function SettingsPage({ onSaveSettings }) {
 
         // Load people data for data management tab
         await loadPeopleData();
+
+        // Load MediaPipe settings
+        await loadMediaPipeSettings();
       } catch (error) {
         console.error('Error loading settings:', error);
       }
@@ -179,6 +200,145 @@ export function SettingsPage({ onSaveSettings }) {
       console.error('People loading error:', error);
     } finally {
       setPeopleLoading(false);
+    }
+  };
+
+  const loadMediaPipeSettings = async () => {
+    try {
+      setMediapipeLoading(true);
+
+      // Load current settings
+      const response = await fetch('/api/mediapipe/settings');
+      const data = await response.json();
+
+      if (data.success) {
+        setMediapipeSettings(data.settings);
+        setMediapipePerformance(data.performance || {});
+      }
+
+      // Load presets
+      const presetsResponse = await fetch('/api/mediapipe/presets');
+      const presetsData = await presetsResponse.json();
+
+      if (presetsData.success) {
+        setMediapipePresets(presetsData.presets);
+      }
+    } catch (error) {
+      console.error('Error loading MediaPipe settings:', error);
+      setError('Failed to load MediaPipe settings: ' + error.message);
+    } finally {
+      setMediapipeLoading(false);
+    }
+  };
+
+  const handleUpdateMediaPipeSettings = async (newSettings) => {
+    try {
+      setMediapipeLoading(true);
+      setError('');
+      setSuccess('');
+
+      const response = await fetch('/api/mediapipe/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(newSettings)
+      });
+
+      const data = await response.json();
+
+      if (data.success) {
+        setMediapipeSettings(prev => ({ ...prev, ...newSettings }));
+        setSuccess('MediaPipe settings updated successfully!');
+
+        // Reload to get updated performance stats
+        await loadMediaPipeSettings();
+
+        onSaveSettings?.({
+          type: 'mediapipe',
+          ...newSettings
+        });
+      } else {
+        setError(data.message || 'Failed to update MediaPipe settings');
+      }
+    } catch (error) {
+      setError('Failed to update MediaPipe settings: ' + error.message);
+      console.error('MediaPipe update error:', error);
+    } finally {
+      setMediapipeLoading(false);
+    }
+  };
+
+  const handleApplyPreset = async (presetName) => {
+    try {
+      setMediapipeLoading(true);
+      setError('');
+      setSuccess('');
+
+      const response = await fetch('/api/mediapipe/apply-preset', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ preset: presetName })
+      });
+
+      const data = await response.json();
+
+      if (data.success) {
+        setSuccess(`Applied preset: ${mediapipePresets[presetName]?.name || presetName}`);
+
+        // Reload settings to reflect the preset
+        await loadMediaPipeSettings();
+
+        onSaveSettings?.({
+          type: 'mediapipe_preset',
+          preset: presetName
+        });
+      } else {
+        setError(data.message || 'Failed to apply preset');
+      }
+    } catch (error) {
+      setError('Failed to apply preset: ' + error.message);
+      console.error('Preset apply error:', error);
+    } finally {
+      setMediapipeLoading(false);
+    }
+  };
+
+  const handleOptimizeResolution = async () => {
+    try {
+      setMediapipeLoading(true);
+      setError('');
+      setSuccess('');
+
+      // Use common camera resolutions for optimization
+      const response = await fetch('/api/mediapipe/optimize-resolution', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          width: 1280,
+          height: 720,
+          target_fps: 30
+        })
+      });
+
+      const data = await response.json();
+
+      if (data.success) {
+        setSuccess('Resolution optimization applied!');
+
+        // Reload settings to reflect the optimization
+        await loadMediaPipeSettings();
+
+        onSaveSettings?.({
+          type: 'mediapipe_optimization',
+          resolution: '1280x720'
+        });
+      } else {
+        setError(data.message || 'Failed to optimize resolution');
+      }
+    } catch (error) {
+      setError('Failed to optimize resolution: ' + error.message);
+      console.error('Resolution optimization error:', error);
+    } finally {
+      setMediapipeLoading(false);
     }
   };
 
@@ -392,53 +552,91 @@ export function SettingsPage({ onSaveSettings }) {
     setError('');
 
     try {
-      // Determine the source and parameters for testing
-      let source = selectedCamera;
-      let deviceId = null;
-      let rtspUrlToTest = null;
-
       if (selectedCamera === 'rtsp') {
-        source = 'rtsp';
-        rtspUrlToTest = rtspUrl;
-        // Validate RTSP URL before testing
+        // For RTSP, use backend testing since browser can't access RTSP
         if (!rtspUrl || rtspUrl.trim() === '') {
           setError('Please enter an RTSP URL before testing');
           return;
         }
-      } else if (selectedCamera === 'default') {
-        source = 'default';
-      } else if (selectedCamera.startsWith('camera_')) {
-        // It's a camera index - for testing, send both the index and device ID
-        source = 'device';
-        const cameraIndex = parseInt(selectedCamera.replace('camera_', ''));
-        if (cameraIndex < cameraDevices.length) {
-          // For testing, pass a special format: "index:deviceId" so backend can use index directly
-          deviceId = `${cameraIndex}:${cameraDevices[cameraIndex].deviceId}`;
-          console.log(`Testing camera ${cameraIndex}: index=${cameraIndex}, deviceId=${cameraDevices[cameraIndex].deviceId}`);
+
+        const result = await apiService.testCamera('rtsp', null, rtspUrl);
+        if (result.success) {
+          setSuccess('RTSP camera test successful!');
         } else {
-          setError('Selected camera not found in available devices');
-          return;
+          setError(result.message || 'RTSP camera test failed');
         }
       } else {
-        // Fallback to default
-        source = 'default';
-      }
-
-      // Always attempt to test cameras - the backend will handle any environment limitations
-      // and provide appropriate error messages if camera access fails
-
-      const result = await apiService.testCamera(source, deviceId, rtspUrlToTest);
-
-      if (result.success) {
-        setSuccess('Camera test successful!');
-      } else {
-        setError(result.message || 'Camera test failed');
+        // For browser cameras (webcam, device, default), use browser-based testing
+        await testBrowserCamera();
       }
     } catch (error) {
       setError('Camera test failed: ' + error.message);
       console.error('Camera test error:', error);
     } finally {
       setCameraLoading(false);
+    }
+  };
+
+  const testBrowserCamera = async () => {
+    let stream = null;
+    try {
+      // Determine which camera to test - request highest available resolution
+      let constraints = {
+        video: {
+          width: { ideal: 3840, max: 4096 },   // Request up to 4K
+          height: { ideal: 2160, max: 2304 },  // Request up to 4K
+          frameRate: { ideal: 30, min: 15 }
+        },
+        audio: false
+      };
+
+      if (selectedCamera === 'default') {
+        // Use default camera
+        constraints.video.facingMode = 'user';
+        console.log('🎥 Testing default camera');
+      } else if (selectedCamera.startsWith('camera_')) {
+        // Use specific camera by deviceId
+        const cameraIndex = parseInt(selectedCamera.replace('camera_', ''));
+        if (cameraIndex < cameraDevices.length) {
+          const device = cameraDevices[cameraIndex];
+          constraints.video.deviceId = { exact: device.deviceId };
+          console.log(`🎥 Testing camera: ${device.label} (${device.deviceId.slice(0, 12)}...)`);
+        } else {
+          throw new Error('Selected camera not found in available devices');
+        }
+      }
+
+      // Test camera access
+      stream = await navigator.mediaDevices.getUserMedia(constraints);
+
+      // Verify we can get video track
+      const videoTracks = stream.getVideoTracks();
+      if (videoTracks.length === 0) {
+        throw new Error('No video track found in camera stream');
+      }
+
+      const videoTrack = videoTracks[0];
+      const settings = videoTrack.getSettings();
+
+      setSuccess(`Camera test successful! Resolution: ${settings.width}x${settings.height}, Device: ${videoTrack.label}`);
+
+      // Stop the test stream
+      stream.getTracks().forEach(track => track.stop());
+
+    } catch (error) {
+      if (stream) {
+        stream.getTracks().forEach(track => track.stop());
+      }
+
+      if (error.name === 'NotFoundError') {
+        throw new Error('Camera not found. Please check if the camera is connected and not in use by another application.');
+      } else if (error.name === 'NotAllowedError') {
+        throw new Error('Camera access denied. Please allow camera permissions in your browser.');
+      } else if (error.name === 'NotReadableError') {
+        throw new Error('Camera is already in use by another application.');
+      } else {
+        throw error;
+      }
     }
   };
 
@@ -603,6 +801,9 @@ export function SettingsPage({ onSaveSettings }) {
           </Tabs.Tab>
           <Tabs.Tab value="camera" leftSection={<IconCamera size={16} />}>
             Camera Settings
+          </Tabs.Tab>
+          <Tabs.Tab value="mediapipe" leftSection={<IconMoodSmile size={16} />}>
+            Face Detection
           </Tabs.Tab>
           <Tabs.Tab value="data" leftSection={<IconTrash size={16} />}>
             Data Management
@@ -998,6 +1199,285 @@ export function SettingsPage({ onSaveSettings }) {
               </Group>
             </Stack>
           </Card>
+        </Tabs.Panel>
+
+        {/* MediaPipe Face Detection Settings Tab */}
+        <Tabs.Panel value="mediapipe">
+          <Stack gap="md">
+            {/* Quick Presets Section */}
+            <Card shadow="sm" p="lg" radius="md" withBorder>
+              <Stack gap="md">
+                <Title order={4}>
+                  <IconRocket size={20} style={{ marginRight: '8px', verticalAlign: 'text-bottom' }} />
+                  Quick Presets
+                </Title>
+
+                <Text size="sm" c="dimmed">
+                  Choose a configuration based on how many people you typically need to detect
+                </Text>
+
+                <Group grow>
+                  {Object.entries(mediapipePresets).map(([key, preset]) => (
+                    <Card
+                      key={key}
+                      withBorder
+                      p="md"
+                      style={{
+                        cursor: 'pointer',
+                        transition: 'all 0.2s ease',
+                        ':hover': { backgroundColor: 'rgba(37, 99, 235, 0.05)' }
+                      }}
+                      onClick={() => !mediapipeLoading && handleApplyPreset(key)}
+                    >
+                      <Stack gap="xs" align="center">
+                        <Text fw={600} size="sm" ta="center">
+                          {preset.name || key}
+                        </Text>
+                        <Text size="xs" c="dimmed" ta="center">
+                          {preset.description}
+                        </Text>
+                        <Button
+                          variant="dark"
+                          size="xs"
+                          color="blue"
+                          loading={mediapipeLoading}
+                          fullWidth
+                        >
+                          Apply
+                        </Button>
+                      </Stack>
+                    </Card>
+                  ))}
+                </Group>
+              </Stack>
+            </Card>
+
+            {/* Manual Configuration Section */}
+            <Card shadow="sm" p="lg" radius="md" withBorder>
+              <Stack gap="md">
+                <Title order={4}>
+                  <IconSettings size={20} style={{ marginRight: '8px', verticalAlign: 'text-bottom' }} />
+                  Advanced Manual Configuration
+                </Title>
+
+                <Text size="sm" c="black">
+                  Fine-tune individual settings for specific requirements. Use presets above for most common scenarios.
+                </Text>
+
+                <Group grow>
+                  <Stack gap="xs">
+                    <Text size="sm" fw={500}>
+                      Detection Confidence
+                    </Text>
+                    <Text size="xs" c="dimmed">
+                      Lower = more faces detected, Higher = fewer false positives
+                    </Text>
+                    <NumberInput
+                      value={mediapipeSettings.detection_confidence}
+                      onChange={(value) =>
+                        handleUpdateMediaPipeSettings({ detection_confidence: value })
+                      }
+                      min={0}
+                      max={1}
+                      step={0.1}
+                      precision={1}
+                      disabled={mediapipeLoading}
+                    />
+                  </Stack>
+
+                  <Stack gap="xs">
+                    <Text size="sm" fw={500}>
+                      Tracking Confidence
+                    </Text>
+                    <Text size="xs" c="dimmed">
+                      Higher = smoother tracking in video
+                    </Text>
+                    <NumberInput
+                      value={mediapipeSettings.tracking_confidence}
+                      onChange={(value) =>
+                        handleUpdateMediaPipeSettings({ tracking_confidence: value })
+                      }
+                      min={0}
+                      max={1}
+                      step={0.1}
+                      precision={1}
+                      disabled={mediapipeLoading}
+                    />
+                  </Stack>
+                </Group>
+
+                <Group grow>
+                  <Stack gap="xs">
+                    <Text size="sm" fw={500}>
+                      Max Faces
+                    </Text>
+                    <Text size="xs" c="dimmed">
+                      Maximum number of faces to detect simultaneously
+                    </Text>
+                    <NumberInput
+                      value={mediapipeSettings.max_faces}
+                      onChange={(value) =>
+                        handleUpdateMediaPipeSettings({ max_faces: value })
+                      }
+                      min={1}
+                      max={100}
+                      disabled={mediapipeLoading || mediapipeSettings.unlimited_faces}
+                    />
+                  </Stack>
+
+                  <Stack gap="xs">
+                    <Text size="sm" fw={500}>
+                      Model Selection
+                    </Text>
+                    <Text size="xs" c="dimmed">
+                      Short-range for webcams, Full-range for professional cameras
+                    </Text>
+                    <Select
+                      value={mediapipeSettings.model_selection?.toString()}
+                      onChange={(value) =>
+                        handleUpdateMediaPipeSettings({ model_selection: parseInt(value) })
+                      }
+                      data={[
+                        { value: '0', label: 'Short-range (Webcam, 2m)' },
+                        { value: '1', label: 'Full-range (Professional, 5m)' }
+                      ]}
+                      disabled={mediapipeLoading}
+                    />
+                  </Stack>
+                </Group>
+
+                <Group grow>
+                  <Switch
+                    label="High-Quality Landmarks"
+                    description="468 landmarks (high quality) vs 68 landmarks (faster)"
+                    checked={mediapipeSettings.refine_landmarks}
+                    onChange={(event) =>
+                      handleUpdateMediaPipeSettings({ refine_landmarks: event.currentTarget.checked })
+                    }
+                    disabled={mediapipeLoading}
+                    styles={{
+                      label: { color: 'black' }
+                    }}
+                  />
+
+                  <Switch
+                    label="Unlimited Faces (Crowd Mode)"
+                    description="Detect up to 100 faces simultaneously"
+                    checked={mediapipeSettings.unlimited_faces}
+                    onChange={(event) =>
+                      handleUpdateMediaPipeSettings({ unlimited_faces: event.currentTarget.checked })
+                    }
+                    disabled={mediapipeLoading}
+                    styles={{
+                      label: { color: 'black' }
+                    }}
+                  />
+                </Group>
+
+                <Switch
+                  label="Auto-optimize for Resolution"
+                  description="Automatically adjust settings based on camera resolution"
+                  checked={mediapipeSettings.auto_optimize_resolution}
+                  onChange={(event) =>
+                    handleUpdateMediaPipeSettings({ auto_optimize_resolution: event.currentTarget.checked })
+                  }
+                  disabled={mediapipeLoading}
+                  styles={{
+                      label: { color: 'black' }
+                    }}
+                />
+
+                <Switch
+                  label="Send Landmark debug to detection page"
+                  description="Landmark debug mode"
+                  checked={mediapipeSettings.include_landmarks}
+                  onChange={(event) =>
+                    handleUpdateMediaPipeSettings({ include_landmarks: event.currentTarget.checked })
+                  }
+                  disabled={mediapipeLoading}
+                  styles={{
+                      label: { color: 'black' }
+                    }}
+                />
+
+                <Group>
+                  <Button
+                    leftSection={<IconRocket size={16} />}
+                    onClick={handleOptimizeResolution}
+                    loading={mediapipeLoading}
+                    variant="dark"
+                    color="blue"
+                  >
+                    {mediapipeLoading ? 'Optimizing...' : 'Auto-Optimize Now'}
+                  </Button>
+
+                  <Button
+                    leftSection={<IconRefresh size={16} />}
+                    onClick={loadMediaPipeSettings}
+                    loading={mediapipeLoading}
+                    variant="dark"
+                    color="gray"
+                  >
+                    Refresh Settings
+                  </Button>
+                </Group>
+              </Stack>
+            </Card>
+
+            {/* Performance Monitor Section */}
+            <Card shadow="sm" p="lg" radius="md" withBorder>
+              <Stack gap="md">
+                <Title order={4}>
+                  <IconInfoCircle size={20} style={{ marginRight: '8px', verticalAlign: 'text-bottom' }} />
+                  Performance Monitor
+                </Title>
+
+                <Group grow>
+                  <Box>
+                    <Text size="lg" fw={700} c="blue">
+                      {mediapipePerformance.avg_detection_time_ms?.toFixed(1) || 'N/A'}ms
+                    </Text>
+                    <Text size="sm" c="dimmed">
+                      Average Detection Time
+                    </Text>
+                  </Box>
+
+                  <Box>
+                    <Text size="lg" fw={700} c="green">
+                      {mediapipePerformance.registered_faces || 0}
+                    </Text>
+                    <Text size="sm" c="dimmed">
+                      Registered Faces
+                    </Text>
+                  </Box>
+
+                  <Box>
+                    <Text size="lg" fw={700} c="orange">
+                      {mediapipePerformance.total_detections || 0}
+                    </Text>
+                    <Text size="sm" c="dimmed">
+                      Total Detections
+                    </Text>
+                  </Box>
+                </Group>
+
+                <Alert color="blue" title="Performance Guidelines">
+                  <Text size="sm">
+                    • VGA (640x480): 8 faces max for 30fps<br/>
+                    • HD (1280x720): 15 faces max for 30fps<br/>
+                    • Full HD (1920x1080): 25 faces max for 30fps<br/>
+                    • 4K+ resolutions: 40+ faces possible with good hardware
+                    {mediapipeSettings.include_landmarks && (
+                      <>
+                        <br/>
+                        • 📍 <strong>Landmark Mode Active:</strong> Sending 468 points per face
+                      </>
+                    )}
+                  </Text>
+                </Alert>
+              </Stack>
+            </Card>
+          </Stack>
         </Tabs.Panel>
 
         {/* Data Management Tab */}
