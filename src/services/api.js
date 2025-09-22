@@ -82,6 +82,15 @@ class ApiService {
     });
   }
 
+  async addAdditionalPhoto(personId, imageData) {
+    return this.request(`/api/people/${personId}/add-photo`, {
+      method: 'POST',
+      body: JSON.stringify({
+        image_data: imageData,
+      }),
+    });
+  }
+
   async deleteperson(personId) {
     return this.request(`/api/people/${personId}`, {
       method: 'DELETE',

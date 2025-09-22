@@ -11,9 +11,12 @@ import {
   Text,
   FileInput,
   Alert,
+  Divider,
+  List,
+  ThemeIcon,
 } from '@mantine/core';
 import { useDisclosure } from '@mantine/hooks';
-import { IconUser, IconCamera, IconUpload, IconUserPlus, IconAlertCircle } from '@tabler/icons-react';
+import { IconUser, IconCamera, IconUpload, IconUserPlus, IconAlertCircle, IconCheck, IconPhoto, IconSun, IconEye, IconDeviceDesktop } from '@tabler/icons-react';
 import apiService, { imageUtils, webcamUtils } from '../services/api';
 
 export function RegistrationPage({ onRegister }) {
@@ -29,6 +32,16 @@ export function RegistrationPage({ onRegister }) {
   const [opened, { open, close }] = useDisclosure(false);
   const [cameraSettings, setCameraSettings] = useState(null);
   const [photoFileUrl, setPhotoFileUrl] = useState(null);
+
+  // Additional photos state
+  const [registeredPersonId, setRegisteredPersonId] = useState(null);
+  const [additionalPhotos, setAdditionalPhotos] = useState([]);
+  const [additionalPhotoLoading, setAdditionalPhotoLoading] = useState(false);
+  const [additionalPhotoError, setAdditionalPhotoError] = useState('');
+  const [additionalPhotoSuccess, setAdditionalPhotoSuccess] = useState('');
+  const [additionalCaptureOpened, { open: openAdditionalCapture, close: closeAdditionalCapture }] = useDisclosure(false);
+  const [additionalStream, setAdditionalStream] = useState(null);
+  const additionalVideoRef = useRef(null);
 
   const videoRef = useRef(null);
 
@@ -147,12 +160,10 @@ export function RegistrationPage({ onRegister }) {
 
       if (result.success) {
         setSuccess(`Person ${personName} registered successfully! ID: ${result.person_id}`);
-        // Reset form
-        setpersonName('');
-        setpersonTitle('');
-        setPhotoFile(null);
-        setPhotoFileUrl(null);
-        setCapturedPhoto(null);
+        setRegisteredPersonId(result.person_id);
+
+        // Don't reset form immediately - let user add more photos
+        // Reset form later when they're done with additional photos
 
         // Call parent callback if provided
         onRegister?.({
@@ -170,6 +181,124 @@ export function RegistrationPage({ onRegister }) {
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleAddAdditionalPhoto = async (file, capturedImageData = null) => {
+    if (!registeredPersonId || (!file && !capturedImageData)) {
+      setAdditionalPhotoError('No person registered or no image provided');
+      return;
+    }
+
+    setAdditionalPhotoLoading(true);
+    setAdditionalPhotoError('');
+    setAdditionalPhotoSuccess('');
+
+    try {
+      let imageData;
+      let imageUrl;
+
+      if (file) {
+        // Validate file
+        imageUtils.validateImageFile(file);
+        imageData = await imageUtils.fileToBase64(file);
+        imageUrl = URL.createObjectURL(file);
+      } else if (capturedImageData) {
+        imageData = capturedImageData;
+        imageUrl = capturedImageData;
+      }
+
+      const result = await apiService.addAdditionalPhoto(registeredPersonId, imageData);
+
+      if (result.success) {
+        setAdditionalPhotoSuccess(`Additional photo added successfully!`);
+        setAdditionalPhotos(prev => [...prev, {
+          file: file || null,
+          url: imageUrl,
+          captured: !!capturedImageData
+        }]);
+
+        // Clear success message after 3 seconds
+        setTimeout(() => setAdditionalPhotoSuccess(''), 3000);
+      } else {
+        setAdditionalPhotoError(result.message || 'Failed to add additional photo');
+      }
+    } catch (error) {
+      setAdditionalPhotoError('Failed to add additional photo: ' + error.message);
+      console.error('Additional photo error:', error);
+    } finally {
+      setAdditionalPhotoLoading(false);
+    }
+  };
+
+  const handleStartAdditionalCapture = async () => {
+    try {
+      openAdditionalCapture();
+
+      // Use configured camera settings
+      let mediaStream;
+      if (cameraSettings && cameraSettings.source === 'rtsp' && cameraSettings.rtsp_url) {
+        setAdditionalPhotoError('RTSP camera capture is not yet supported. Please use file upload instead.');
+        closeAdditionalCapture();
+        return;
+      } else {
+        // Use webcam with configured device ID if available
+        const constraints = {};
+        if (cameraSettings && cameraSettings.device_id) {
+          constraints.video = {
+            deviceId: { exact: cameraSettings.device_id },
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+            frameRate: { ideal: 30 },
+          };
+        }
+
+        mediaStream = await webcamUtils.getUserMedia(constraints);
+      }
+
+      setAdditionalStream(mediaStream);
+      if (additionalVideoRef.current) {
+        additionalVideoRef.current.srcObject = mediaStream;
+      }
+    } catch (error) {
+      setAdditionalPhotoError('Failed to access camera: ' + error.message);
+      closeAdditionalCapture();
+    }
+  };
+
+  const handleCaptureAdditionalPhoto = () => {
+    if (additionalVideoRef.current) {
+      const imageData = imageUtils.captureFromVideo(additionalVideoRef.current);
+      handleAddAdditionalPhoto(null, imageData);
+      handleStopAdditionalCapture();
+    }
+  };
+
+  const handleStopAdditionalCapture = () => {
+    if (additionalStream) {
+      webcamUtils.stopStream(additionalStream);
+      setAdditionalStream(null);
+    }
+    closeAdditionalCapture();
+  };
+
+  const handleStartOver = () => {
+    // Reset all form state
+    setpersonName('');
+    setpersonTitle('');
+    setPhotoFile(null);
+    setPhotoFileUrl(null);
+    setCapturedPhoto(null);
+    setRegisteredPersonId(null);
+    setAdditionalPhotos([]);
+    setError('');
+    setSuccess('');
+    setAdditionalPhotoError('');
+    setAdditionalPhotoSuccess('');
+
+    // Clean up additional photo URLs
+    additionalPhotos.forEach(photo => {
+      if (photo.url) URL.revokeObjectURL(photo.url);
+    });
   };
 
   return (
@@ -398,6 +527,201 @@ export function RegistrationPage({ onRegister }) {
             </Button>
           </Stack>
         </Paper>
+
+        {/* Additional Photos Section - Only show after successful registration */}
+        {registeredPersonId && (
+          <Paper
+            shadow="md"
+            p="xl"
+            radius="md"
+            style={{
+              backgroundColor: 'white',
+            }}
+          >
+            <Stack gap="md">
+              <Title order={3} ta="center" mb="md">
+                Add Additional Photos (Optional)
+              </Title>
+
+              <Text size="sm" c="dimmed" ta="center" mb="md">
+                Adding more photos helps improve recognition accuracy, especially with different lighting, angles, or accessories.
+              </Text>
+
+              {/* Photo Recommendations */}
+              <Alert
+                color="blue"
+                title="Photo Suggestions"
+                icon={<IconPhoto size={16} />}
+              >
+                <Text size="sm" mb="sm">Adding multiple photos helps improve recognition accuracy. Consider photos with:</Text>
+                <List
+                  spacing="xs"
+                  size="sm"
+                  center
+                  icon={
+                    <ThemeIcon color="blue" size={24} radius="xl">
+                      <IconCheck size={12} />
+                    </ThemeIcon>
+                  }
+                >
+                  <List.Item icon={<ThemeIcon color="blue" size={16} radius="xl"><IconEye size={10} /></ThemeIcon>}>
+                    Different facial expressions or angles
+                  </List.Item>
+                  <List.Item icon={<ThemeIcon color="blue" size={16} radius="xl"><IconSun size={10} /></ThemeIcon>}>
+                    Various lighting conditions
+                  </List.Item>
+                  <List.Item icon={<ThemeIcon color="blue" size={16} radius="xl"><IconPhoto size={10} /></ThemeIcon>}>
+                    With and without accessories (glasses, hats, etc.)
+                  </List.Item>
+                </List>
+              </Alert>
+
+              {/* Additional Photo Upload */}
+              <Group grow>
+                <FileInput
+                  leftSection={<IconUpload size={16} />}
+                  placeholder="Upload additional photo"
+                  accept="image/*"
+                  onChange={(file) => file && handleAddAdditionalPhoto(file)}
+                  disabled={additionalPhotoLoading}
+                  styles={{
+                    input: {
+                      backgroundColor: 'white',
+                      border: '1px solid rgb(206, 212, 218)',
+                      '&:focus': {
+                        borderColor: 'rgb(0, 36, 61)',
+                        outline: '2px solid rgb(0, 36, 61)',
+                        outlineOffset: '2px',
+                      },
+                    },
+                  }}
+                />
+
+                <Button
+                  leftSection={<IconCamera size={16} />}
+                  onClick={handleStartAdditionalCapture}
+                  loading={additionalPhotoLoading}
+                  variant="light"
+                  color="signature"
+                  disabled={(cameraSettings && cameraSettings.source === 'rtsp') || additionalPhotoLoading}
+                  styles={{
+                    root: {
+                      backgroundColor: 'rgba(0, 36, 61, 0.1)',
+                      color: 'rgb(0, 36, 61)',
+                      border: '1px solid rgb(0, 36, 61)',
+                      '&:hover': {
+                        backgroundColor: 'rgba(0, 36, 61, 0.2)',
+                      },
+                      '&:disabled': {
+                        backgroundColor: 'rgba(128, 128, 128, 0.1)',
+                        color: 'rgba(128, 128, 128, 0.6)',
+                        border: '1px solid rgba(128, 128, 128, 0.3)',
+                      },
+                    },
+                  }}
+                >
+                  Capture
+                </Button>
+              </Group>
+
+              {/* Additional Photo Error */}
+              {additionalPhotoError && (
+                <Alert
+                  icon={<IconAlertCircle size={16} />}
+                  color="red"
+                  title="Error"
+                >
+                  {additionalPhotoError}
+                </Alert>
+              )}
+
+              {/* Additional Photo Success */}
+              {additionalPhotoSuccess && (
+                <Alert
+                  color="green"
+                  title="Success"
+                >
+                  {additionalPhotoSuccess}
+                </Alert>
+              )}
+
+              {/* Additional Photos Preview */}
+              {additionalPhotos.length > 0 && (
+                <Box>
+                  <Text size="sm" fw={500} mb="xs">
+                    Additional Photos ({additionalPhotos.length}):
+                  </Text>
+                  <Group gap="sm">
+                    {additionalPhotos.map((photo, index) => (
+                      <Box
+                        key={index}
+                        style={{
+                          width: 80,
+                          height: 80,
+                          border: '1px solid rgb(206, 212, 218)',
+                          borderRadius: '8px',
+                          overflow: 'hidden',
+                          position: 'relative',
+                        }}
+                      >
+                        <Image
+                          src={photo.url}
+                          alt={`Additional photo ${index + 1}`}
+                          fit="cover"
+                          h={78}
+                          w={78}
+                        />
+                        <Text
+                          size="xs"
+                          style={{
+                            position: 'absolute',
+                            bottom: 0,
+                            left: 0,
+                            right: 0,
+                            backgroundColor: 'rgba(0, 0, 0, 0.7)',
+                            color: 'white',
+                            padding: '2px 4px',
+                            fontSize: '10px',
+                          }}
+                        >
+                          #{index + 1}
+                        </Text>
+                      </Box>
+                    ))}
+                  </Group>
+                </Box>
+              )}
+
+              <Divider />
+
+              {/* Action Buttons */}
+              <Group justify="center" gap="md">
+                <Button
+                  variant="light"
+                  color="signature"
+                  onClick={handleStartOver}
+                  disabled={additionalPhotoLoading}
+                >
+                  Register Another Person
+                </Button>
+                <Button
+                  variant="outline"
+                  color="signature"
+                  onClick={() => {
+                    // Just clear the registered person ID to hide this section
+                    setRegisteredPersonId(null);
+                    setAdditionalPhotos([]);
+                    setAdditionalPhotoError('');
+                    setAdditionalPhotoSuccess('');
+                  }}
+                  disabled={additionalPhotoLoading}
+                >
+                  Done Adding Photos
+                </Button>
+              </Group>
+            </Stack>
+          </Paper>
+        )}
       </Stack>
 
 
@@ -565,6 +889,139 @@ export function RegistrationPage({ onRegister }) {
               </Button>
               <Button
                 onClick={handleStopCapture}
+                color="signature"
+                variant="outline"
+                style={{
+                  padding: '10px 20px',
+                  borderRadius: '4px',
+                }}
+              >
+                Cancel
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Additional Photo Camera Capture Modal */}
+      {additionalCaptureOpened && (
+        <div style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          width: '100vw',
+          height: '100vh',
+          backgroundColor: 'rgba(0, 0, 0, 0.5)',
+          display: 'flex',
+          justifyContent: 'center',
+          alignItems: 'center',
+          zIndex: 10000
+        }}>
+          <div style={{
+            backgroundColor: 'white',
+            padding: '30px',
+            borderRadius: '8px',
+            maxWidth: '500px',
+            textAlign: 'center'
+          }}>
+            <h2 style={{ color: 'rgb(0, 36, 61)', marginBottom: '10px' }}>Capture Additional Photo</h2>
+            <p style={{ color: 'rgb(0, 36, 61)', marginBottom: '20px', fontSize: '14px' }}>
+              Position your face inside the green rectangle
+            </p>
+            <div style={{
+              position: 'relative',
+              display: 'inline-block',
+              marginBottom: '20px'
+            }}>
+              <video
+                ref={additionalVideoRef}
+                autoPlay
+                playsInline
+                style={{
+                  width: '400px',
+                  height: '300px',
+                  border: '2px solid rgb(0, 36, 61)',
+                  borderRadius: '8px',
+                  objectFit: 'cover'
+                }}
+              />
+              {/* Face placement guide - green rectangle overlay */}
+              <div
+                style={{
+                  position: 'absolute',
+                  top: '2px',
+                  left: '2px',
+                  width: 'calc(100% - 4px)',
+                  height: 'calc(100% - 4px)',
+                  pointerEvents: 'none',
+                  borderRadius: '6px',
+                  overflow: 'hidden'
+                }}
+              >
+                {/* Semi-transparent overlay with cutout for face */}
+                <div style={{
+                  position: 'absolute',
+                  top: 0,
+                  left: 0,
+                  width: '100%',
+                  height: '100%',
+                  background: `
+                    radial-gradient(
+                      ellipse 140px 180px at center,
+                      transparent 50%,
+                      rgba(0, 0, 0, 0.4) 60%
+                    )
+                  `
+                }} />
+
+                {/* Green face guide rectangle */}
+                <div
+                  style={{
+                    position: 'absolute',
+                    top: '50%',
+                    left: '50%',
+                    width: '140px',
+                    height: '180px',
+                    border: '3px solid #00AA7F',
+                    borderRadius: '12px',
+                    transform: 'translate(-50%, -50%)',
+                    boxShadow: '0 0 10px rgba(0, 170, 127, 0.5)'
+                  }}
+                />
+
+                {/* Instructions text overlay */}
+                <div style={{
+                  position: 'absolute',
+                  top: '10px',
+                  left: '50%',
+                  transform: 'translateX(-50%)',
+                  color: '#00AA7F',
+                  fontSize: '14px',
+                  fontWeight: 'bold',
+                  textShadow: '2px 2px 4px rgba(0, 0, 0, 0.8)',
+                  textAlign: 'center',
+                  background: 'rgba(0, 0, 0, 0.5)',
+                  padding: '4px 8px',
+                  borderRadius: '4px'
+                }}>
+                  Position face in green area
+                </div>
+              </div>
+            </div>
+            <div style={{ display: 'flex', gap: '10px', justifyContent: 'center' }}>
+              <Button
+                onClick={handleCaptureAdditionalPhoto}
+                color="signature"
+                loading={additionalPhotoLoading}
+                style={{
+                  padding: '10px 20px',
+                  borderRadius: '4px',
+                }}
+              >
+                📷 Take Photo
+              </Button>
+              <Button
+                onClick={handleStopAdditionalCapture}
                 color="signature"
                 variant="outline"
                 style={{

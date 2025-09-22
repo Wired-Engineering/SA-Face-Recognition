@@ -573,6 +573,134 @@ class MediaPipeFaceRecognizer:
         else:
             return False, ("", max_score)
 
+    def detect_glasses_from_landmarks(self, landmarks: np.ndarray) -> bool:
+        """Detect if person is wearing glasses/sunglasses using landmark analysis"""
+        if landmarks is None or len(landmarks) < 468:
+            return False
+
+        try:
+            # Key landmark indices for eye region analysis
+            left_eye_landmarks = [33, 7, 163, 144, 145, 153, 154, 155]
+            right_eye_landmarks = [362, 382, 381, 380, 374, 373, 390, 249]
+
+            # Calculate average landmark confidence/visibility in eye region
+            eye_region_scores = []
+
+            for idx in left_eye_landmarks + right_eye_landmarks:
+                if idx < len(landmarks):
+                    # Check z-depth and position consistency for occlusion detection
+                    landmark = landmarks[idx]
+                    # Higher z-values or unusual positioning may indicate glasses
+                    eye_region_scores.append(abs(landmark[2]))  # z-depth analysis
+
+            if eye_region_scores:
+                avg_z_depth = np.mean(eye_region_scores)
+                # Threshold for glasses detection (empirically determined)
+                return avg_z_depth > 0.02  # Adjust threshold as needed
+
+        except Exception as e:
+            print(f"❌ Glasses detection error: {e}")
+
+        return False
+
+    def calculate_template_weight(self, template_index: int, has_glasses: bool = False) -> float:
+        """Calculate weight for ensemble voting based on template type and context"""
+
+        # Template type weights (assuming ordered storage)
+        base_weights = {
+            0: 1.0,    # no_accessories (front face, clear)
+            1: 0.9,    # with_glasses (regular glasses)
+            2: 0.7,    # with_sunglasses (heavily occluded)
+            3: 0.8,    # profile_left (side view)
+            4: 0.85,   # different_lighting
+        }
+
+        base_weight = base_weights.get(template_index, 0.8)
+
+        # Context-aware weight adjustment
+        if has_glasses:
+            # Boost weight of templates with glasses when query has glasses
+            if template_index == 1:  # with_glasses
+                base_weight *= 1.3
+            elif template_index == 2:  # with_sunglasses
+                base_weight *= 1.4
+            else:
+                base_weight *= 0.8  # Reduce weight of templates without glasses
+
+        return base_weight
+
+    def calculate_agreement_bonus(self, scores: List[float]) -> float:
+        """Calculate confidence bonus when multiple templates agree"""
+        high_scores = [s for s in scores if s > self.threshold]
+
+        if len(high_scores) >= 2:
+            # Multiple templates agree - boost confidence
+            agreement_strength = len(high_scores) / len(scores)
+            return 0.1 * agreement_strength  # Up to 10% bonus
+
+        return 0.0
+
+    def ensemble_match(self, query_feature: np.ndarray, query_landmarks: np.ndarray = None) -> Tuple[bool, Tuple[str, float]]:
+        """Enhanced matching with ensemble voting for multiple templates per person"""
+        if not self.dictionary:
+            return False, ("", 0.0)
+
+        # Detect context clues from query
+        has_glasses = False
+        if query_landmarks is not None:
+            has_glasses = self.detect_glasses_from_landmarks(query_landmarks)
+
+        max_ensemble_score = 0.0
+        best_match_id = ""
+
+        # Group templates by person (assuming naming convention: person_id%template_type)
+        person_templates = {}
+        for user_id, feature in self.dictionary.items():
+            if '%' in user_id:
+                person_id, template_type = user_id.split('%', 1)
+            else:
+                person_id, template_type = user_id, "main"
+
+            if person_id not in person_templates:
+                person_templates[person_id] = []
+            person_templates[person_id].append((feature, template_type, user_id))
+
+        # Calculate ensemble scores for each person
+        for person_id, templates in person_templates.items():
+            if len(templates) == 1:
+                # Single template - use standard matching
+                feature, _, user_id = templates[0]
+                score = self.face_recognizer.match(query_feature, feature, cv2.FaceRecognizerSF_FR_COSINE)
+            else:
+                # Multiple templates - use ensemble voting
+                scores = []
+                weights = []
+
+                for i, (feature, template_type, user_id) in enumerate(templates):
+                    score = self.face_recognizer.match(query_feature, feature, cv2.FaceRecognizerSF_FR_COSINE)
+                    weight = self.calculate_template_weight(i, has_glasses)
+
+                    scores.append(score)
+                    weights.append(weight)
+
+                # Calculate weighted ensemble score
+                if weights:
+                    weighted_score = np.average(scores, weights=weights)
+                    agreement_bonus = self.calculate_agreement_bonus(scores)
+                    score = weighted_score + agreement_bonus
+                else:
+                    score = max(scores) if scores else 0.0
+
+            # Track best match across all persons
+            if score > max_ensemble_score:
+                max_ensemble_score = score
+                best_match_id = person_id
+
+        if max_ensemble_score >= self.threshold:
+            return True, (best_match_id, max_ensemble_score)
+        else:
+            return False, ("", max_ensemble_score)
+
     def detect(self, image: np.ndarray) -> List[str]:
         """Detect and recognize faces with drawing overlays (legacy compatibility)"""
         features, face_detections = self.recognize_face(image)

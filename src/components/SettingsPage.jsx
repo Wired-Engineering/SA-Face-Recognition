@@ -21,6 +21,8 @@ import {
   ScrollArea,
   LoadingOverlay,
   Flex,
+  Badge,
+  FileInput,
 } from '@mantine/core';
 import {
   IconUser,
@@ -40,6 +42,7 @@ import {
   IconMoodSmile,
   IconInfoCircle,
   IconRocket,
+  IconBadge,
 } from '@tabler/icons-react';
 import apiService, { webcamUtils } from '../services/api';
 import welcomePopupService, { testWelcomePopup, closeWelcomePopup, isWelcomePopupOpen } from '../services/welcomePopup';
@@ -71,6 +74,7 @@ export function SettingsPage({ onSaveSettings }) {
   // Data management state
   const [people, setPeople] = useState([]);
   const [peopleLoading, setPeopleLoading] = useState(false);
+  const [uploadingPhotos, setUploadingPhotos] = useState({});
 
   // MediaPipe settings state
   const [mediapipeSettings, setMediapipeSettings] = useState({
@@ -755,6 +759,38 @@ export function SettingsPage({ onSaveSettings }) {
     } catch (error) {
       setError(`Failed to delete ${personName}: ` + error.message);
       console.error('Delete person error:', error);
+    }
+  };
+
+  const handleUploadAdditionalPhoto = async (personId, personName, file) => {
+    if (!file) return;
+
+    setUploadingPhotos(prev => ({ ...prev, [personId]: true }));
+
+    try {
+      // Validate and convert file
+      const imageData = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+
+      const result = await apiService.addAdditionalPhoto(personId, imageData);
+
+      if (result.success) {
+        setSuccess(`Additional photo added for ${personName}!`);
+        // Refresh the people list to show updated photo count
+        await loadPeopleData();
+        setTimeout(() => setSuccess(''), 3000);
+      } else {
+        setError(result.message || `Failed to add photo for ${personName}`);
+      }
+    } catch (error) {
+      setError(`Failed to add photo for ${personName}: ` + error.message);
+      console.error('Upload photo error:', error);
+    } finally {
+      setUploadingPhotos(prev => ({ ...prev, [personId]: false }));
     }
   };
 
@@ -1564,29 +1600,74 @@ export function SettingsPage({ onSaveSettings }) {
                                     {person.title}
                                   </Text>
                                 )}
+
+                                {/* Photo Information */}
+                                <Group gap={4} mt={4}>
+                                  <Badge
+                                    size="xs"
+                                    variant="dark"
+                                    color={person.total_photos > 1 ? "green" : "blue"}
+                                    leftSection={<IconPhoto size={10} />}
+                                  >
+                                    {person.total_photos} photo{person.total_photos !== 1 ? 's' : ''} {person.additional_photos_count > 0 && (
+                                    <Badge
+                                      size="xs"
+                                      variant="dark"
+                                      color="orange"
+                                    >
+                                      +{person.additional_photos_count} additional
+                                    </Badge>
+                                  )}
+                                  </Badge>
+
+                                  
+                                </Group>
                               </Stack>
                             </Group>
 
-                            <Button
-                              leftSection={<IconTrash size={14} />}
-                              onClick={() => handleDeletePerson(person.id, person.name)}
-                              color="red"
-                              variant="filled"
-                              size="xs"
-                              styles={{
-                                root: {
-                                  backgroundColor: '#fa5252',
-                                  color: 'white',
-                                  fontSize: '12px',
-                                  fontWeight: 500,
-                                  '&:hover': {
-                                    backgroundColor: '#e03131'
+                            <Stack gap="xs">
+                              {/* Add Photo Upload */}
+                              <FileInput
+                                placeholder="Add photo"
+                                accept="image/*"
+                                size="xs"
+                                leftSection={<IconUpload size={12} />}
+                                onChange={(file) => handleUploadAdditionalPhoto(person.id, person.name, file)}
+                                disabled={uploadingPhotos[person.id]}
+                                styles={{
+                                  input: {
+                                    fontSize: '11px',
+                                    height: '28px',
+                                    backgroundColor: 'rgba(0, 36, 61, 0.05)',
+                                    border: '1px solid rgba(0, 36, 61, 0.2)',
+                                    '&:hover': {
+                                      backgroundColor: 'rgba(0, 36, 61, 0.1)',
+                                    },
+                                  },
+                                }}
+                              />
+
+                              <Button
+                                leftSection={<IconTrash size={14} />}
+                                onClick={() => handleDeletePerson(person.id, person.name)}
+                                color="red"
+                                variant="filled"
+                                size="xs"
+                                styles={{
+                                  root: {
+                                    backgroundColor: '#fa5252',
+                                    color: 'white',
+                                    fontSize: '12px',
+                                    fontWeight: 500,
+                                    '&:hover': {
+                                      backgroundColor: '#e03131'
+                                    }
                                   }
-                                }
-                              }}
-                            >
-                              Delete
-                            </Button>
+                                }}
+                              >
+                                Delete
+                              </Button>
+                            </Stack>
                           </Group>
                         </Card>
                       ))}

@@ -450,24 +450,52 @@ async def process_frame_binary(sid, data):
                     result['landmarks'] = landmarks_list
                     result['landmark_count'] = len(landmarks_list)
 
-                # Check for face recognition match
+                # Check for face recognition match using ensemble voting
                 if i < len(frame_features) and face_recognizer.dictionary:
                     feature = frame_features[i]
-                    best_match = None
-                    highest_score = 0
 
-                    for person_id, ref_feature in face_recognizer.dictionary.items():
-                        score = face_recognizer.face_recognizer.match(feature, ref_feature)
-                        if score > face_recognizer.threshold and score > highest_score:
-                            highest_score = score
-                            person_name = db.get_person_name(person_id)
-                            person_title = db.get_person_title(person_id)
+                    # Use ensemble matching if available, otherwise fall back to standard matching
+                    try:
+                        # Get landmarks for context-aware matching
+                        landmarks = face_detection.landmarks if hasattr(face_detection, 'landmarks') else None
+
+                        # Try ensemble matching first
+                        match_result, (person_id, score) = face_recognizer.ensemble_match(feature, landmarks)
+
+                        if match_result:
+                            # Extract base person ID (remove template suffix if present)
+                            base_person_id = person_id.split('%')[0] if '%' in person_id else person_id
+
+                            person_name = db.get_person_name(base_person_id)
+                            person_title = db.get_person_title(base_person_id)
+
                             best_match = {
-                                'person_id': person_id,
+                                'person_id': base_person_id,
                                 'person_name': person_name,
                                 'person_title': person_title,
                                 'confidence': float(score)
                             }
+                        else:
+                            best_match = None
+
+                    except Exception as e:
+                        print(f"❌ Ensemble matching error, falling back to standard matching: {e}")
+                        # Fallback to original matching logic
+                        best_match = None
+                        highest_score = 0
+
+                        for person_id, ref_feature in face_recognizer.dictionary.items():
+                            score = face_recognizer.face_recognizer.match(feature, ref_feature)
+                            if score > face_recognizer.threshold and score > highest_score:
+                                highest_score = score
+                                person_name = db.get_person_name(person_id)
+                                person_title = db.get_person_title(person_id)
+                                best_match = {
+                                    'person_id': person_id,
+                                    'person_name': person_name,
+                                    'person_title': person_title,
+                                    'confidence': float(score)
+                                }
 
                     if best_match:
                         result.update({
@@ -764,6 +792,10 @@ class personRegistration(BaseModel):
     person_title: str
     image_data: str
 
+class AdditionalPhotoUpload(BaseModel):
+    image_data: str
+    description: Optional[str] = None  # Optional user description like "with glasses"
+
 class AdminPasswordChange(BaseModel):
     old_id: str
     old_password: str
@@ -869,12 +901,24 @@ async def get_people():
                     file_mtime = int(os.path.getmtime(image_path))
                     image_url = f'/api/people/{person_id}/image?t={file_mtime}'
 
+                # Count total photos for this person
+                photo_files = []
+                additional_photos = []
+                if os.path.exists('images'):
+                    for filename in os.listdir('images'):
+                        if filename.startswith(f'{person_id}.png') or filename.startswith(f'{person_id}%'):
+                            photo_files.append(filename)
+                            if filename != f'{person_id}.png':
+                                additional_photos.append(filename)
+
                 people.append({
                     'id': person_id,
                     'name': person_name,
                     'title': person_title or '',
                     'has_image': has_image,
-                    'image_path': image_url
+                    'image_path': image_url,
+                    'total_photos': len(photo_files),
+                    'additional_photos_count': len(additional_photos)
                 })
 
         return {
@@ -951,22 +995,105 @@ async def register_person(request: personRegistration):
             'message': f'Registration failed: {str(e)}'
         }
 
+@app.post("/api/people/{person_id}/add-photo")
+async def add_additional_photo(person_id: str, request: AdditionalPhotoUpload):
+    """Add an additional photo template for an existing person"""
+    try:
+        # Verify person exists
+        person_name = db.get_person_name(person_id)
+        if not person_name:
+            return {
+                'success': False,
+                'message': 'Person not found'
+            }
+
+        # Decode base64 image
+        if request.image_data.startswith('data:image'):
+            image_data = request.image_data.split(',')[1]
+        else:
+            image_data = request.image_data
+
+        image_bytes = base64.b64decode(image_data)
+        image = Image.open(BytesIO(image_bytes))
+
+        # Convert to OpenCV format
+        image_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+
+        # Use the face recognizer to detect faces
+        _, faces = face_recognizer.recognize_face(image_cv, f"{person_id}_temp.png")
+
+        if faces is None or len(faces) == 0:
+            return {
+                'success': False,
+                'message': 'No face detected in the image'
+            }
+
+        if len(faces) > 1:
+            return {
+                'success': False,
+                'message': 'Multiple faces detected. Please use an image with only one face.'
+            }
+
+        # Generate simple identifier for additional photos
+        existing_photos = [f for f in os.listdir('images') if f.startswith(f'{person_id}%') or f == f'{person_id}.png']
+        photo_number = len(existing_photos)
+
+        # Save additional photo with simple numbering
+        os.makedirs('images', exist_ok=True)
+        image_filename = f'{person_id}%{photo_number}.png'
+        image_path = f'images/{image_filename}'
+        cv2.imwrite(image_path, image_cv)
+
+        # Recreate features dictionary to include new photo
+        face_recognizer.create_features()
+
+        return {
+            'success': True,
+            'message': 'Additional photo added successfully',
+            'person_id': person_id,
+            'total_photos': photo_number + 1
+        }
+
+    except Exception as e:
+        return {
+            'success': False,
+            'message': f'Failed to add additional photo: {str(e)}'
+        }
+
 @app.delete("/api/people/{person_id}")
 async def delete_person(person_id: str):
-    """Delete a person"""
+    """Delete a person and all their photos"""
     try:
+        # Delete from database first
         result = db.delete_data_from_person(person_id)
         if result:
+            # Delete all photo files for this person
+            deleted_photos = []
+            if os.path.exists('images'):
+                for filename in os.listdir('images'):
+                    if filename.startswith(f'{person_id}.png') or filename.startswith(f'{person_id}%'):
+                        file_path = os.path.join('images', filename)
+                        try:
+                            os.remove(file_path)
+                            deleted_photos.append(filename)
+                        except Exception as e:
+                            print(f"Error deleting photo {filename}: {e}")
+
             # Recreate features dictionary after deletion
             face_recognizer.create_features()
+
+            message = f'Person deleted successfully'
+            if deleted_photos:
+                message += f' (removed {len(deleted_photos)} photos)'
+
             return {
                 'success': True,
-                'message': 'person deleted successfully'
+                'message': message
             }
         else:
             return {
                 'success': False,
-                'message': 'Failed to delete person'
+                'message': 'Failed to delete person from database'
             }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
