@@ -78,14 +78,12 @@ export function SettingsPage({ onSaveSettings }) {
 
   // MediaPipe settings state
   const [mediapipeSettings, setMediapipeSettings] = useState({
-    detection_confidence: 0.5,
-    tracking_confidence: 0.5,
+    detection_confidence: 0.6,  // Good default for video
+    tracking_confidence: 0.7,   // Optimized for video tracking
     max_faces: 20,
-    model_selection: 0,
-    refine_landmarks: true,
+    refine_landmarks: true,     // Always use high quality
     unlimited_faces: false,
-    auto_optimize_resolution: true,
-    include_landmarks: false
+    include_landmarks: false    // Debug only
   });
   const [mediapipePresets, setMediapipePresets] = useState({});
   const [mediapipePerformance, setMediapipePerformance] = useState({});
@@ -1300,54 +1298,9 @@ export function SettingsPage({ onSaveSettings }) {
                   Fine-tune individual settings for specific requirements. Use presets above for most common scenarios.
                 </Text>
 
-                <Group grow>
+                <Group>
                   <Stack gap="xs">
                     <Text size="sm" fw={500}>
-                      Detection Confidence
-                    </Text>
-                    <Text size="xs" c="dimmed">
-                      Lower = more faces detected, Higher = fewer false positives
-                    </Text>
-                    <NumberInput
-                      value={mediapipeSettings.detection_confidence}
-                      onChange={(value) =>
-                        handleUpdateMediaPipeSettings({ detection_confidence: value })
-                      }
-                      min={0}
-                      max={1}
-                      step={0.1}
-                      precision={1}
-                      disabled={mediapipeLoading}
-                    />
-                  </Stack>
-
-                  <Stack gap="xs">
-                    <Text size="sm" fw={500}>
-                      Tracking Confidence
-                    </Text>
-                    <Text size="xs" c="dimmed">
-                      Higher = smoother tracking in video
-                    </Text>
-                    <NumberInput
-                      value={mediapipeSettings.tracking_confidence}
-                      onChange={(value) =>
-                        handleUpdateMediaPipeSettings({ tracking_confidence: value })
-                      }
-                      min={0}
-                      max={1}
-                      step={0.1}
-                      precision={1}
-                      disabled={mediapipeLoading}
-                    />
-                  </Stack>
-                </Group>
-
-                <Group grow>
-                  <Stack gap="xs">
-                    <Text size="sm" fw={500}>
-                      Max Faces
-                    </Text>
-                    <Text size="xs" c="dimmed">
                       Maximum number of faces to detect simultaneously
                     </Text>
                     <NumberInput
@@ -1356,85 +1309,15 @@ export function SettingsPage({ onSaveSettings }) {
                         handleUpdateMediaPipeSettings({ max_faces: value })
                       }
                       min={1}
-                      max={100}
-                      disabled={mediapipeLoading || mediapipeSettings.unlimited_faces}
-                    />
-                  </Stack>
-
-                  <Stack gap="xs">
-                    <Text size="sm" fw={500}>
-                      Model Selection
-                    </Text>
-                    <Text size="xs" c="dimmed">
-                      Short-range for webcams, Full-range for professional cameras
-                    </Text>
-                    <Select
-                      value={mediapipeSettings.model_selection?.toString()}
-                      onChange={(value) =>
-                        handleUpdateMediaPipeSettings({ model_selection: parseInt(value) })
-                      }
-                      data={[
-                        { value: '0', label: 'Short-range (Webcam, 2m)' },
-                        { value: '1', label: 'Full-range (Professional, 5m)' }
-                      ]}
+                      max={50}
                       disabled={mediapipeLoading}
                     />
                   </Stack>
                 </Group>
 
-                <Group grow>
-                  <Switch
-                    label="High-Quality Landmarks"
-                    description="468 landmarks (high quality) vs 68 landmarks (faster)"
-                    checked={mediapipeSettings.refine_landmarks}
-                    onChange={(event) =>
-                      handleUpdateMediaPipeSettings({ refine_landmarks: event.currentTarget.checked })
-                    }
-                    disabled={mediapipeLoading}
-                    styles={{
-                      label: { color: 'black' }
-                    }}
-                  />
-
-                  <Switch
-                    label="Unlimited Faces (Crowd Mode)"
-                    description="Detect up to 100 faces simultaneously"
-                    checked={mediapipeSettings.unlimited_faces}
-                    onChange={(event) =>
-                      handleUpdateMediaPipeSettings({ unlimited_faces: event.currentTarget.checked })
-                    }
-                    disabled={mediapipeLoading}
-                    styles={{
-                      label: { color: 'black' }
-                    }}
-                  />
-                </Group>
-
-                <Switch
-                  label="Auto-optimize for Resolution"
-                  description="Automatically adjust settings based on camera resolution"
-                  checked={mediapipeSettings.auto_optimize_resolution}
-                  onChange={(event) =>
-                    handleUpdateMediaPipeSettings({ auto_optimize_resolution: event.currentTarget.checked })
-                  }
-                  disabled={mediapipeLoading}
-                  styles={{
-                      label: { color: 'black' }
-                    }}
-                />
-
-                <Switch
-                  label="Send Landmark debug to detection page"
-                  description="Landmark debug mode"
-                  checked={mediapipeSettings.include_landmarks}
-                  onChange={(event) =>
-                    handleUpdateMediaPipeSettings({ include_landmarks: event.currentTarget.checked })
-                  }
-                  disabled={mediapipeLoading}
-                  styles={{
-                      label: { color: 'black' }
-                    }}
-                />
+                <Text size="xs" c="dimmed">
+                  Using maximum camera resolution with video tracking for best performance
+                </Text>
 
                 <Group>
                   <Button

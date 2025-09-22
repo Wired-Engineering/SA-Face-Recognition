@@ -820,12 +820,10 @@ class DisplaySettings(BaseModel):
 
 class MediaPipeSettings(BaseModel):
     detection_confidence: Optional[float] = 0.5
-    tracking_confidence: Optional[float] = 0.5
+    tracking_confidence: Optional[float] = 0.7  # Higher default for video tracking
     max_faces: Optional[int] = 20
-    model_selection: Optional[int] = 0  # 0 = short-range (2m), 1 = full-range (5m)
     refine_landmarks: Optional[bool] = True
     unlimited_faces: Optional[bool] = False
-    auto_optimize_resolution: Optional[bool] = True
     include_landmarks: Optional[bool] = False  # Include 468 landmarks in API response
 
 class FaceDetectionRequest(BaseModel):
@@ -1350,10 +1348,8 @@ async def update_mediapipe_settings(request: MediaPipeSettings):
             detection_confidence=request.detection_confidence,
             tracking_confidence=request.tracking_confidence,
             max_faces=request.max_faces,
-            model_selection=request.model_selection,
             refine_landmarks=request.refine_landmarks,
-            unlimited_faces=request.unlimited_faces,
-            auto_optimize_resolution=request.auto_optimize_resolution
+            unlimited_faces=request.unlimited_faces
         )
 
         if success:
@@ -1362,7 +1358,6 @@ async def update_mediapipe_settings(request: MediaPipeSettings):
                 detection_confidence=request.detection_confidence,
                 tracking_confidence=request.tracking_confidence,
                 max_faces=request.max_faces,
-                model_selection=request.model_selection,
                 refine_landmarks=request.refine_landmarks,
                 unlimited_faces=request.unlimited_faces,
                 include_landmarks=request.include_landmarks
@@ -1380,30 +1375,6 @@ async def update_mediapipe_settings(request: MediaPipeSettings):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/api/mediapipe/optimize-resolution")
-async def optimize_mediapipe_for_resolution(request: dict):
-    """Automatically optimize MediaPipe settings for camera resolution"""
-    try:
-        width = request.get('width', 1280)
-        height = request.get('height', 720)
-        target_fps = request.get('target_fps', 30)
-
-        # Optimize MediaPipe settings
-        face_recognizer.optimize_for_resolution(width, height, target_fps)
-
-        # Save optimized settings to config
-        face_recognizer.save_current_config()
-
-        # Get updated settings
-        mediapipe_config = config_manager.get_mediapipe_config()
-
-        return {
-            'success': True,
-            'message': f'MediaPipe optimized for {width}x{height} @ {target_fps}fps',
-            'optimized_settings': mediapipe_config
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/mediapipe/presets")
 async def get_mediapipe_presets():
@@ -1415,12 +1386,10 @@ async def get_mediapipe_presets():
                 'description': 'Optimized for small groups, high accuracy and quality',
                 'settings': {
                     'detection_confidence': 0.6,
-                    'tracking_confidence': 0.6,
+                    'tracking_confidence': 0.7,  # Higher for video tracking
                     'max_faces': 5,
-                    'model_selection': 1,  # Full-range model for better quality
                     'refine_landmarks': True,  # High-quality landmarks
-                    'unlimited_faces': False,
-                    'auto_optimize_resolution': True
+                    'unlimited_faces': False
                 }
             },
             'many_people': {
@@ -1428,12 +1397,10 @@ async def get_mediapipe_presets():
                 'description': 'Optimized for larger groups, balanced performance',
                 'settings': {
                     'detection_confidence': 0.5,
-                    'tracking_confidence': 0.5,
+                    'tracking_confidence': 0.6,  # Balanced for groups
                     'max_faces': 20,
-                    'model_selection': 0,  # Short-range model for speed
                     'refine_landmarks': True,  # Keep high-quality landmarks
-                    'unlimited_faces': False,
-                    'auto_optimize_resolution': True
+                    'unlimited_faces': False
                 }
             }
         }

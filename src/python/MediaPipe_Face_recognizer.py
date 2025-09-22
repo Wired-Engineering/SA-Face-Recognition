@@ -1,5 +1,11 @@
-import cv2
+# Suppress MediaPipe warning messages - MUST be set before any imports
 import os
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # Suppress all TensorFlow/MediaPipe logs
+os.environ['GLOG_minloglevel'] = '3'      # Suppress Google logging (MediaPipe internal)
+os.environ['GLOG_v'] = '0'                # Disable verbose logging
+os.environ['GLOG_logtostderr'] = '0'      # Disable stderr logging
+
+import cv2
 import time
 import numpy as np
 import mediapipe as mp
@@ -8,6 +14,11 @@ import pickle
 import hashlib
 from dataclasses import dataclass
 from pathlib import Path
+import logging
+
+# Set logging levels after imports
+logging.getLogger('mediapipe').setLevel(logging.ERROR)
+logging.getLogger('tensorflow').setLevel(logging.ERROR)
 
 @dataclass
 class FaceDetection:
@@ -50,29 +61,25 @@ class MediaPipeFaceRecognizer:
         self.detection_times = []
         self.recognition_times = []
 
-        # Initialize MediaPipe components
-        self.mp_face_detection = mp.solutions.face_detection
+        # Initialize MediaPipe components (video-only mode)
         self.mp_face_mesh = mp.solutions.face_mesh
         self.mp_drawing = mp.solutions.drawing_utils
 
-        # Face detection optimized for real-time performance
-        # model_selection: 0 = short-range (2m), 1 = full-range (5m)
-        # Using short-range for better performance in typical use cases
-        self.face_detector = self.mp_face_detection.FaceDetection(
-            model_selection=0,  # Short-range model (faster, good for webcams)
-            min_detection_confidence=0.5  # MediaPipe recommended default
-        )
-
-        # Face mesh optimized for recognition use case with proper landmark projection configuration
+        # FaceMesh for video-optimized detection + landmarks
         self.face_mesh = self.mp_face_mesh.FaceMesh(
-            static_image_mode=True,      # Use static mode to avoid landmark projection issues
-            max_num_faces=20,            # Increased for multiple people scenarios
-            refine_landmarks=True,       # Full 468 landmarks for better quality assessment
+            static_image_mode=False,     # Always video mode for tracking optimization
+            max_num_faces=20,            # Multiple people scenarios
+            refine_landmarks=True,       # Full 468 landmarks for quality assessment
             min_detection_confidence=0.5,  # MediaPipe recommended
-            min_tracking_confidence=0.5
+            min_tracking_confidence=0.7   # Higher for stable video tracking
         )
 
-        # Keep OpenCV recognizer for feature extraction (proven accuracy)
+        # Video processing state (always active)
+        self.frame_cache = {}
+        self.face_tracking_data = {}
+        self.last_processed_time = 0
+
+        # Keep OpenCV recognizer for feature extraction
         weights_recognition = "model/face_recognizer_fast.onnx"
         self.face_recognizer = cv2.FaceRecognizerSF_create(weights_recognition, "")
 
@@ -91,19 +98,18 @@ class MediaPipeFaceRecognizer:
         self.create_features()
 
     def load_config_settings(self):
-        """Load MediaPipe settings from config file"""
+        """Load MediaPipe video settings from config file"""
         try:
             from config_manager import config_manager
             mediapipe_config = config_manager.get_mediapipe_config()
 
             if mediapipe_config:
-                print("📋 Loading MediaPipe settings from config...")
+                print("📋 Loading MediaPipe video settings from config...")
 
-                # Apply configuration settings
+                # Apply video-only configuration settings
                 detection_confidence = mediapipe_config.get('detection_confidence', 0.5)
-                tracking_confidence = mediapipe_config.get('tracking_confidence', 0.5)
+                tracking_confidence = mediapipe_config.get('tracking_confidence', 0.7)
                 max_faces = mediapipe_config.get('max_faces', 20)
-                model_selection = mediapipe_config.get('model_selection', 0)
                 refine_landmarks = mediapipe_config.get('refine_landmarks', True)
                 unlimited_faces = mediapipe_config.get('unlimited_faces', False)
 
@@ -111,34 +117,32 @@ class MediaPipeFaceRecognizer:
                     detection_confidence=detection_confidence,
                     tracking_confidence=tracking_confidence,
                     max_faces=max_faces,
-                    model_selection=model_selection,
                     refine_landmarks=refine_landmarks,
                     unlimited_faces=unlimited_faces
                 )
 
-                print(f"✅ MediaPipe configured from settings: {max_faces} faces, confidence={detection_confidence}")
+                print(f"✅ MediaPipe video mode configured: {max_faces} faces, confidence={detection_confidence}")
 
         except Exception as e:
             print(f"⚠️ Could not load MediaPipe config from file: {e}")
-            print("📋 Using default MediaPipe settings")
+            print("📋 Using default MediaPipe video settings")
 
     def save_current_config(self):
-        """Save current MediaPipe settings to config file"""
+        """Save current MediaPipe video settings to config file"""
         try:
             from config_manager import config_manager
 
-            # Extract current settings (this is simplified - would need to track current state)
+            # Extract current video settings
             current_config = {
                 'max_faces': getattr(self, '_current_max_faces', 20),
                 'detection_confidence': getattr(self, '_current_detection_confidence', 0.5),
-                'tracking_confidence': getattr(self, '_current_tracking_confidence', 0.5),
-                'model_selection': getattr(self, '_current_model_selection', 0),
+                'tracking_confidence': getattr(self, '_current_tracking_confidence', 0.7),
                 'refine_landmarks': getattr(self, '_current_refine_landmarks', True),
                 'unlimited_faces': getattr(self, '_current_unlimited_faces', False)
             }
 
             config_manager.set_mediapipe_config(**current_config)
-            print("💾 MediaPipe settings saved to config file")
+            print("💾 MediaPipe video settings saved to config file")
 
         except Exception as e:
             print(f"❌ Failed to save MediaPipe config: {e}")
@@ -203,89 +207,174 @@ class MediaPipeFaceRecognizer:
 
         return 0.3  # Default for faces without landmarks
 
-    def detect_faces_mediapipe(self, image: np.ndarray) -> List[FaceDetection]:
-        """Enhanced face detection with MediaPipe following best practices"""
-        start_time = time.time()
+
+    def calculate_landmark_confidence(self, landmarks: np.ndarray) -> float:
+        """Calculate confidence score from landmark consistency and geometry"""
+        if landmarks is None or len(landmarks) < 468:
+            return 0.5
 
         try:
-            # Validate input
+            # Check landmark spread (more spread = more confident detection)
+            x_coords = landmarks[:, 0]
+            y_coords = landmarks[:, 1]
+            z_coords = landmarks[:, 2]
+
+            # Face should have good spread in x,y dimensions
+            x_spread = np.max(x_coords) - np.min(x_coords)
+            y_spread = np.max(y_coords) - np.min(y_coords)
+
+            # Z-depth consistency (less variation = more frontal/stable)
+            z_variation = np.std(z_coords)
+
+            # Combine metrics for confidence score
+            spread_score = min((x_spread + y_spread) * 2, 1.0)  # Normalize spread
+            depth_score = max(0.3, 1.0 - z_variation * 10)     # Penalize high z variation
+
+            confidence = (spread_score * 0.7 + depth_score * 0.3)
+            return min(max(confidence, 0.1), 1.0)  # Clamp between 0.1 and 1.0
+
+        except Exception:
+            return 0.5
+
+    def detect_faces(self, image: np.ndarray) -> List[FaceDetection]:
+        """
+        Video-optimized face detection with tracking and motion analysis
+        Uses MediaPipe's video tracking capabilities for best performance
+        """
+        start_time = time.time()
+        current_time = time.time()
+
+        try:
             if image is None or image.size == 0:
                 return []
 
-            # Get image dimensions for proper MediaPipe processing
             height, width = image.shape[:2]
 
-            # Convert BGR to RGB for MediaPipe (required format)
-            # MediaPipe expects RGB, OpenCV uses BGR
+            # Convert BGR to RGB for MediaPipe
             rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-
-            # Make image writable=False for performance (MediaPipe best practice)
             rgb_image.flags.writeable = False
 
-            # Get face detections with proper image dimensions
-            detection_results = self.face_detector.process(rgb_image)
-            mesh_results = None
-
-            # Process face mesh with proper image dimensions to fix landmark projection warning
-            if detection_results.detections:
-                # Create a copy of image with proper format and flags for MediaPipe
-                mesh_image = rgb_image.copy()
-                mesh_image.flags.writeable = False
-
-                # Process with face mesh - MediaPipe will use image dimensions internally
-                mesh_results = self.face_mesh.process(mesh_image)
+            # Process with FaceMesh in video mode (automatic tracking)
+            results = self.face_mesh.process(rgb_image)
 
             faces = []
+            if results.multi_face_landmarks:
+                for i, face_landmarks in enumerate(results.multi_face_landmarks):
+                    landmarks = np.array([[lm.x, lm.y, lm.z] for lm in face_landmarks.landmark])
 
-            if detection_results.detections:
-                height, width = image.shape[:2]
+                    # Calculate bounding box from landmarks
+                    x_coords = landmarks[:, 0] * width
+                    y_coords = landmarks[:, 1] * height
 
-                for i, detection in enumerate(detection_results.detections):
-                    bbox = detection.location_data.relative_bounding_box
+                    x = max(0, int(np.min(x_coords)))
+                    y = max(0, int(np.min(y_coords)))
+                    w = min(int(np.max(x_coords) - x), width - x)
+                    h = min(int(np.max(y_coords) - y), height - y)
 
-                    # Convert to absolute coordinates with bounds checking
-                    x = max(0, int(bbox.xmin * width))
-                    y = max(0, int(bbox.ymin * height))
-                    w = min(int(bbox.width * width), width - x)
-                    h = min(int(bbox.height * height), height - y)
-
-                    # Skip invalid bounding boxes
                     if w <= 0 or h <= 0:
                         continue
 
-                    # Get landmarks if available
-                    landmarks = None
-                    if mesh_results and mesh_results.multi_face_landmarks and i < len(mesh_results.multi_face_landmarks):
-                        face_landmarks = mesh_results.multi_face_landmarks[i]
-                        landmarks = np.array([[lm.x, lm.y, lm.z] for lm in face_landmarks.landmark])
-
-                    # Calculate quality score
+                    # Enhanced quality assessment for video
                     quality_score = self.calculate_face_quality(image, landmarks)
+                    confidence = self.calculate_landmark_confidence(landmarks)
+
+                    # Motion analysis for video tracking
+                    motion_score = self.analyze_face_motion(landmarks, i, current_time)
+
+                    # Combine quality with motion stability
+                    video_quality = (quality_score * 0.7 + motion_score * 0.3)
 
                     face_detection = FaceDetection(
                         bbox=(x, y, w, h),
-                        confidence=detection.score[0],
+                        confidence=confidence,
                         landmarks=landmarks,
-                    quality_score=quality_score,
-                    face_area=w * h,
-                    is_frontal=quality_score > self.face_quality_threshold
-                )
+                        quality_score=video_quality,
+                        face_area=w * h,
+                        is_frontal=video_quality > self.face_quality_threshold
+                    )
 
                     faces.append(face_detection)
 
+            # Update timing
             detection_time = time.time() - start_time
             self.detection_times.append(detection_time)
+            self.last_processed_time = current_time
 
-            # Keep only the last 100 timing measurements
             if len(self.detection_times) > 100:
                 self.detection_times = self.detection_times[-100:]
 
             return faces
 
         except Exception as e:
-            print(f"❌ MediaPipe face detection error: {e}")
-            # Return empty list on error to maintain compatibility
+            print(f"❌ Video face detection error: {e}")
             return []
+
+    def analyze_face_motion(self, landmarks: np.ndarray, face_id: int, current_time: float) -> float:
+        """
+        Analyze face motion between frames for stability assessment
+        Higher score = more stable (better for recognition)
+        """
+        if landmarks is None or len(landmarks) < 468:
+            return 0.5
+
+        try:
+            face_key = f"face_{face_id}"
+
+            # Store current landmark positions
+            if face_key not in self.face_tracking_data:
+                self.face_tracking_data[face_key] = {
+                    'last_landmarks': landmarks.copy(),
+                    'last_time': current_time,
+                    'motion_history': []
+                }
+                return 0.8  # New face, assume good quality
+
+            prev_data = self.face_tracking_data[face_key]
+            prev_landmarks = prev_data['last_landmarks']
+            time_diff = current_time - prev_data['last_time']
+
+            # Calculate motion between frames
+            if time_diff > 0:
+                # Use key facial points for motion calculation
+                key_points = [1, 33, 362, 13, 14, 17]  # nose tip, eyes, chin points
+
+                motion_distances = []
+                for point_idx in key_points:
+                    if point_idx < len(landmarks) and point_idx < len(prev_landmarks):
+                        curr_point = landmarks[point_idx]
+                        prev_point = prev_landmarks[point_idx]
+
+                        # Calculate 2D distance (ignore z for motion)
+                        distance = np.sqrt((curr_point[0] - prev_point[0])**2 +
+                                         (curr_point[1] - prev_point[1])**2)
+                        motion_distances.append(distance)
+
+                if motion_distances:
+                    avg_motion = np.mean(motion_distances)
+
+                    # Motion score: lower motion = higher stability
+                    # Normalize motion to 0-1 range (0.05 = significant motion threshold)
+                    motion_score = max(0.1, 1.0 - (avg_motion / 0.05))
+
+                    # Update tracking data
+                    prev_data['motion_history'].append(motion_score)
+                    if len(prev_data['motion_history']) > 10:
+                        prev_data['motion_history'] = prev_data['motion_history'][-10:]
+
+                    # Smooth motion score over recent history
+                    smoothed_score = np.mean(prev_data['motion_history'])
+
+                    # Update for next frame
+                    prev_data['last_landmarks'] = landmarks.copy()
+                    prev_data['last_time'] = current_time
+
+                    return smoothed_score
+
+            return 0.5
+
+        except Exception as e:
+            print(f"❌ Motion analysis error: {e}")
+            return 0.5
 
     def extract_face_features(self, image: np.ndarray, face_detection: FaceDetection) -> Optional[np.ndarray]:
         """
@@ -488,7 +577,12 @@ class MediaPipeFaceRecognizer:
 
     def recognize_face(self, image: np.ndarray, file_name: Optional[str] = None) -> Tuple[List[np.ndarray], List[FaceDetection]]:
         """
-        Recognize faces in image using MediaPipe detection + OpenCV recognition
+        Recognize faces using video-optimized MediaPipe detection + OpenCV recognition
+        Always uses video mode for maximum performance and tracking
+
+        Args:
+            image: Input image
+            file_name: Optional filename for validation and logging
 
         Returns:
             features: List of face feature vectors
@@ -513,8 +607,8 @@ class MediaPipeFaceRecognizer:
         else:
             scale_factor = 1.0
 
-        # Detect faces
-        face_detections = self.detect_faces_mediapipe(image)
+        # Always use video-optimized detection
+        face_detections = self.detect_faces(image)
 
         if file_name:
             print(f"🔍 MediaPipe detected {len(face_detections)} face(s) in {file_name}")
@@ -541,14 +635,57 @@ class MediaPipeFaceRecognizer:
                     int(h / scale_factor)
                 )
 
-            # Extract features from original size image
-            face_features = self.extract_face_features(original_image, detection)
+            # Extract features with caching for stable faces
+            face_features = self.extract_face_features_cached(original_image, detection, True)
 
             if face_features is not None:
                 features.append(face_features)
                 valid_detections.append(detection)
 
         return features, valid_detections
+
+    def extract_face_features_cached(self, image: np.ndarray, face_detection: FaceDetection, use_caching: bool = False) -> Optional[np.ndarray]:
+        """
+        Extract face features with optional caching for stable video faces
+        """
+        if not use_caching:
+            return self.extract_face_features(image, face_detection)
+
+        try:
+            # Generate cache key from face position and quality
+            x, y, w, h = face_detection.bbox
+            cache_key = f"{x}_{y}_{w}_{h}_{face_detection.quality_score:.2f}"
+
+            # Check if we have recent cached features for this stable face
+            if cache_key in self.frame_cache:
+                cache_entry = self.frame_cache[cache_key]
+                current_time = time.time()
+
+                # Use cached features if face is stable (within 1 second)
+                if current_time - cache_entry['timestamp'] < 1.0:
+                    return cache_entry['features']
+
+            # Extract new features
+            features = self.extract_face_features(image, face_detection)
+
+            # Cache features for stable, high-quality faces
+            if features is not None and face_detection.quality_score > 0.7:
+                self.frame_cache[cache_key] = {
+                    'features': features,
+                    'timestamp': time.time()
+                }
+
+                # Clean old cache entries (keep last 20)
+                if len(self.frame_cache) > 20:
+                    oldest_key = min(self.frame_cache.keys(),
+                                   key=lambda k: self.frame_cache[k]['timestamp'])
+                    del self.frame_cache[oldest_key]
+
+            return features
+
+        except Exception as e:
+            print(f"❌ Cached feature extraction error: {e}")
+            return self.extract_face_features(image, face_detection)
 
     def match(self, feature1: np.ndarray) -> Tuple[bool, Tuple[str, float]]:
         """Match face feature against database using cosine similarity"""
@@ -702,7 +839,7 @@ class MediaPipeFaceRecognizer:
             return False, ("", max_ensemble_score)
 
     def detect(self, image: np.ndarray) -> List[str]:
-        """Detect and recognize faces with drawing overlays (legacy compatibility)"""
+        """Detect and recognize faces with drawing overlays using video-optimized processing"""
         features, face_detections = self.recognize_face(image)
         id_name_list = []
 
@@ -716,7 +853,7 @@ class MediaPipeFaceRecognizer:
             # Draw bounding box
             cv2.rectangle(image, (x, y), (x + w, y + h), color, thickness, cv2.LINE_AA)
 
-            # Draw quality indicator
+            # Draw quality indicator (includes motion stability)
             quality_color = (0, 255, 0) if detection.quality_score > self.face_quality_threshold else (0, 255, 255)
             cv2.circle(image, (x + w - 10, y + 10), 5, quality_color, -1)
 
@@ -733,7 +870,7 @@ class MediaPipeFaceRecognizer:
         return id_name_list
 
     def detect_for_capture(self, image: np.ndarray) -> bool:
-        """Face detection for capture mode with quality assessment"""
+        """Face detection for capture mode with video-optimized quality assessment"""
         h, w = image.shape[:2]
         x1, y1, x2, y2 = int(w/2) - 200, int(h/2) - 150, int(w/2) + 200, int(h/2) + 150
 
@@ -743,13 +880,13 @@ class MediaPipeFaceRecognizer:
                    cv2.FONT_HERSHEY_COMPLEX_SMALL, 1.5, (255, 255, 255), 1, cv2.LINE_AA)
         cv2.rectangle(image, (x1, y1), (x2, y2), (0, 255, 255), 4, cv2.LINE_AA)
 
-        # Detect faces
+        # Detect faces using video-optimized detection
         _, face_detections = self.recognize_face(image)
 
         for detection in face_detections:
             x, y, w, h = detection.bbox
 
-            # Check if face is within capture frame and has good quality
+            # Check if face is within capture frame and has good quality (includes motion stability)
             if (x > x1 and y > y1 and x + w < x2 and y + h < y2 and
                 detection.quality_score > self.face_quality_threshold):
 
@@ -769,25 +906,19 @@ class MediaPipeFaceRecognizer:
                             detection_confidence: float = None,
                             tracking_confidence: float = None,
                             max_faces: int = None,
-                            model_selection: int = None,
                             refine_landmarks: bool = None,
                             unlimited_faces: bool = False,
-                            static_image_mode: bool = None,
-                            include_landmarks: bool = None,
-                            auto_optimize_resolution: bool = None):
+                            include_landmarks: bool = None):
         """
-        Reconfigure MediaPipe settings at runtime for different use cases
+        Reconfigure MediaPipe video settings at runtime
 
         Args:
             detection_confidence: 0.0-1.0, lower = more faces detected
             tracking_confidence: 0.0-1.0, higher = smoother tracking
             max_faces: Maximum number of faces to detect (1-50, or unlimited)
-            model_selection: 0 (short-range, 2m) or 1 (full-range, 5m)
             refine_landmarks: True for 468 landmarks, False for 68
             unlimited_faces: True to remove face detection limits (use with caution)
-            static_image_mode: True for static images (fixes landmark warnings), False for video tracking
-            include_landmarks: True to include all 468 landmarks in API responses for visualization
-            auto_optimize_resolution: True to automatically optimize settings based on camera resolution
+            include_landmarks: True to include all 468 landmarks in API responses
 
         Performance Guidelines:
         - Camera Resolution vs Face Count:
@@ -797,19 +928,8 @@ class MediaPipeFaceRecognizer:
           * 4K: up to 50+ faces (high-end hardware)
         """
         try:
-            # Update face detector if needed
-            if detection_confidence is not None or model_selection is not None:
-                current_model = model_selection if model_selection is not None else 0
-                current_confidence = detection_confidence if detection_confidence is not None else 0.5
-
-                self.face_detector = self.mp_face_detection.FaceDetection(
-                    model_selection=current_model,
-                    min_detection_confidence=current_confidence
-                )
-                print(f"✅ Updated face detector: model={current_model}, confidence={current_confidence}")
-
-            # Update face mesh if needed
-            if any(param is not None for param in [detection_confidence, tracking_confidence, max_faces, refine_landmarks, unlimited_faces, static_image_mode]):
+            # Update face mesh video configuration
+            if any(param is not None for param in [detection_confidence, tracking_confidence, max_faces, refine_landmarks, unlimited_faces]):
                 # Handle unlimited faces option
                 if unlimited_faces:
                     current_max_faces = 100  # Practical limit for MediaPipe
@@ -820,15 +940,15 @@ class MediaPipeFaceRecognizer:
 
                 current_refine = refine_landmarks if refine_landmarks is not None else True
                 current_detection = detection_confidence if detection_confidence is not None else 0.5
-                current_tracking = tracking_confidence if tracking_confidence is not None else 0.5
-                current_static_mode = static_image_mode if static_image_mode is not None else True  # Default to static mode to fix landmark warnings
+                current_tracking = tracking_confidence if tracking_confidence is not None else 0.7
 
                 # Validate settings
                 if current_max_faces > 50 and not unlimited_faces:
                     print("⚠️ Warning: >50 faces may impact performance. Consider unlimited_faces=True for crowd scenarios")
 
+                # Always use video mode
                 self.face_mesh = self.mp_face_mesh.FaceMesh(
-                    static_image_mode=current_static_mode,
+                    static_image_mode=False,  # Always video mode
                     max_num_faces=current_max_faces,
                     refine_landmarks=current_refine,
                     min_detection_confidence=current_detection,
@@ -836,7 +956,7 @@ class MediaPipeFaceRecognizer:
                 )
 
                 performance_level = "HIGH IMPACT" if current_max_faces > 30 else "MODERATE" if current_max_faces > 10 else "LOW"
-                print(f"✅ Updated face mesh: max_faces={current_max_faces}, refine={current_refine}")
+                print(f"✅ Updated video face mesh: max_faces={current_max_faces}, refine={current_refine}")
                 print(f"📊 Performance impact: {performance_level}")
 
             # Update landmark inclusion setting
@@ -845,79 +965,9 @@ class MediaPipeFaceRecognizer:
                 status = "ENABLED" if include_landmarks else "DISABLED"
                 print(f"📍 Landmark visualization: {status} ({468 if include_landmarks else 0} points)")
 
-            # Update auto-optimization setting (stored but not actively used here)
-            if auto_optimize_resolution is not None:
-                # This is a configuration flag, actual optimization happens via optimize_for_resolution()
-                status = "ENABLED" if auto_optimize_resolution else "DISABLED"
-                print(f"🎯 Auto-resolution optimization: {status}")
-
         except Exception as e:
             print(f"❌ MediaPipe configuration error: {e}")
 
-    def optimize_for_resolution(self, width: int, height: int, target_fps: int = 30):
-        """
-        Automatically optimize MediaPipe settings based on camera resolution
-
-        Args:
-            width: Camera width in pixels
-            height: Camera height in pixels
-            target_fps: Desired frames per second
-        """
-        total_pixels = width * height
-
-        print(f"🎯 Optimizing MediaPipe for {width}x{height} ({total_pixels:,} pixels)")
-
-        if total_pixels <= 640 * 480:  # VGA and below
-            self.configure_mediapipe(
-                detection_confidence=0.4,  # Lower for small faces
-                model_selection=0,         # Short-range sufficient
-                max_faces=8,              # Reasonable for small resolution
-                refine_landmarks=False    # 68 landmarks for speed
-            )
-            print("📱 VGA optimization: Speed-focused")
-
-        elif total_pixels <= 1280 * 720:  # HD
-            self.configure_mediapipe(
-                detection_confidence=0.5,  # Balanced
-                model_selection=0,         # Short-range for webcams
-                max_faces=15,             # Good for group calls
-                refine_landmarks=True     # 468 landmarks for quality
-            )
-            print("💻 HD optimization: Balanced performance")
-
-        elif total_pixels <= 1920 * 1080:  # Full HD
-            self.configure_mediapipe(
-                detection_confidence=0.6,  # Higher quality
-                model_selection=1,         # Full-range for better accuracy
-                max_faces=25,             # Larger groups
-                refine_landmarks=True     # Full quality
-            )
-            print("🖥️ Full HD optimization: Quality-focused")
-
-        elif total_pixels <= 3840 * 2160:  # 4K
-            self.configure_mediapipe(
-                detection_confidence=0.7,  # High accuracy
-                model_selection=1,         # Full-range required
-                max_faces=40,             # Crowd scenarios
-                refine_landmarks=True     # Maximum quality
-            )
-            print("🎬 4K optimization: Maximum quality")
-
-        else:  # Higher than 4K
-            print("🚀 Ultra-high resolution detected!")
-            self.configure_mediapipe(
-                detection_confidence=0.8,  # Very high accuracy
-                model_selection=1,         # Full-range
-                unlimited_faces=True,     # No limits for professional use
-                refine_landmarks=True     # Maximum precision
-            )
-            print("🏢 Professional optimization: Unlimited detection")
-
-        # Additional optimizations based on target FPS
-        if target_fps > 30:
-            print(f"⚡ High FPS target ({target_fps}fps): Reducing max_faces for performance")
-            current_max = 20 if total_pixels > 1920*1080 else 15 if total_pixels > 1280*720 else 10
-            self.configure_mediapipe(max_faces=current_max)
 
     def get_performance_stats(self) -> Dict:
         """Get performance statistics"""
@@ -940,6 +990,25 @@ class MediaPipeFaceRecognizer:
         if os.path.exists(self.encodings_cache_file):
             os.remove(self.encodings_cache_file)
             print("🗑️ Face encoding cache invalidated")
+
+    def reset_video_tracking(self):
+        """Reset video tracking data (call when switching contexts)"""
+        self.face_tracking_data.clear()
+        self.frame_cache.clear()
+        self.last_processed_time = 0
+        print("🔄 Video tracking data reset")
+
+    def get_video_performance_stats(self) -> Dict:
+        """Get enhanced performance statistics including video tracking"""
+        base_stats = self.get_performance_stats()
+
+        video_stats = {
+            "tracked_faces": len(self.face_tracking_data),
+            "cached_features": len(self.frame_cache),
+            "processing_mode": "Video-Optimized"
+        }
+
+        return {**base_stats, **video_stats}
 
 
 # For backward compatibility

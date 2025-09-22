@@ -137,11 +137,9 @@ class ConfigManager:
                             detection_confidence: float = None,
                             tracking_confidence: float = None,
                             max_faces: int = None,
-                            model_selection: int = None,
                             refine_landmarks: bool = None,
-                            unlimited_faces: bool = None,
-                            auto_optimize_resolution: bool = None) -> bool:
-        """Set MediaPipe configuration"""
+                            unlimited_faces: bool = None) -> bool:
+        """Set MediaPipe video configuration"""
         mediapipe_config = self.get_mediapipe_config()
 
         if detection_confidence is not None:
@@ -150,14 +148,10 @@ class ConfigManager:
             mediapipe_config['tracking_confidence'] = tracking_confidence
         if max_faces is not None:
             mediapipe_config['max_faces'] = max_faces
-        if model_selection is not None:
-            mediapipe_config['model_selection'] = model_selection
         if refine_landmarks is not None:
             mediapipe_config['refine_landmarks'] = refine_landmarks
         if unlimited_faces is not None:
             mediapipe_config['unlimited_faces'] = unlimited_faces
-        if auto_optimize_resolution is not None:
-            mediapipe_config['auto_optimize_resolution'] = auto_optimize_resolution
 
         return self.update_section('mediapipe', mediapipe_config)
 
@@ -181,12 +175,10 @@ class ConfigManager:
             },
             'mediapipe': {
                 'detection_confidence': 0.5,
-                'tracking_confidence': 0.5,
+                'tracking_confidence': 0.7,  # Higher for video tracking
                 'max_faces': 20,
-                'model_selection': 0,
                 'refine_landmarks': True,
-                'unlimited_faces': False,
-                'auto_optimize_resolution': True
+                'unlimited_faces': False
             },
             'detection': {
                 'active': False
