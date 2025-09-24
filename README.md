@@ -79,8 +79,8 @@ pnpm python-api
 
 The system uses pre-trained ONNX models for optimal performance:
 
-- **Face Detection**: YuNet 2023 (232KB)
-- **Face Recognition**: Fast Recognition Model (7.3MB)
+- **Face Detection**: MediaPipe
+- **Face Recognition**: Fast Recognition Model (38.7MB)
 - **Format**: ONNX (cross-platform)
 - **Performance**: Real-time on CPU
 

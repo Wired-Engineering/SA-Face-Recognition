@@ -722,16 +722,32 @@ export function DetectionPage({ onDetection }) {
                 <Title order={4}>
                   Camera Feed
                 </Title>
-                <Badge
-                  color={isConnected ? 'green' : connectionState === 'connecting' ? 'yellow' : 'red'}
-                  variant="filled"
-                  size="lg"
-                >
-                  {isConnected ? 'SocketIO Connected' :
-                   connectionState === 'connecting' ? 'Connecting...' :
-                   connectionState === 'disconnected' ? 'Disconnected' :
-                   videoStatus}
-                </Badge>
+                <Stack gap="xs" align="flex-end">
+                  <Badge
+                    color={isConnected ? 'green' : connectionState === 'connecting' ? 'yellow' : 'red'}
+                    variant="filled"
+                    size="lg"
+                  >
+                    {isConnected ? 'SocketIO Connected' :
+                     connectionState === 'connecting' ? 'Connecting...' :
+                     connectionState === 'disconnected' ? 'Disconnected' :
+                     videoStatus}
+                  </Badge>
+
+                  {/* Show webcam tab requirement when webcam is active */}
+                  {isVideoStarted && actualCameraSource === 'browser' && (
+                    <Badge color="orange" variant="light" size="sm">
+                      📱 Keep tab active for webcam detection
+                    </Badge>
+                  )}
+
+                  {/* Show RTSP independence when RTSP is active */}
+                  {isVideoStarted && actualCameraSource === 'rtsp' && (
+                    <Badge color="green" variant="light" size="sm">
+                      📡 RTSP running independently
+                    </Badge>
+                  )}
+                </Stack>
               </Group>
 
               {/* Video Feed Display */}
@@ -952,16 +968,33 @@ export function DetectionPage({ onDetection }) {
                 </Button>
               </Group>
 
-              {/* Camera Permission Info */}
+              {/* Camera Permission Info and Limitations */}
               {!isVideoStarted && !isStreamLoading && (
-                <Text size="xs" c="dimmed" ta="center" mt="sm">
-                  📹 Camera access is required for face detection.
-                  {location.protocol !== 'https:' && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1' && (
-                    <span> HTTPS connection required.</span>
-                  )}
-                  <br />
-                  Please allow camera permission if prompted.
-                </Text>
+                <Stack gap="xs" mt="sm">
+                  <Text size="xs" c="dimmed" ta="center">
+                    📹 Camera access is required for face detection.
+                    {location.protocol !== 'https:' && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1' && (
+                      <span> HTTPS connection required.</span>
+                    )}
+                    <br />
+                    Please allow camera permission if prompted.
+                  </Text>
+
+                  <Alert color="blue" variant="light" size="xs">
+                    <Stack gap={4}>
+                      <Text size="xs" fw={600}>Camera Source Information:</Text>
+                      <Text size="xs">
+                        • <strong>Webcam Detection:</strong> Requires this browser tab to remain active. Detection pauses when navigating away or switching tabs (browser security limitation).
+                      </Text>
+                      <Text size="xs">
+                        • <strong>RTSP Camera:</strong> Runs independently in the background. Detection continues even when navigating away from this page.
+                      </Text>
+                      <Text size="xs" c="blue">
+                        💡 For 24/7 persistent detection, configure an RTSP camera in Settings.
+                      </Text>
+                    </Stack>
+                  </Alert>
+                </Stack>
               )}
 
             </Stack>

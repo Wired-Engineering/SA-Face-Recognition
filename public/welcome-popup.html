@@ -47,6 +47,7 @@
             border-radius: 20px;
             font-size: 14px;
             font-weight: 500;
+            z-index: 10;  /* Ensure status is above canvas */
         }
 
         .connection-status.connected {
@@ -92,6 +93,7 @@
             display: flex;
             align-items: center;
             gap: 5px;
+            z-index: 10;  /* Ensure button is above canvas */
         }
 
         .kiosk-btn:hover {
@@ -239,7 +241,7 @@
         </div>
 
         <!-- Kiosk Mode Button -->
-        <button id="kioskModeBtn" class="kiosk-btn" onclick="window.welcomePopup.toggleKioskMode()" title="Enter Kiosk Mode (Fullscreen)">
+        <button id="kioskModeBtn" class="kiosk-btn" title="Enter Kiosk Mode (Fullscreen)">
             <span>🖥️</span>
             <span>Kiosk Mode</span>
         </button>
@@ -757,7 +759,7 @@
 
             processRecognitionQueue() {
                 const now = Date.now();
-                const queueTimeout = 10000; // 10 seconds - allow for backend cooldown delays
+                const queueTimeout = 15000; // 15 seconds - allows for backend refresh broadcasts every 3 seconds
                 const displayDelay = 1000; // 1 second delay before showing cloud (to accumulate multiple people)
 
                 // Clean up people who have left the frame
@@ -1503,6 +1505,16 @@
         // Initialize when page loads
         document.addEventListener('DOMContentLoaded', () => {
             window.welcomePopup = new WelcomeScreenPopup();
+
+            // Setup kiosk mode button click handler
+            const kioskBtn = document.getElementById('kioskModeBtn');
+            if (kioskBtn) {
+                kioskBtn.addEventListener('click', () => {
+                    if (window.welcomePopup) {
+                        window.welcomePopup.toggleKioskMode();
+                    }
+                });
+            }
         });
     </script>
 </body>

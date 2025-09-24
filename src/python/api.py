@@ -153,11 +153,23 @@ def should_broadcast_recognition(person_name: str, current_time: float, cooldown
     global last_detected_name, last_recognition_time
 
     time_since_last = current_time - last_recognition_time
-    should_broadcast = (person_name != last_detected_name and time_since_last > cooldown) or last_detected_name == ""
+
+    # Allow broadcasting if:
+    # 1. This is the first detection ever (last_detected_name == "")
+    # 2. It's a different person than last detected
+    # 3. Same person but enough time has passed (cooldown expired)
+    should_broadcast = (
+        last_detected_name == "" or  # First detection
+        person_name != last_detected_name or  # Different person
+        time_since_last > cooldown  # Same person but cooldown expired
+    )
 
     if should_broadcast:
         last_detected_name = person_name
         last_recognition_time = current_time
+        print(f"🎯 Broadcasting recognition for {person_name} (time since last: {time_since_last:.1f}s)")
+    else:
+        print(f"🔄 Skipping recognition for {person_name} (cooldown: {time_since_last:.1f}s < {cooldown}s)")
 
     return should_broadcast
 
@@ -208,7 +220,7 @@ async def run_with_auto_retry(process_func, stream_id: str, source_type: str, ma
 # Recognition timing globals (inspired by original PyQt5 implementation)
 last_detected_name = ""
 last_recognition_time = 0.0
-recognition_cooldown = 3.0  # Seconds - prevents rapid flickering between different people
+recognition_cooldown = 30.0  # Seconds - prevents spam while allowing reasonable re-detection of same person
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -707,6 +719,13 @@ async def process_rtsp_with_ffmpeg_overlay(rtsp_url, output_queue, stop_event):
                                         await broadcast_recognition_to_welcome_screens(person_name, recognition_data, "RTSP")
 
                             detection_results_cache.append(result)
+                    else:
+                        # No faces detected - reset recognition state to allow immediate re-detection
+                        global last_detected_name, last_recognition_time
+                        if last_detected_name != "":
+                            print(f"🔄 No faces detected - resetting recognition state (was: {last_detected_name})")
+                            last_detected_name = ""
+                            last_recognition_time = 0.0
 
                     # Send detection results to frontend for UI updates (sidebar panels) only if independent detection is active
                     if detection_results_cache and get_independent_detection_active():
@@ -2139,6 +2158,13 @@ async def process_webcam_with_overlay(output_queue, stream_id):
                                     await broadcast_recognition_to_welcome_screens(person_name, recognition_data, "WEBCAM")
 
                         detection_results_cache.append(result)
+                else:
+                    # No faces detected - reset recognition state to allow immediate re-detection
+                    global last_detected_name, last_recognition_time
+                    if last_detected_name != "":
+                        print(f"🔄 No faces detected - resetting recognition state (was: {last_detected_name})")
+                        last_detected_name = ""
+                        last_recognition_time = 0.0
 
                 # Send detection results to any connected Socket.IO clients for UI updates only if independent detection is active
                 if detection_results_cache and get_independent_detection_active():
@@ -2291,9 +2317,9 @@ async def stop_webcam_streams():
     # Always stop streams when admin requests it
     webcam_streams.clear()
 
-    # Update persistent detection state
-    set_independent_detection_active(False)
-    print(f"🛑 Stopped {webcam_stream_count} webcam streams - detection state set to inactive")
+    # Note: Do NOT automatically set detection_active = False here
+    # Detection state should only be controlled by explicit admin actions via socket events
+    print(f"🛑 Stopped {webcam_stream_count} webcam streams - detection state controlled separately")
 
     return {
         "success": True,
@@ -2312,9 +2338,9 @@ async def stop_rtsp_streams():
     ffmpeg_streams.clear()
     total_stopped = rtsp_stream_count + ffmpeg_stream_count
 
-    # Update persistent detection state
-    set_independent_detection_active(False)
-    print(f"🛑 Stopped {rtsp_stream_count} RTSP streams and {ffmpeg_stream_count} FFmpeg streams - detection state set to inactive")
+    # Note: Do NOT automatically set detection_active = False here
+    # Detection state should only be controlled by explicit admin actions via socket events
+    print(f"🛑 Stopped {rtsp_stream_count} RTSP streams and {ffmpeg_stream_count} FFmpeg streams - detection state controlled separately")
 
     return {
         "success": True,
