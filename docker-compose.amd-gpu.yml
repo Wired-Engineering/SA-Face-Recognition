@@ -1,0 +1,31 @@
+# AMD GPU/iGPU-enabled docker-compose configuration
+# Usage: docker-compose -f docker-compose.amd-gpu.yml up -d
+#
+# Prerequisites:
+#   - AMD GPU (discrete) or AMD iGPU (Ryzen APU with integrated Radeon graphics)
+#   - Host AMD GPU drivers installed: apt install mesa-va-drivers mesa-vdpau-drivers
+#   - Verify with: lspci | grep VGA && vainfo
+---
+
+services:
+  face-recognition:
+    image: ghcr.io/wired-engineering/sa-face-recognition:latest
+    container_name: sa-face-recognition-amd
+    ports:
+      - "8443:443"
+    volumes:
+      - system_data:/app/src/python/system
+      - images_data:/app/src/python/images
+    # AMD GPU/iGPU Hardware Acceleration Support
+    devices:
+      - /dev/dri:/dev/dri                    # AMD GPU DRI devices (required)
+      - /dev/kfd:/dev/kfd                    # AMD GPU Kernel Fusion Driver (optional for iGPU)
+    group_add:
+      - video                                # Required for GPU access
+      - render                               # Required for AMD GPU rendering
+    # GPU acceleration auto-detected from device passthrough
+    restart: unless-stopped
+
+volumes:
+  system_data:
+  images_data:

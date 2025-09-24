@@ -10,12 +10,11 @@ services:
       - system_data:/app/src/python/system
       - images_data:/app/src/python/images
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "-k", "https://localhost:443/api/system/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
+
+    # GPU acceleration is disabled by default for production stability
+    # To enable GPU acceleration, use one of these specialized configurations:
+    #   Intel GPU:  docker-compose -f docker-compose.intel-gpu.yml up -d
+    #   AMD GPU:    docker-compose -f docker-compose.amd-gpu.yml up -d
 
 volumes:
   system_data:

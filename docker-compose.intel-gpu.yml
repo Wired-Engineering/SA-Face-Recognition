@@ -1,0 +1,29 @@
+# Intel GPU-enabled docker-compose configuration
+# Usage: docker-compose -f docker-compose.intel-gpu.yml up -d
+#
+# Prerequisites:
+#   - Intel GPU (iGPU or discrete)
+#   - Host Intel GPU drivers installed: apt install intel-media-va-driver-non-free i965-va-driver
+#   - Verify with: lspci | grep VGA && vainfo
+---
+
+services:
+  face-recognition:
+    image: ghcr.io/wired-engineering/sa-face-recognition:latest
+    container_name: sa-face-recognition-intel
+    ports:
+      - "8443:443"
+    volumes:
+      - system_data:/app/src/python/system
+      - images_data:/app/src/python/images
+    # Intel GPU Hardware Acceleration Support
+    devices:
+      - /dev/dri:/dev/dri                    # Intel GPU DRI devices
+    group_add:
+      - video                                # Required for Intel GPU access
+    # GPU acceleration auto-detected from device passthrough
+    restart: unless-stopped
+
+volumes:
+  system_data:
+  images_data:

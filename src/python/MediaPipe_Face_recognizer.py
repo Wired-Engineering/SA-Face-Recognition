@@ -539,7 +539,7 @@ class MediaPipeFaceRecognizer:
                 continue
 
             # Detect faces using MediaPipe
-            face_detections = self.detect_faces_mediapipe(image)
+            face_detections = self.detect_faces(image)
 
             if not face_detections:
                 print(f"Warning: No face detected in {file}")

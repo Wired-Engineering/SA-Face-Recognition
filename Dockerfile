@@ -18,17 +18,20 @@ RUN rm -rf dist node_modules/.cache .vite
 RUN pnpm build
 
 # # Production stage with Python base
-# FROM python:3.13-alpine
-FROM python:3.13-slim
+# FROM python:3.12-alpine
+FROM python:3.12-slim
 
 RUN apt-get update && apt-get install -y \
     nginx \
     supervisor \
     openssl \
+    curl \
+    # Minimal OpenCV dependencies (verified by ldd analysis)
+    libgl1 \
+    libglib2.0-0 \
+    libx11-6 \
     && rm -rf /var/lib/apt/lists/*
-    
-# # Install nginx and system dependencies
-# RUN apk add --no-cache nginx supervisor build-base cmake linux-headers jpeg-dev
+
 
 WORKDIR /app
 
@@ -73,5 +76,8 @@ COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 VOLUME ["/app/src/python/system", "/app/src/python/images"]
 
 EXPOSE 443
+
+HEALTHCHECK --interval=30s --timeout=10s --retries=3 --start-period=40s \
+    CMD curl -f -k https://localhost:443/api/system/health || exit 1
 
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]

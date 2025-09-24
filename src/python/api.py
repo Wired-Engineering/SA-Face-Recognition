@@ -17,6 +17,7 @@ import asyncio
 from contextlib import asynccontextmanager
 import queue
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 
 # SocketIO imports
 import socketio
@@ -89,6 +90,9 @@ face_recognizer = FaceRecognizer(
     thresold=0.5,  # Default threshold for MediaPipe
     draw=True      # Enable drawing overlays
 )
+
+# Thread pool for parallel processing
+thread_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="rtsp_worker")
 
 # SocketIO globals
 detection_active: Dict[str, bool] = {}
@@ -602,18 +606,232 @@ def draw_detection_overlays_on_frame(frame, faces):
     return overlay_frame
 
 
-async def process_rtsp_with_ffmpeg_overlay(rtsp_url, output_queue, stop_event):
-    """Process RTSP stream with ffmpeg and overlay detection results"""
-    print(f"🎬 Starting ffmpeg RTSP processing: {rtsp_url}")
+def configure_hardware_acceleration():
+    """Configure OpenCV to use hardware acceleration when available (CPU-first approach)"""
+    import os
+
+    # Default to CPU-only for production stability
+    # GPU acceleration must be explicitly enabled
+    enable_gpu = os.getenv('ENABLE_GPU_ACCELERATION', '').lower() in ('true', '1', 'yes')
+
+    # If GPU acceleration not explicitly enabled, use CPU
+    if not enable_gpu:
+        print("💻 Using CPU-only processing (default for production stability)")
+        print("💡 To enable GPU acceleration: set ENABLE_GPU_ACCELERATION=true")
+        return "cpu"
+
+    # GPU acceleration explicitly requested - proceed with detection
+    print("🚀 GPU acceleration explicitly enabled - detecting hardware...")
+
+    # Check if running in Docker container
+    is_docker = os.path.exists('/.dockerenv') or os.path.exists('/proc/1/cgroup')
+    if is_docker:
+        print("🐳 Running in Docker container - checking for GPU passthrough...")
 
     try:
-        # Initialize capture in thread to avoid blocking
+        # Check for CUDA support
+        if cv2.cuda.getCudaEnabledDeviceCount() > 0:
+            print("🚀 CUDA GPU acceleration available")
+            return "cuda"
+    except:
+        pass
+
+    try:
+        # Check for Intel Quick Sync Video (QSV) / iGPU support
+        backends = cv2.videoio_registry.getBackends()
+        if cv2.CAP_INTEL_MFX in backends:
+            # Verify Intel GPU device accessibility in container
+            intel_devices = ['/dev/dri/renderD128', '/dev/dri/card0']
+            if any(os.path.exists(device) for device in intel_devices):
+                print("🚀 Intel QuickSync Video (QSV) acceleration available with device passthrough")
+                print("📱 Using Intel Media SDK (MFX) backend for hardware acceleration")
+                return "intel_mfx"
+            else:
+                print("⚠️ Intel MFX/QuickSync backend available but no GPU devices found")
+                print("💡 Ensure DRI devices are mapped: --device=/dev/dri:/dev/dri")
+    except:
+        pass
+
+    try:
+        # Check for VAAPI (Video Acceleration API) - Linux hardware acceleration
+        if os.path.exists('/dev/dri'):
+            # Check if we can access DRI devices
+            dri_devices = os.listdir('/dev/dri')
+            if dri_devices:
+                print(f"🚀 VAAPI hardware acceleration available (devices: {dri_devices})")
+                # Try to use FFMPEG with hardware acceleration
+                return "vaapi"
+    except:
+        pass
+
+    try:
+        # Check for DirectShow with hardware acceleration on Windows
+        if cv2.CAP_DSHOW in cv2.videoio_registry.getBackends():
+            print("🚀 DirectShow hardware acceleration available")
+            return "dshow"
+    except:
+        pass
+
+    if is_docker:
+        print("❌ No GPU passthrough detected in Docker container")
+        print("💡 To enable GPU acceleration:")
+        print("   Intel: --device=/dev/dri:/dev/dri --group-add video")
+        print("   AMD:   --device=/dev/dri:/dev/dri --device=/dev/kfd:/dev/kfd --group-add video --group-add render")
+        print("   NVIDIA: --gpus all (requires nvidia-docker)")
+
+    print("ℹ️ Using CPU-only processing (no hardware acceleration detected)")
+    return "cpu"
+
+
+def create_optimized_capture(rtsp_url, hw_backend="cpu"):
+    """Create an optimized VideoCapture with hardware acceleration (Docker-compatible)"""
+    cap = None
+
+    if hw_backend == "cuda":
+        # Try CUDA-accelerated capture
+        try:
+            cap = cv2.VideoCapture(rtsp_url, cv2.CAP_GSTREAMER)
+            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('H', '2', '6', '4'))
+        except:
+            pass
+
+    elif hw_backend == "intel_mfx":
+        # Try Intel Quick Sync Video (QSV) with Media SDK
+        try:
+            print(f"🔧 Initializing Intel QuickSync capture for: {rtsp_url}")
+            cap = cv2.VideoCapture(rtsp_url, cv2.CAP_INTEL_MFX)
+            if cap.isOpened():
+                print("✅ Intel QuickSync Video capture initialized successfully")
+            else:
+                print("⚠️ Intel QuickSync capture failed to open, falling back to FFmpeg")
+                cap = None
+        except Exception as e:
+            print(f"❌ Intel QuickSync initialization failed: {e}")
+            cap = None
+
+    elif hw_backend == "vaapi":
+        # Try VAAPI hardware acceleration (Linux containers)
+        try:
+            # Use GStreamer with VAAPI
+            gst_pipeline = f'rtspsrc location={rtsp_url} ! rtph264depay ! h264parse ! vaapih264dec ! videoconvert ! appsink'
+            cap = cv2.VideoCapture(gst_pipeline, cv2.CAP_GSTREAMER)
+        except:
+            # Fallback to regular FFMPEG with potential hardware acceleration
+            cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
+
+    elif hw_backend == "dshow":
+        # Try DirectShow with hardware acceleration
+        try:
+            cap = cv2.VideoCapture(rtsp_url, cv2.CAP_DSHOW)
+        except:
+            pass
+
+    # Fallback to FFmpeg if hardware acceleration fails
+    if cap is None or not cap.isOpened():
+        cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
+
+    # Optimize capture settings
+    if cap.isOpened():
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Reduce buffer to minimize latency
+        cap.set(cv2.CAP_PROP_FPS, 30)  # Target 30 FPS
+        # Enable hardware decoding if available
+        try:
+            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('H', '2', '6', '4'))
+        except:
+            pass  # Ignore if codec setting fails
+
+    return cap
+
+
+def process_frame_threaded(frame_data):
+    """Process a frame in a separate thread for face detection"""
+    frame, frame_count = frame_data
+
+    try:
+        # Resize frame to consistent size like original implementation (800x600)
+        display_frame = cv2.resize(frame, (800, 600))
+        frame_features, faces = face_recognizer.recognize_face(display_frame)
+
+        detection_results = []
+        if faces is not None and len(faces) > 0:
+            # Calculate scaling factors from display frame back to original frame
+            original_height, original_width = frame.shape[:2]
+            scale_x = original_width / 800.0
+            scale_y = original_height / 600.0
+
+            for i, face_detection in enumerate(faces):
+                x1, y1, w, h = face_detection.bbox
+                x2, y2 = x1 + w, y1 + h
+
+                # Scale bounding box back to original frame size
+                x1_scaled = int(x1 * scale_x)
+                y1_scaled = int(y1 * scale_y)
+                x2_scaled = int(x2 * scale_x)
+                y2_scaled = int(y2 * scale_y)
+
+                result = {
+                    'bbox': [x1_scaled, y1_scaled, x2_scaled, y2_scaled],
+                    'confidence': float(face_detection.confidence),
+                    'quality_score': float(face_detection.quality_score),
+                    'face_area': int(face_detection.face_area),
+                    'is_frontal': bool(face_detection.is_frontal),
+                    'recognized': False,
+                    'person_name': 'Unknown',
+                    'match_confidence': 0.0,
+                    'frame_count': frame_count
+                }
+
+                # Check for face recognition match
+                if i < len(frame_features) and face_recognizer.dictionary:
+                    feature = frame_features[i]
+                    best_match = None
+                    highest_score = 0
+
+                    for person_id, ref_feature in face_recognizer.dictionary.items():
+                        score = face_recognizer.face_recognizer.match(feature, ref_feature)
+
+                        if score > face_recognizer.threshold and score > highest_score:
+                            highest_score = score
+                            person_name = db.get_person_name(person_id)
+                            person_title = db.get_person_title(person_id)
+                            best_match = {
+                                'person_id': person_id,
+                                'person_name': person_name,
+                                'person_title': person_title,
+                                'confidence': float(score)
+                            }
+
+                    if best_match:
+                        result.update({
+                            'person_id': best_match['person_id'],
+                            'person_name': best_match['person_name'],
+                            'match_confidence': best_match['confidence'],
+                            'recognized': True
+                        })
+
+                detection_results.append(result)
+
+        return detection_results, frame_count
+
+    except Exception as e:
+        print(f"❌ Error in threaded frame processing: {e}")
+        return [], frame_count
+
+
+async def process_rtsp_with_ffmpeg_overlay(rtsp_url, output_queue, stop_event):
+    """Process RTSP stream with multithreading, hardware acceleration, and overlay detection results"""
+    print(f"🎬 Starting optimized RTSP processing with multithreading: {rtsp_url}")
+
+    # Configure hardware acceleration
+    hw_backend = configure_hardware_acceleration()
+
+    try:
+        # Initialize hardware-accelerated capture
         loop = asyncio.get_event_loop()
-        cap = await loop.run_in_executor(None, cv2.VideoCapture, rtsp_url)
-        await loop.run_in_executor(None, cap.set, cv2.CAP_PROP_BUFFERSIZE, 1)
+        cap = await loop.run_in_executor(None, create_optimized_capture, rtsp_url, hw_backend)
 
         if not cap.isOpened():
-            print(f"❌ Failed to open RTSP stream for ffmpeg: {rtsp_url}")
+            print(f"❌ Failed to open RTSP stream: {rtsp_url}")
             return
 
         # Get video properties
@@ -621,12 +839,13 @@ async def process_rtsp_with_ffmpeg_overlay(rtsp_url, output_queue, stop_event):
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-        print(f"📺 Video properties: {width}x{height} @ {fps}fps")
+        print(f"📺 Video properties: {width}x{height} @ {fps}fps with {hw_backend} backend")
 
         frame_count = 0
         detection_results_cache = []
+        pending_futures = {}  # Track pending detection tasks
 
-        # Keep detection running as long as it's marked active OR there are welcome screens waiting
+        # Keep detection running as long as it's marked active
         while not stop_event.is_set() and get_independent_detection_active():
             # Read frame in thread to avoid blocking
             ret, frame = await loop.run_in_executor(None, cap.read)
@@ -637,133 +856,124 @@ async def process_rtsp_with_ffmpeg_overlay(rtsp_url, output_queue, stop_event):
 
             frame_count += 1
 
-            # Run face detection every frame for higher frame rate
-            # RTSP streams need more responsive detection for better user experience
-            if True:  # Process every frame
-                try:
-                    # Resize frame to consistent size like original PyQt5 implementation (800x600)
-                    # This ensures proper bounding box positioning and consistent performance
-                    display_frame = cv2.resize(frame, (800, 600))
-                    frame_features, faces = face_recognizer.recognize_face(display_frame)
+            # Process every 2nd frame for better performance while maintaining responsiveness
+            if frame_count % 2 == 0:
+                # Submit frame processing to thread pool
+                future = loop.run_in_executor(
+                    thread_pool,
+                    process_frame_threaded,
+                    (frame.copy(), frame_count)
+                )
+                pending_futures[frame_count] = future
 
-                    # Process detection results
-                    detection_results_cache = []
-                    if faces is not None and len(faces) > 0:
-                        # Calculate scaling factors from display frame (800x600) back to original frame
-                        original_height, original_width = frame.shape[:2]
-                        scale_x = original_width / 800.0
-                        scale_y = original_height / 600.0
+                # Limit number of pending futures to prevent memory issues
+                if len(pending_futures) > 6:  # Allow max 6 frames processing in parallel
+                    # Wait for oldest future to complete
+                    oldest_frame = min(pending_futures.keys())
+                    try:
+                        await pending_futures[oldest_frame]
+                    except Exception as e:
+                        print(f"❌ Error waiting for frame processing: {e}")
+                    del pending_futures[oldest_frame]
 
-                        for i, face_detection in enumerate(faces):
-                            x1, y1, w, h = face_detection.bbox
-                            x2, y2 = x1 + w, y1 + h
+            # Check for completed detection results
+            completed_futures = []
+            for fc, future in pending_futures.items():
+                if future.done():
+                    try:
+                        detection_results, _ = await future
+                        detection_results_cache = detection_results
+                        completed_futures.append(fc)
 
-                            # Scale bounding box back to original frame size
-                            x1_scaled = int(x1 * scale_x)
-                            y1_scaled = int(y1 * scale_y)
-                            x2_scaled = int(x2 * scale_x)
-                            y2_scaled = int(y2 * scale_y)
+                        # Handle recognition results
+                        for result in detection_results:
+                            if result['recognized']:
+                                # Recognition cooldown and broadcasting logic
+                                current_time = time.time()
+                                person_name = result['person_name']
 
-                            result = {
-                                'bbox': [x1_scaled, y1_scaled, x2_scaled, y2_scaled],
-                                'confidence': float(face_detection.confidence),
-                                'quality_score': float(face_detection.quality_score),
-                                'face_area': int(face_detection.face_area),
-                                'is_frontal': bool(face_detection.is_frontal),
-                                'recognized': False,
-                                'person_name': 'Unknown',
-                                'match_confidence': 0.0
-                            }
+                                # Only broadcast if enough time has passed since last recognition
+                                if should_broadcast_recognition(person_name, current_time, recognition_cooldown):
+                                    # Create standardized recognition data
+                                    best_match = {
+                                        'person_id': result.get('person_id'),
+                                        'person_name': person_name,
+                                        'person_title': db.get_person_title(result.get('person_id', '')),
+                                        'confidence': result['match_confidence']
+                                    }
+                                    recognition_data = create_recognition_data(best_match, current_time)
 
-                            # Check for face recognition match
-                            if i < len(frame_features) and face_recognizer.dictionary:
-                                feature = frame_features[i]
-                                best_match = None
-                                highest_score = 0
+                                    # Store latest recognition
+                                    latest_recognition.update(recognition_data)
 
-                                for person_id, ref_feature in face_recognizer.dictionary.items():
-                                    score = face_recognizer.face_recognizer.match(feature, ref_feature)
+                                    # Broadcast to welcome screens via SocketIO
+                                    await broadcast_recognition_to_welcome_screens(person_name, recognition_data, "RTSP")
 
-                                    if score > face_recognizer.threshold and score > highest_score:
-                                        highest_score = score
-                                        person_name = db.get_person_name(person_id)
-                                        person_title = db.get_person_title(person_id)
-                                        best_match = {
-                                            'person_id': person_id,
-                                            'person_name': person_name,
-                                            'person_title': person_title,
-                                            'confidence': float(score)
-                                        }
+                    except Exception as e:
+                        print(f"❌ Error processing detection results: {e}")
+                        completed_futures.append(fc)
 
-                                if best_match:
-                                    result.update({
-                                        'person_id': best_match['person_id'],
-                                        'person_name': best_match['person_name'],
-                                        'match_confidence': best_match['confidence'],
-                                        'recognized': True
-                                    })
+            # Remove completed futures
+            for fc in completed_futures:
+                if fc in pending_futures:
+                    del pending_futures[fc]
 
-                                    # Recognition cooldown and broadcasting logic
-                                    current_time = time.time()
-                                    person_name = best_match['person_name']
+            # Reset recognition state when no faces detected
+            if not detection_results_cache:
+                global last_detected_name, last_recognition_time
+                if last_detected_name != "":
+                    print(f"🔄 No faces detected - resetting recognition state (was: {last_detected_name})")
+                    last_detected_name = ""
+                    last_recognition_time = 0.0
 
-                                    # Only broadcast if enough time has passed since last recognition
-                                    if should_broadcast_recognition(person_name, current_time, recognition_cooldown):
-                                        # Create standardized recognition data
-                                        recognition_data = create_recognition_data(best_match, current_time)
-
-                                        # Store latest recognition
-                                        latest_recognition.update(recognition_data)
-
-                                        # Broadcast to welcome screens via SocketIO
-                                        await broadcast_recognition_to_welcome_screens(person_name, recognition_data, "RTSP")
-
-                            detection_results_cache.append(result)
-                    else:
-                        # No faces detected - reset recognition state to allow immediate re-detection
-                        global last_detected_name, last_recognition_time
-                        if last_detected_name != "":
-                            print(f"🔄 No faces detected - resetting recognition state (was: {last_detected_name})")
-                            last_detected_name = ""
-                            last_recognition_time = 0.0
-
-                    # Send detection results to frontend for UI updates (sidebar panels) only if independent detection is active
-                    if detection_results_cache and get_independent_detection_active():
-                        for sid in detection_active.keys():
-                            asyncio.create_task(sio.emit('face_detection_result', {
-                                "faces": detection_results_cache,
-                                "timestamp": time.time(),
-                                "frame_size": {"width": frame.shape[1], "height": frame.shape[0]}
-                            }, to=sid))
-
-                except Exception as e:
-                    print(f"❌ Error in face detection: {e}")
+            # Send detection results to frontend for UI updates
+            if detection_results_cache and get_independent_detection_active():
+                for sid in detection_active.keys():
+                    asyncio.create_task(sio.emit('face_detection_result', {
+                        "faces": detection_results_cache,
+                        "timestamp": time.time(),
+                        "frame_size": {"width": frame.shape[1], "height": frame.shape[0]}
+                    }, to=sid))
 
             # Draw overlays on frame using cached detection results
             if detection_results_cache:
                 frame = draw_detection_overlays_on_frame(frame, detection_results_cache)
 
-            # Encode frame as JPEG
-            _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            # Hardware-accelerated encoding if available
+            encode_params = [cv2.IMWRITE_JPEG_QUALITY, 90]  # Higher quality for better stream
+            if hw_backend in ["cuda", "intel_mfx", "vaapi"]:
+                encode_params.extend([cv2.IMWRITE_JPEG_OPTIMIZE, 1])
 
-            # Frame rate limiting for RTSP performance balance
-            # Reduced sleep for higher frame rate - targeting 15-20 FPS
-            await asyncio.sleep(0.02)
+            _, buffer = cv2.imencode('.jpg', frame, encode_params)
 
-            # Put frame in output queue
+            # Dynamic frame rate limiting based on processing load
+            processing_load = len(pending_futures) / 6.0  # Normalize to 0-1
+            sleep_time = 0.015 + (processing_load * 0.02)  # 15-35ms depending on load
+            await asyncio.sleep(sleep_time)
+
+            # Put frame in output queue (non-blocking)
             if not output_queue.full():
                 try:
                     output_queue.put_nowait(buffer.tobytes())
                 except queue.Full:
                     pass  # Skip frame if queue is full
 
-            # NO DELAY for successful frames - only sleep on failures above
+        # Wait for any remaining futures to complete
+        if pending_futures:
+            print("🔄 Waiting for remaining detection tasks to complete...")
+            for future in pending_futures.values():
+                try:
+                    await asyncio.wait_for(future, timeout=2.0)
+                except asyncio.TimeoutError:
+                    print("⚠️ Detection task timeout during cleanup")
+                except Exception:
+                    pass  # Ignore errors during cleanup
 
         cap.release()
-        print("🛑 FFmpeg RTSP processing stopped")
+        print("🛑 Optimized RTSP processing stopped")
 
     except Exception as e:
-        print(f"❌ Error in ffmpeg RTSP processing: {e}")
+        print(f"❌ Error in optimized RTSP processing: {e}")
 
 
 
@@ -2284,7 +2494,7 @@ async def test_rtsp():
     print(f"📡 Testing RTSP connection: {rtsp_url}")
 
     try:
-        cap = cv2.VideoCapture(rtsp_url)
+        cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
         if not cap.isOpened():

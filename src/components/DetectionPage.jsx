@@ -28,8 +28,8 @@ export function DetectionPage({ onDetection }) {
   const theme = useMantineTheme();
   const { isConnected, connectionState, connect, disconnect, on, emit } = useSocket();
   const [isVideoStarted, setIsVideoStarted] = useState(false);
-  const [isDetecting, setIsDetecting] = useState(false); // eslint-disable-line no-unused-vars
-  const [detectedPerson, setDetectedPerson] = useState(null); // eslint-disable-line no-unused-vars
+  const [, setIsDetecting] = useState(false);
+  const [, setDetectedPerson] = useState(null);
   const [detectionHistory, setDetectionHistory] = useState([]);
   const [videoStatus, setVideoStatus] = useState('Stopped');
   const [error, setError] = useState(null);
@@ -733,20 +733,6 @@ export function DetectionPage({ onDetection }) {
                      connectionState === 'disconnected' ? 'Disconnected' :
                      videoStatus}
                   </Badge>
-
-                  {/* Show webcam tab requirement when webcam is active */}
-                  {isVideoStarted && actualCameraSource === 'browser' && (
-                    <Badge color="orange" variant="light" size="sm">
-                      📱 Keep tab active for webcam detection
-                    </Badge>
-                  )}
-
-                  {/* Show RTSP independence when RTSP is active */}
-                  {isVideoStarted && actualCameraSource === 'rtsp' && (
-                    <Badge color="green" variant="light" size="sm">
-                      📡 RTSP running independently
-                    </Badge>
-                  )}
                 </Stack>
               </Group>
 
