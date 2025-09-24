@@ -111,7 +111,7 @@
             display: none;
         }
 
-        #cloudCanvas {
+        #circleCanvas {
             position: absolute;
             top: 0;
             left: 0;
@@ -246,8 +246,8 @@
             <span>Kiosk Mode</span>
         </button>
 
-        <!-- Cloud Canvas -->
-        <canvas id="cloudCanvas" width="1920" height="1080"></canvas>
+        <!-- Circle Canvas -->
+        <canvas id="circleCanvas" width="1920" height="1080"></canvas>
 
         <!-- Waiting State Overlay -->
         <div id="waitingState" class="waiting-state">
@@ -259,11 +259,13 @@
 
     <!-- Socket.IO Client Library -->
     <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+    <!-- Planck.js Physics Engine -->
+    <script src="https://cdn.jsdelivr.net/npm/planck@1.0.5/dist/planck.min.js"></script>
 
 
     <script>
-        class Cloud {
-            constructor(name, title, color, canvas, cloudImages, settings = {}) {
+        class Circle {
+            constructor(name, title, color, canvas, circleImage, settings = {}) {
                 this.name = name;
                 this.title = title; // User title/department
                 this.color = color;
@@ -274,46 +276,28 @@
                 this.fadeOut = false;
                 this.alpha = 1;
                 this.fontSize = settings.fontSize || 'medium';
+                this.circleImage = circleImage; // Store the SVG image
 
-                // Select random cloud shape
-                this.cloudImage = null;
-                if (cloudImages && cloudImages.length > 0) {
-                    const imageIndex = Math.floor(Math.random() * cloudImages.length);
-                    this.cloudImage = cloudImages[imageIndex];
-                    console.log(`☁️ Cloud for "${name}" using SVG shape ${imageIndex + 1}`);
-                } else {
-                    console.log(`⚠️ Cloud for "${name}" - no cloud images available`);
-                }
-
-                // Calculate text dimensions to determine proper cloud scaling
+                // Calculate text dimensions and circle size
                 this.calculateTextDimensions();
-                this.calculateCloudDimensions();
+                this.calculateCircleSize();
 
-                // Define height layers for depth - clouds at different altitudes
-                const heightLayers = [
-                    { min: 0.1, max: 0.25, speed: 0.8 },    // High clouds (slow, small)
-                    { min: 0.25, max: 0.5, speed: 1.0 },    // Mid clouds (medium)
-                    { min: 0.5, max: 0.75, speed: 1.2 },    // Low clouds (faster, larger)
-                ];
+                // Starting position - center of screen
+                this.targetX = this.canvas.width / 2;
+                this.targetY = this.canvas.height / 2;
+                this.x = this.targetX;
+                this.y = this.targetY;
 
-                // Randomly select a height layer
-                this.layer = heightLayers[Math.floor(Math.random() * heightLayers.length)];
+                // Growth animation properties
+                this.currentRadius = 0; // Start tiny
+                this.growthSpeed = 2; // Pixels per frame growth
+                this.isGrowing = true;
 
-                // Position will be set by the collision system
-                this.x = -this.width; // Start off-screen left (will be adjusted)
-                this.y = 0; // Will be set by positioning system
+                // Physics properties (will be set when added to physics world)
+                this.body = null;
+                this.physicsRadius = this.radius;
 
-                // Cloud movement - speed varies by layer (parallax effect)
-                this.vx = this.layer.speed + Math.random() * 0.4; // Layer-based speed
-                this.vy = (Math.random() - 0.5) * 0.1; // Very slight vertical drift
-
-                // Mark as needing positioning
-                this.needsPositioning = true;
-
-                // Animation properties for gentle floating effect
-                this.animationTime = Math.random() * Math.PI * 2;
-                this.floatAmplitude = 1 + Math.random() * 2; // 1-3 pixel float range
-                this.floatSpeed = 0.01 + Math.random() * 0.01; // Slow gentle movement
+                console.log(`⭕ Circle for "${name}": radius=${this.radius}px, text=${this.textWidth}x${this.textHeight}`);
             }
 
             calculateTextDimensions() {
@@ -326,21 +310,21 @@
                 };
 
                 const baseSize = baseFontSizes[this.fontSize] || baseFontSizes.medium;
+                const fontFamily = this.settings.fontFamily || 'Inter';
 
-                // Set initial font sizes - these will be dynamically adjusted
-                this.baseName = baseSize.name;
-                this.baseTitle = baseSize.title;
-                this.nameFontSize = this.baseName;
-                this.titleFontSize = this.baseTitle;
+                // Set font sizes
+                this.nameFontSize = baseSize.name;
+                this.titleFontSize = baseSize.title;
 
-                // Measure actual text dimensions with base fonts
+                // Measure actual text dimensions
                 this.ctx.save();
 
-                const fontFamily = this.settings.fontFamily || 'Inter';
+                // Measure name width
                 this.ctx.font = `bold ${this.nameFontSize}px ${fontFamily}, sans-serif`;
                 const nameMetrics = this.ctx.measureText(this.name);
                 this.nameWidth = nameMetrics.width;
 
+                // Measure title width
                 this.titleWidth = 0;
                 if (this.title) {
                     this.ctx.font = `${this.titleFontSize}px ${fontFamily}, sans-serif`;
@@ -348,252 +332,64 @@
                     this.titleWidth = titleMetrics.width;
                 }
 
-                // Calculate total text dimensions with base sizes
+                // Calculate total text dimensions
                 this.textWidth = Math.max(this.nameWidth, this.titleWidth);
-                this.textHeight = this.title ? (this.nameFontSize + this.titleFontSize + 10) : this.nameFontSize;
+                const lineSpacing = this.title ? 8 : 0;
+                this.textHeight = this.title ?
+                    (this.nameFontSize + this.titleFontSize + lineSpacing) :
+                    this.nameFontSize;
 
                 this.ctx.restore();
             }
 
-            calculateCloudDimensions() {
-                // Get actual cloud path dimensions from SVG viewBox
-                const cloudDimensions = this.getCloudPathDimensions();
+            calculateCircleSize() {
+                // Calculate the diagonal of the text box (ensures text always fits)
+                const textDiagonal = Math.sqrt(this.textWidth * this.textWidth + this.textHeight * this.textHeight);
 
-                // Apply font size scaling to cloud dimensions
-                const sizeScales = {
-                    small: 0.8,
-                    medium: 1.0,
-                    large: 1.2,
-                    xlarge: 1.4
+                // Base padding that scales with font size
+                const paddingScale = {
+                    small: 25,
+                    medium: 30,
+                    large: 35,
+                    xlarge: 40
                 };
+                const padding = paddingScale[this.fontSize] || 30;
 
-                const scale = sizeScales[this.fontSize] || 1.0;
-                this.width = cloudDimensions.width * scale;
-                this.height = cloudDimensions.height * scale;
+                // Calculate radius to ensure text always fits with padding
+                // Using diagonal/2 ensures even rotated text would fit
+                const baseRadius = (textDiagonal / 2) + padding;
 
-                // Calculate usable text area within the actual cloud shape
-                // Use conservative estimates based on typical cloud shapes
-                this.textAreaWidth = cloudDimensions.textAreaWidth * scale;
-                this.textAreaHeight = cloudDimensions.textAreaHeight * scale;
+                // Set minimum and maximum radius bounds
+                const minRadius = 40; // Minimum circle size
+                const maxRadius = 150; // Maximum circle size to prevent huge bubbles
 
-                // Now fit text to these precise dimensions
-                this.fitTextToCloud();
-            }
+                // Apply bounds
+                this.radius = Math.max(minRadius, Math.min(maxRadius, baseRadius));
 
-            getCloudPathDimensions() {
-                // Define precise dimensions for each cloud SVG based on their actual paths
-                // These are extracted from the viewBox and path analysis of each cloud
-                const cloudSpecs = {
-                    // Cloud 1: viewBox="115 63 55 35" (ratio: 1.57) - compact, rounded
-                    0: {
-                        width: 200,
-                        height: 127,  // Maintains actual aspect ratio
-                        textAreaWidth: 140, // ~70% of width for safe text area
-                        textAreaHeight: 85   // ~67% of height for safe text area
-                    },
-                    // Cloud 2: viewBox="33 65 55 32" (ratio: 1.72) - wider, flatter
-                    1: {
-                        width: 220,
-                        height: 128,  // Maintains actual aspect ratio
-                        textAreaWidth: 160, // ~73% of width
-                        textAreaHeight: 82   // ~64% of height
-                    },
-                    // Cloud 3: viewBox="110 18 70 35" (ratio: 2.0) - longest, most elongated
-                    2: {
-                        width: 240,
-                        height: 120,  // Maintains actual aspect ratio
-                        textAreaWidth: 180, // ~75% of width
-                        textAreaHeight: 75   // ~63% of height
-                    },
-                    // Cloud 4: viewBox="33 17 63 32" (ratio: 1.97) - wide like cloud 3
-                    3: {
-                        width: 235,
-                        height: 119,  // Maintains actual aspect ratio
-                        textAreaWidth: 175, // ~74% of width
-                        textAreaHeight: 75   // ~63% of height
-                    },
-                    // Cloud 5: viewBox="107 114 80 31" (ratio: 2.58) - extremely wide
-                    4: {
-                        width: 260,
-                        height: 101,  // Maintains actual aspect ratio
-                        textAreaWidth: 200, // ~77% of width (more generous for very wide cloud)
-                        textAreaHeight: 65   // ~64% of height
-                    }
-                };
+                // Add some randomness for variety (±10% only to maintain proportions)
+                const randomFactor = 0.9 + Math.random() * 0.2; // 0.9 to 1.1
+                this.radius *= randomFactor;
+                this.radius = Math.round(this.radius);
 
-                // Get cloud index from cloudImage if available
-                let cloudIndex = 0;
-                if (this.cloudImage && this.cloudImage.src) {
-                    const match = this.cloudImage.src.match(/cloud(\d+)\.svg/);
-                    if (match) {
-                        cloudIndex = parseInt(match[1]) - 1; // Convert from 1-5 to 0-4 index
-                        // Ensure the index is valid (0-4)
-                        cloudIndex = Math.max(0, Math.min(4, cloudIndex));
-                    }
-                }
-
-                // Return the specifications for this cloud, or default to cloud 1
-                return cloudSpecs[cloudIndex] || cloudSpecs[0];
-            }
-
-            fitTextToCloud() {
-                // Calculate how much text space we need vs. what we have available
-                const fontFamily = this.settings.fontFamily || 'Inter';
-
-                // Measure text at base sizes
-                this.ctx.save();
-
-                // Calculate optimal font sizes to fit within cloud
-                let nameFontSize = this.baseName;
-                let titleFontSize = this.baseTitle;
-
-                // Calculate total text height needed
-                const lineSpacing = 8; // Space between name and title
-                const totalTextHeight = this.title ?
-                    (nameFontSize + titleFontSize + lineSpacing) : nameFontSize;
-
-                // Fit text vertically first
-                if (totalTextHeight > this.textAreaHeight) {
-                    const scaleFactor = this.textAreaHeight / totalTextHeight;
-                    nameFontSize = Math.max(10, Math.floor(this.baseName * scaleFactor));
-                    titleFontSize = Math.max(8, Math.floor(this.baseTitle * scaleFactor));
-                }
-
-                // Prepare name and title text (with potential truncation for very long text)
-                this.displayName = this.truncateText(this.name, this.textAreaWidth, nameFontSize, fontFamily, true);
-                this.displayTitle = this.title ?
-                    this.truncateText(this.title, this.textAreaWidth, titleFontSize, fontFamily, false) : null;
-
-                // Now fit text horizontally with the (potentially truncated) text
-                let iterations = 0;
-                const maxIterations = 10;
-
-                while (iterations < maxIterations) {
-                    // Measure name width
-                    this.ctx.font = `bold ${nameFontSize}px ${fontFamily}, sans-serif`;
-                    const nameMetrics = this.ctx.measureText(this.displayName);
-                    const nameWidth = nameMetrics.width;
-
-                    // Measure title width if exists
-                    let titleWidth = 0;
-                    if (this.displayTitle) {
-                        this.ctx.font = `${titleFontSize}px ${fontFamily}, sans-serif`;
-                        const titleMetrics = this.ctx.measureText(this.displayTitle);
-                        titleWidth = titleMetrics.width;
-                    }
-
-                    const maxTextWidth = Math.max(nameWidth, titleWidth);
-
-                    // Check if text fits within available width
-                    if (maxTextWidth <= this.textAreaWidth) {
-                        break; // Text fits!
-                    }
-
-                    // Scale down fonts to fit horizontally
-                    const horizontalScale = this.textAreaWidth / maxTextWidth;
-                    nameFontSize = Math.max(10, Math.floor(nameFontSize * horizontalScale * 0.95));
-                    titleFontSize = Math.max(8, Math.floor(titleFontSize * horizontalScale * 0.95));
-
-                    // Re-calculate truncated text with new font sizes
-                    this.displayName = this.truncateText(this.name, this.textAreaWidth, nameFontSize, fontFamily, true);
-                    this.displayTitle = this.title ?
-                        this.truncateText(this.title, this.textAreaWidth, titleFontSize, fontFamily, false) : null;
-
-                    iterations++;
-                }
-
-                // Apply the calculated font sizes
-                this.nameFontSize = nameFontSize;
-                this.titleFontSize = titleFontSize;
-
-                // Update text dimensions with final sizes
-                this.ctx.font = `bold ${this.nameFontSize}px ${fontFamily}, sans-serif`;
-                const nameMetrics = this.ctx.measureText(this.displayName);
-                this.nameWidth = nameMetrics.width;
-
-                this.titleWidth = 0;
-                if (this.displayTitle) {
-                    this.ctx.font = `${this.titleFontSize}px ${fontFamily}, sans-serif`;
-                    const titleMetrics = this.ctx.measureText(this.displayTitle);
-                    this.titleWidth = titleMetrics.width;
-                }
-
-                this.textWidth = Math.max(this.nameWidth, this.titleWidth);
-                this.textHeight = this.displayTitle ?
-                    (this.nameFontSize + this.titleFontSize + lineSpacing) : this.nameFontSize;
-
-                this.ctx.restore();
-
-                console.log(`📏 Fitted "${this.name}" text: name=${this.nameFontSize}px, title=${this.titleFontSize}px (cloud: ${this.width}x${this.height})`);
-            }
-
-            truncateText(text, maxWidth, fontSize, fontFamily, isBold) {
-                // Helper function to truncate text that's too long, adding ellipsis
-                this.ctx.save();
-                this.ctx.font = `${isBold ? 'bold ' : ''}${fontSize}px ${fontFamily}, sans-serif`;
-
-                const metrics = this.ctx.measureText(text);
-
-                if (metrics.width <= maxWidth) {
-                    this.ctx.restore();
-                    return text; // Text fits as-is
-                }
-
-                // Text is too long, need to truncate with ellipsis
-                const ellipsis = '...';
-                const ellipsisWidth = this.ctx.measureText(ellipsis).width;
-                const availableWidth = maxWidth - ellipsisWidth;
-
-                // Binary search for the longest substring that fits
-                let left = 0;
-                let right = text.length;
-                let bestFit = '';
-
-                while (left <= right) {
-                    const mid = Math.floor((left + right) / 2);
-                    const substring = text.substring(0, mid);
-                    const substringWidth = this.ctx.measureText(substring).width;
-
-                    if (substringWidth <= availableWidth) {
-                        bestFit = substring;
-                        left = mid + 1;
-                    } else {
-                        right = mid - 1;
-                    }
-                }
-
-                this.ctx.restore();
-                return bestFit + ellipsis;
+                // Store a safe text area for fitting
+                this.safeTextRadius = this.radius - padding;
             }
 
             update() {
-                // Move cloud across screen
-                this.x += this.vx;
-                this.y += this.vy;
-
-                // Add gentle floating animation
-                this.animationTime += this.floatSpeed;
-                const floatOffset = Math.sin(this.animationTime) * this.floatAmplitude;
-                this.currentY = this.y + floatOffset;
-
-                // Gentle wind variance - occasionally change speed slightly
-                if (Math.random() < 0.005) { // 0.5% chance per frame
-                    this.vx += (Math.random() - 0.5) * 0.1;
-                    this.vx = Math.max(0.3, Math.min(2, this.vx)); // Keep within bounds
-                }
-
-                // Reset position when cloud goes off-screen (infinite loop)
-                if (this.x > this.canvas.width + 50) {
-                    this.x = -this.width - 50;
-                    this.y = Math.random() * (this.canvas.height - this.height - 100) + 50;
-                    // Randomize cloud slightly for variation
-                    this.vx = 0.5 + Math.random() * 1;
+                // Handle growth animation
+                if (this.isGrowing && this.currentRadius < this.radius) {
+                    this.currentRadius += this.growthSpeed;
+                    if (this.currentRadius >= this.radius) {
+                        this.currentRadius = this.radius;
+                        this.isGrowing = false;
+                    }
                 }
 
                 // Handle fadeout
                 if (this.fadeOut) {
-                    this.alpha -= 0.015; // Slower fade for clouds
-                    if (this.alpha <= 0) {
+                    this.alpha -= 0.025; // Slightly faster fade out
+                    if (this.alpha <= 0.01) { // Changed threshold to ensure complete removal
+                        this.alpha = 0; // Ensure it's completely transparent
                         return false; // Mark for removal
                     }
                 }
@@ -601,39 +397,57 @@
                 return true; // Continue existing
             }
 
-            drawCloud() {
+            draw() {
+                if (this.currentRadius <= 0) return; // Don't draw if not grown yet
+                if (this.alpha <= 0.01) return; // Don't draw if completely faded
+
                 this.ctx.save();
                 this.ctx.globalAlpha = this.alpha;
 
-                if (this.cloudImage) {
-                    // FIXED: Use isolated canvas approach to prevent composite operation conflicts
-                    // Create a temporary canvas for this cloud to avoid affecting other clouds
+                // Draw the glowing circle SVG image
+                if (this.circleImage && this.circleImage.complete) {
+                    // Calculate the size for the SVG based on current radius
+                    const size = this.currentRadius * 2;
+
+                    // Create temporary canvas to apply color tinting to SVG
                     const tempCanvas = document.createElement('canvas');
-                    tempCanvas.width = this.width + 20; // Add padding for safety
-                    tempCanvas.height = this.height + 20;
+                    tempCanvas.width = size;
+                    tempCanvas.height = size;
                     const tempCtx = tempCanvas.getContext('2d');
 
-                    // Draw the SVG to the temporary canvas
-                    tempCtx.drawImage(this.cloudImage, 10, 10, this.width, this.height);
+                    // Draw the SVG to temporary canvas
+                    tempCtx.drawImage(this.circleImage, 0, 0, size, size);
 
-                    // Apply color overlay using source-in on the isolated canvas
+                    // Apply color tinting using composite operation
                     tempCtx.globalCompositeOperation = 'source-in';
                     tempCtx.fillStyle = this.color || '#4ECDC4';
-                    tempCtx.fillRect(0, 0, tempCanvas.width, tempCanvas.height);
+                    tempCtx.fillRect(0, 0, size, size);
 
-                    // Draw the colored cloud to the main canvas
-                    this.ctx.drawImage(tempCanvas, this.x - 10, this.currentY - 10);
+                    // Draw the tinted circle to main canvas
+                    this.ctx.drawImage(tempCanvas,
+                        this.x - this.currentRadius,
+                        this.y - this.currentRadius,
+                        size,
+                        size
+                    );
+                } else {
+                    // Fallback to simple circle if image not loaded
+                    this.ctx.beginPath();
+                    this.ctx.arc(this.x, this.y, this.currentRadius, 0, Math.PI * 2);
+                    this.ctx.strokeStyle = this.color || '#4ECDC4';
+                    this.ctx.lineWidth = 3;
+                    this.ctx.stroke();
+                }
+
+                // Draw text if circle is large enough
+                if (this.currentRadius > 20) {
+                    this.drawText();
                 }
 
                 this.ctx.restore();
             }
 
-            draw() {
-                // Draw cloud shape
-                this.drawCloud();
-
-
-                // Draw name and title text in center of cloud
+            drawText() {
                 this.ctx.save();
                 this.ctx.globalAlpha = this.alpha;
                 this.ctx.textAlign = 'center';
@@ -644,33 +458,55 @@
 
                 // Add text shadow for better readability
                 this.ctx.shadowColor = 'rgba(0, 0, 0, 0.3)';
-                this.ctx.shadowBlur = 4;
+                this.ctx.shadowBlur = 2;
                 this.ctx.shadowOffsetX = 1;
                 this.ctx.shadowOffsetY = 1;
 
-                const centerX = this.x + this.width/2;
-                const centerY = this.currentY + this.height/2;
+                // Calculate growth scale factor based on current radius vs target radius
+                const growthScale = this.currentRadius / this.radius;
 
-                if (this.displayTitle) {
-                    // Draw both name and title using calculated font sizes
-                    // Draw name (larger, bold) - perfectly centered above
+                // Scale font sizes with the bubble growth
+                let nameFontSize = this.nameFontSize * growthScale;
+                let titleFontSize = this.titleFontSize * growthScale;
+
+                // Use the safe text radius to ensure text fits (scaled with current size)
+                const currentSafeTextRadius = this.safeTextRadius * growthScale;
+                if (currentSafeTextRadius) {
+                    const maxTextWidth = currentSafeTextRadius * 1.8; // Allow text to use most of the circle width
+
+                    // Scale down if text is too wide (based on scaled text dimensions)
+                    const scaledTextWidth = this.textWidth * growthScale;
+                    if (scaledTextWidth > maxTextWidth) {
+                        const scale = maxTextWidth / scaledTextWidth;
+                        nameFontSize = Math.floor(nameFontSize * scale);
+                        titleFontSize = Math.floor(titleFontSize * scale);
+                    }
+                }
+
+                if (this.title) {
+                    // Draw both name and title
+                    // Calculate vertical centering with potentially scaled fonts
+                    const lineSpacing = 6 * growthScale; // Scale line spacing too
+                    const totalTextHeight = nameFontSize + titleFontSize + lineSpacing;
+                    const startY = this.y - (totalTextHeight / 2);
+
+                    // Draw name (larger, bold)
                     this.ctx.fillStyle = fontColor;
-                    this.ctx.font = `bold ${this.nameFontSize}px ${fontFamily}, sans-serif`;
-                    this.ctx.textBaseline = 'bottom';
-                    this.ctx.fillText(this.displayName, centerX, centerY - 2);
+                    this.ctx.font = `bold ${nameFontSize}px ${fontFamily}, sans-serif`;
+                    this.ctx.textBaseline = 'top';
+                    this.ctx.fillText(this.name, this.x, startY);
 
-                    // Draw title (smaller, regular) - perfectly centered below
+                    // Draw title (smaller, regular)
                     this.ctx.fillStyle = fontColor;
                     this.ctx.globalAlpha = this.alpha * 0.85; // Slightly more transparent
-                    this.ctx.font = `${this.titleFontSize}px ${fontFamily}, sans-serif`;
-                    this.ctx.textBaseline = 'top';
-                    this.ctx.fillText(this.displayTitle, centerX, centerY + 2);
+                    this.ctx.font = `${titleFontSize}px ${fontFamily}, sans-serif`;
+                    this.ctx.fillText(this.title, this.x, startY + nameFontSize + lineSpacing);
                 } else {
-                    // Draw only name (perfectly centered) using calculated font size
+                    // Draw only name (centered)
                     this.ctx.fillStyle = fontColor;
-                    this.ctx.font = `bold ${this.nameFontSize}px ${fontFamily}, sans-serif`;
+                    this.ctx.font = `bold ${nameFontSize}px ${fontFamily}, sans-serif`;
                     this.ctx.textBaseline = 'middle';
-                    this.ctx.fillText(this.displayName, centerX, centerY);
+                    this.ctx.fillText(this.name, this.x, this.y);
                 }
 
                 this.ctx.restore();
@@ -680,9 +516,10 @@
                 this.fadeOut = true;
             }
 
-            // Check if cloud has moved off screen (for cleanup)
-            isOffScreen() {
-                return this.x > this.canvas.width + 100;
+            // Set physics position (called by physics engine)
+            setPhysicsPosition(x, y) {
+                this.x = x;
+                this.y = y;
             }
         }
 
@@ -690,14 +527,14 @@
             constructor() {
                 this.socket = null;
                 this.isConnected = false;
-                this.clouds = new Map(); // Map of person_id to Cloud
+                this.circles = new Map(); // Map of person_id to Circle
                 this.recognitionQueue = new Map(); // Map of person_id to recognition data with timestamps
                 this.queueProcessInterval = null;
                 this.apiBase = this.detectApiBase();
                 this.settings = {
                     backgroundColor: '#E1EBFF',
                     fontColor: '#00243D',
-                    cloudColor: '#4ECDC4',
+                    circleColor: '#4ECDC4', // Renamed from cloudColor
                     timer: 5,
                     useBackgroundImage: false,
                     backgroundImage: null,
@@ -708,21 +545,26 @@
                 this.isKioskMode = false;
 
                 // Canvas setup
-                this.canvas = document.getElementById('cloudCanvas');
+                this.canvas = document.getElementById('circleCanvas');
                 this.ctx = this.canvas.getContext('2d');
                 this.animationFrame = null;
 
-                // Cloud images from individual SVGs
-                this.cloudImages = [];
-                this.cloudImagesLoaded = false;
+                // Physics world setup
+                this.world = null;
+                this.physicsScale = 50; // Pixels per meter for physics simulation
+
+                // Glowing circle SVG image
+                this.circleImage = null;
+                this.circleImageLoaded = false;
 
                 // Load settings asynchronously and then apply them
                 this.loadSettings().then(() => {
                     this.applySettings();
                     this.setupCanvas();
-                    this.loadCloudImages().then(() => {
+                    this.setupPhysics();
+                    this.loadCircleImage().then(() => {
                         this.startAnimation();
-                        console.log('✅ Settings loaded and cloud SVG images ready');
+                        console.log('✅ Settings loaded, circle SVG loaded, and physics engine ready');
                     });
                 });
                 this.setupKioskMode();
@@ -741,6 +583,7 @@
                 // Handle window resize
                 window.addEventListener('resize', () => {
                     this.setupCanvas();
+                    this.recreatePhysicsWorld();
                 });
             }
 
@@ -748,6 +591,103 @@
                 // Set canvas size to window size
                 this.canvas.width = window.innerWidth;
                 this.canvas.height = window.innerHeight;
+            }
+
+            setupPhysics() {
+                // Create physics world with zero gravity (circles should float, not fall)
+                this.world = planck.World({
+                    gravity: planck.Vec2(0, 0) // No gravity
+                });
+
+                this.createPhysicsWalls();
+                console.log(`🏗️ Physics world created: ${(this.canvas.width / this.physicsScale).toFixed(1)}x${(this.canvas.height / this.physicsScale).toFixed(1)} units`);
+            }
+
+            createPhysicsWalls() {
+                if (!this.world) return;
+
+                // Create invisible walls around the screen to contain circles
+                const wallThickness = 0.5; // Thickness in physics units
+                const worldWidth = this.canvas.width / this.physicsScale;
+                const worldHeight = this.canvas.height / this.physicsScale;
+
+                // Top wall
+                this.world.createBody({
+                    position: planck.Vec2(worldWidth / 2, -wallThickness / 2)
+                }).createFixture(planck.Box(worldWidth / 2, wallThickness / 2));
+
+                // Bottom wall
+                this.world.createBody({
+                    position: planck.Vec2(worldWidth / 2, worldHeight + wallThickness / 2)
+                }).createFixture(planck.Box(worldWidth / 2, wallThickness / 2));
+
+                // Left wall
+                this.world.createBody({
+                    position: planck.Vec2(-wallThickness / 2, worldHeight / 2)
+                }).createFixture(planck.Box(wallThickness / 2, worldHeight / 2));
+
+                // Right wall
+                this.world.createBody({
+                    position: planck.Vec2(worldWidth + wallThickness / 2, worldHeight / 2)
+                }).createFixture(planck.Box(wallThickness / 2, worldHeight / 2));
+            }
+
+            recreatePhysicsWorld() {
+                if (!this.world) {
+                    this.setupPhysics();
+                    return;
+                }
+
+                // Store existing circles and their velocities
+                const existingCircles = new Map();
+                for (const [personId, circle] of this.circles) {
+                    if (circle.body) {
+                        existingCircles.set(personId, {
+                            circle: circle,
+                            velocity: circle.body.getLinearVelocity(),
+                            position: circle.body.getPosition()
+                        });
+                    }
+                }
+
+                // Create new world with updated boundaries
+                this.world = planck.World({
+                    gravity: planck.Vec2(0, 0)
+                });
+                this.createPhysicsWalls();
+
+                // Recreate physics bodies for existing circles
+                for (const [personId, data] of existingCircles) {
+                    const circle = data.circle;
+
+                    // Adjust position to fit new boundaries
+                    const worldWidth = this.canvas.width / this.physicsScale;
+                    const worldHeight = this.canvas.height / this.physicsScale;
+                    let newX = Math.min(Math.max(data.position.x, 1), worldWidth - 1);
+                    let newY = Math.min(Math.max(data.position.y, 1), worldHeight - 1);
+
+                    // Create new body
+                    circle.body = this.world.createBody({
+                        type: 'dynamic',
+                        position: planck.Vec2(newX, newY),
+                        linearDamping: 0.5,
+                        angularDamping: 0.8,
+                        bullet: true
+                    });
+
+                    const radius = circle.radius / this.physicsScale;
+                    circle.body.createFixture(planck.Circle(radius), {
+                        density: 0.5,
+                        friction: 0.1,
+                        restitution: 0.8
+                    });
+
+                    // Restore velocity
+                    circle.body.setLinearVelocity(data.velocity);
+                    circle.body.circle = circle;
+                }
+
+                console.log(`🔄 Physics world recreated for new size: ${this.canvas.width}x${this.canvas.height}`);
             }
 
             startQueueProcessor() {
@@ -759,36 +699,48 @@
 
             processRecognitionQueue() {
                 const now = Date.now();
-                const queueTimeout = 15000; // 15 seconds - allows for backend refresh broadcasts every 3 seconds
-                const displayDelay = 1000; // 1 second delay before showing cloud (to accumulate multiple people)
+                const queueTimeout = 3000; // 3 seconds - fade out after not detected
+                const displayDelay = 1000; // 1 second delay before showing circle (to accumulate multiple people)
 
                 // Clean up people who have left the frame
                 for (const [personId, queueData] of this.recognitionQueue) {
                     if (now - queueData.lastSeen > queueTimeout) {
                         this.recognitionQueue.delete(personId);
-                        if (this.clouds.has(personId)) {
-                            this.removeCloud(personId);
+                        if (this.circles.has(personId)) {
+                            this.removeCircle(personId);
                         }
                     }
                 }
 
-                // Process all people in queue: create new clouds or refresh existing ones
+                // Process all people in queue: create new circles or refresh existing ones
                 for (const [personId, queueData] of this.recognitionQueue) {
-                    if (!this.clouds.has(personId)) {
-                        // Create new cloud if person has been in queue long enough
+                    if (!this.circles.has(personId)) {
+                        // Create new circle if person has been in queue long enough
                         if (now - queueData.firstSeen > displayDelay) {
-                            this.addCloud(queueData.user);
+                            this.addCircle(queueData.user);
                         }
                     } else {
-                        // Refresh existing cloud
-                        this.addCloud(queueData.user);
+                        // Refresh existing circle
+                        this.addCircle(queueData.user);
                     }
                 }
             }
 
             addToRecognitionQueue(user) {
                 const personId = user.person_id || user.personId;
+                const name = user.name || user.person_name;
                 const now = Date.now();
+
+                // Filter out unknown faces - don't add them to the queue
+                if (!personId || !name ||
+                    name.toLowerCase() === 'unknown' ||
+                    name.toLowerCase() === 'unrecognized' ||
+                    personId === 'unknown' ||
+                    personId === -1 ||
+                    personId === '-1') {
+                    console.log(`⚠️ Skipping unknown/unrecognized face: ${name || 'no name'} (ID: ${personId})`);
+                    return;
+                }
 
                 if (this.recognitionQueue.has(personId)) {
                     // Update existing queue entry
@@ -805,212 +757,239 @@
                 }
             }
 
-            async loadCloudImages() {
-                // Load SVG files directly from public/clouds folder
-                this.cloudImages = [];
-
-                for (let i = 1; i <= 5; i++) {
-                    const img = new Image();
-                    const cloudPath = `clouds/cloud${i}.svg`;
-
-                    try {
-                        // Load SVG as image
-                        const svgPromise = new Promise((resolve, reject) => {
-                            img.onload = () => resolve(img);
-                            img.onerror = () => reject(new Error(`Failed to load ${cloudPath}`));
-                            img.src = cloudPath;
-                        });
-
-                        const loadedImg = await svgPromise;
-                        this.cloudImages.push(loadedImg);
-                        console.log(`☁️ Loaded cloud${i}.svg`);
-                    } catch (error) {
-                        console.warn(`⚠️ Failed to load ${cloudPath}:`, error);
-                    }
-                }
-
-                this.cloudImagesLoaded = true;
-                console.log(`☁️ Loaded ${this.cloudImages.length} cloud SVG images`);
+            async loadCircleImage() {
+                // Load the glowing circle SVG
+                return new Promise((resolve, reject) => {
+                    this.circleImage = new Image();
+                    this.circleImage.onload = () => {
+                        this.circleImageLoaded = true;
+                        console.log('✨ Glowing circle SVG loaded successfully');
+                        resolve();
+                    };
+                    this.circleImage.onerror = (error) => {
+                        console.warn('⚠️ Failed to load glowing circle SVG, falling back to simple circles:', error);
+                        this.circleImageLoaded = false;
+                        resolve(); // Continue anyway with fallback
+                    };
+                    // Use the glowing circle SVG from public folder
+                    this.circleImage.src = 'Glowing Circle.svg';
+                });
             }
-
 
             startAnimation() {
                 const animate = () => {
-                    this.updateClouds();
-                    this.drawClouds();
+                    this.updatePhysics();
+                    this.updateCircles();
+                    this.drawCircles();
                     this.animationFrame = requestAnimationFrame(animate);
                 };
                 animate();
             }
 
-            updateClouds() {
-                const cloudsToRemove = [];
+            updatePhysics() {
+                // Step the physics world forward
+                if (this.world) {
+                    const timeStep = 1 / 60; // 60 FPS
+                    const velocityIterations = 8; // More iterations for better collision resolution
+                    const positionIterations = 3;
+                    this.world.step(timeStep, velocityIterations, positionIterations);
 
-                // Position clouds sequentially (one per frame) to avoid race conditions
-                let positionedCount = 0;
-                const maxPositionsPerFrame = 1; // Only position one cloud per frame
-                for (const [personId, cloud] of this.clouds) {
-                    if (cloud.needsPositioning && positionedCount < maxPositionsPerFrame) {
-                        console.log(`📍 Positioning cloud "${cloud.name}" (${positionedCount + 1}/${maxPositionsPerFrame} this frame)`);
-                        this.positionCloud(cloud);
-                        cloud.needsPositioning = false;
-                        positionedCount++;
+                    // Apply subtle random forces for ambient movement and jiggliness
+                    for (const [personId, circle] of this.circles) {
+                        if (circle.body && !circle.fadeOut) {
+                            const velocity = circle.body.getLinearVelocity();
+                            const currentSpeed = velocity.length();
+
+                            // Keep minimum speed to ensure continuous movement
+                            const minSpeed = 1.5; // Minimum speed for constant motion
+                            if (currentSpeed < minSpeed) {
+                                // Add force to maintain minimum movement
+                                const angle = Math.atan2(velocity.y, velocity.x) || Math.random() * Math.PI * 2;
+                                const boostForce = 3;
+                                circle.body.applyForceToCenter(planck.Vec2(
+                                    Math.cos(angle) * boostForce,
+                                    Math.sin(angle) * boostForce
+                                ));
+                            }
+
+                            // Add small random forces for ambient jiggling
+                            if (Math.random() < 0.15) { // 15% chance per frame for more activity
+                                const jiggleForce = 2.5;
+                                const fx = (Math.random() - 0.5) * jiggleForce;
+                                const fy = (Math.random() - 0.5) * jiggleForce;
+                                circle.body.applyForceToCenter(planck.Vec2(fx, fy));
+                            }
+
+                            // Apply gentle repulsion from edges to keep circles more centered
+                            const pos = circle.body.getPosition();
+                            const worldWidth = this.canvas.width / this.physicsScale;
+                            const worldHeight = this.canvas.height / this.physicsScale;
+                            const edgeDistance = 3; // Distance from edge to start repulsion
+                            const repulsionForce = 1;
+
+                            if (pos.x < edgeDistance) {
+                                circle.body.applyForceToCenter(planck.Vec2(repulsionForce, 0));
+                            } else if (pos.x > worldWidth - edgeDistance) {
+                                circle.body.applyForceToCenter(planck.Vec2(-repulsionForce, 0));
+                            }
+
+                            if (pos.y < edgeDistance) {
+                                circle.body.applyForceToCenter(planck.Vec2(0, repulsionForce));
+                            } else if (pos.y > worldHeight - edgeDistance) {
+                                circle.body.applyForceToCenter(planck.Vec2(0, -repulsionForce));
+                            }
+
+                            // Limit maximum velocity to prevent circles from going too fast
+                            const currentVelocity = circle.body.getLinearVelocity();
+                            const maxSpeed = 8;
+                            const speed = currentVelocity.length();
+                            if (speed > maxSpeed) {
+                                const scale = maxSpeed / speed;
+                                circle.body.setLinearVelocity(planck.Vec2(
+                                    currentVelocity.x * scale,
+                                    currentVelocity.y * scale
+                                ));
+                            }
+
+                            // Update circle position from physics body
+                            circle.setPhysicsPosition(
+                                pos.x * this.physicsScale,
+                                pos.y * this.physicsScale
+                            );
+                        }
                     }
                 }
+            }
 
-                // Update each cloud
-                for (const [personId, cloud] of this.clouds) {
-                    if (!cloud.update()) {
-                        cloudsToRemove.push(personId);
+            updateCircles() {
+                const circlesToRemove = [];
+
+                // Update each circle
+                for (const [personId, circle] of this.circles) {
+                    if (!circle.update()) {
+                        circlesToRemove.push(personId);
                         continue;
                     }
 
                     // Check for timeouts - only timeout if person is not in the recognition queue
-                    if (!cloud.fadeOut && !this.recognitionQueue.has(personId)) {
-                        cloud.startFadeOut();
+                    if (!circle.fadeOut && !this.recognitionQueue.has(personId)) {
+                        circle.startFadeOut();
                     }
                 }
 
-                // Remove faded out clouds
-                for (const personId of cloudsToRemove) {
-                    this.clouds.delete(personId);
-                }
-            }
-
-            positionCloud(newCloud) {
-                const padding = 100; // Increased minimum distance between clouds for better separation
-                const availableHeight = this.canvas.height - newCloud.height - 100; // Top and bottom padding
-                const layerHeight = availableHeight * (newCloud.layer.max - newCloud.layer.min);
-                const layerStart = availableHeight * newCloud.layer.min + 50;
-
-                // Try to find a non-overlapping position
-                let attempts = 0;
-                const maxAttempts = 20;
-                let foundPosition = false;
-
-                console.log(`🎯 Positioning cloud "${newCloud.name}" - looking for non-overlapping Y position`);
-                console.log(`   Available height: ${availableHeight}, Layer: ${layerStart} to ${layerStart + layerHeight}`);
-                console.log(`   Existing clouds: ${Array.from(this.clouds.values()).filter(c => c !== newCloud).map(c => `${c.name}@(${Math.round(c.x)},${Math.round(c.y)})`).join(', ')}`);
-
-                while (!foundPosition && attempts < maxAttempts) {
-                    // Try a random Y position within the layer
-                    const testY = layerStart + Math.random() * layerHeight;
-
-                    // Check for overlaps with existing clouds
-                    let hasOverlap = false;
-                    for (const [_, existingCloud] of this.clouds) {
-                        if (existingCloud === newCloud) continue; // Skip self
-
-                        // For clouds that still need positioning, use a conservative estimate
-                        let existingY = existingCloud.y;
-                        if (existingCloud.needsPositioning) {
-                            // Assume worst case - they might be positioned anywhere in their layer
-                            console.log(`   Skipping collision check with ${existingCloud.name} (still being positioned)`);
-                            continue;
-                        }
-
-                        const distance = this.getCloudDistance(
-                            { x: newCloud.x, y: testY, width: newCloud.width, height: newCloud.height },
-                            { x: existingCloud.x, y: existingCloud.y, width: existingCloud.width, height: existingCloud.height }
-                        );
-
-                        if (distance < padding) {
-                            hasOverlap = true;
-                            break;
-                        }
+                // Remove faded out circles and their physics bodies
+                for (const personId of circlesToRemove) {
+                    const circle = this.circles.get(personId);
+                    if (circle && circle.body) {
+                        this.world.destroyBody(circle.body);
                     }
-
-                    if (!hasOverlap) {
-                        newCloud.y = testY;
-                        newCloud.currentY = testY;
-                        foundPosition = true;
-                    }
-
-                    attempts++;
-                }
-
-                // If we couldn't find a non-overlapping position, use a fallback
-                if (!foundPosition) {
-                    // Spread clouds vertically across the available space
-                    const cloudCount = this.clouds.size;
-                    const spacing = availableHeight / Math.max(cloudCount, 1);
-                    const index = Array.from(this.clouds.values()).indexOf(newCloud);
-                    newCloud.y = 50 + (index * spacing);
-                    newCloud.currentY = newCloud.y;
+                    this.circles.delete(personId);
                 }
             }
 
-            getCloudDistance(cloud1, cloud2) {
-                // Calculate distance between cloud centers
-                const center1X = cloud1.x + cloud1.width / 2;
-                const center1Y = cloud1.y + cloud1.height / 2;
-                const center2X = cloud2.x + cloud2.width / 2;
-                const center2Y = cloud2.y + cloud2.height / 2;
+            // Physics handles positioning automatically
 
-                return Math.sqrt(
-                    Math.pow(center1X - center2X, 2) +
-                    Math.pow(center1Y - center2Y, 2)
-                );
-            }
-
-            drawClouds() {
+            drawCircles() {
                 // Clear canvas
                 this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
 
-                // Draw all clouds
-                for (const cloud of this.clouds.values()) {
-                    cloud.draw();
+                // Draw all circles
+                for (const circle of this.circles.values()) {
+                    circle.draw();
                 }
 
-                // Show waiting state if no clouds
-                if (this.clouds.size === 0) {
+                // Show waiting state if no circles
+                if (this.circles.size === 0) {
                     document.getElementById('waitingState').classList.remove('hidden');
                 } else {
                     document.getElementById('waitingState').classList.add('hidden');
                 }
             }
 
-            addCloud(user) {
+            addCircle(user) {
                 const personId = user.person_id || user.personId;
                 const name = user.name || user.person_name || 'Unknown';
                 const title = user.userTitle || user.title || null;
 
-                if (this.clouds.has(personId)) {
-                    // Update existing cloud - refresh its timer
-                    const cloud = this.clouds.get(personId);
-                    cloud.lastSeen = Date.now();
-                    cloud.fadeOut = false;
-                    cloud.alpha = 1;
+                // Double-check: Don't create circles for unknown faces
+                if (!personId ||
+                    name.toLowerCase() === 'unknown' ||
+                    name.toLowerCase() === 'unrecognized' ||
+                    personId === 'unknown' ||
+                    personId === -1 ||
+                    personId === '-1') {
+                    console.log(`⚠️ Preventing circle creation for unknown face: ${name}`);
+                    return;
+                }
+
+                if (this.circles.has(personId)) {
+                    // Update existing circle - refresh its timer
+                    const circle = this.circles.get(personId);
+                    circle.lastSeen = Date.now();
+                    circle.fadeOut = false;
+                    circle.alpha = 1;
                 } else {
-                    // Create new cloud for new person
-                    const color = this.settings.cloudColor;
-                    const startX = this.findStartingPosition();
+                    // Create new circle for new person
+                    const color = this.settings.circleColor;
+                    const circle = new Circle(name, title, color, this.canvas, this.circleImage, this.settings);
 
-                    const cloud = new Cloud(name, title, color, this.canvas, this.cloudImages, this.settings);
-                    cloud.x = startX;
-                    this.clouds.set(personId, cloud);
+                    // Add physics body for the circle
+                    this.addPhysicsBody(circle);
+
+                    this.circles.set(personId, circle);
+                    console.log(`⭕ Added circle for "${name}" (ID: ${personId})`);
                 }
             }
 
-            findStartingPosition() {
-                const existingClouds = Array.from(this.clouds.values());
+            addPhysicsBody(circle) {
+                if (!this.world) return;
 
-                if (existingClouds.length === 0) {
-                    return -200; // Standard starting position
-                }
+                // Random starting position from center of screen
+                const centerX = (this.canvas.width / 2) / this.physicsScale;
+                const centerY = (this.canvas.height / 2) / this.physicsScale;
 
-                // Find the leftmost cloud position
-                const leftmostX = Math.min(...existingClouds.map(cloud => cloud.x));
+                // Add some randomness to spawn position
+                const offsetRange = 1; // Smaller offset for closer spawning
+                const startX = centerX + (Math.random() - 0.5) * offsetRange;
+                const startY = centerY + (Math.random() - 0.5) * offsetRange;
 
-                // Start new clouds further left to avoid immediate collision
-                const spacing = 250; // Horizontal spacing between clouds
-                return Math.min(leftmostX - spacing, -200);
+                // Create physics body
+                circle.body = this.world.createBody({
+                    type: 'dynamic',
+                    position: planck.Vec2(startX, startY),
+                    linearDamping: 0.5, // Some damping but not too much
+                    angularDamping: 0.8, // Higher angular damping to prevent excessive spinning
+                    bullet: true // Better collision detection for fast moving objects
+                });
+
+                // Create circular fixture
+                const radius = circle.radius / this.physicsScale;
+                circle.body.createFixture(planck.Circle(radius), {
+                    density: 0.5, // Lighter density for more floaty movement
+                    friction: 0.1, // Low friction for smoother sliding
+                    restitution: 0.8 // Higher restitution for more bounciness!
+                });
+
+                // Give it a random initial velocity for fun movement
+                const initialSpeed = 3 + Math.random() * 3; // Random speed between 3-6
+                const angle = Math.random() * Math.PI * 2;
+                circle.body.setLinearVelocity(planck.Vec2(
+                    Math.cos(angle) * initialSpeed,
+                    Math.sin(angle) * initialSpeed
+                ));
+
+                // Add a small random spin for extra jiggliness
+                const spinSpeed = (Math.random() - 0.5) * 2;
+                circle.body.setAngularVelocity(spinSpeed);
+
+                // Store reference for interactive forces
+                circle.body.circle = circle;
             }
 
-            removeCloud(personId) {
-                if (this.clouds.has(personId)) {
-                    const cloud = this.clouds.get(personId);
-                    cloud.startFadeOut();
+            removeCircle(personId) {
+                if (this.circles.has(personId)) {
+                    const circle = this.circles.get(personId);
+                    circle.startFadeOut();
                 }
             }
 
@@ -1044,8 +1023,8 @@
                 if (urlParams.has('fontColor')) {
                     this.settings.fontColor = urlParams.get('fontColor');
                 }
-                if (urlParams.has('cloudColor')) {
-                    this.settings.cloudColor = urlParams.get('cloudColor');
+                if (urlParams.has('circleColor') || urlParams.has('cloudColor')) {
+                    this.settings.circleColor = urlParams.get('circleColor') || urlParams.get('cloudColor');
                 }
                 if (urlParams.has('timer')) {
                     this.settings.timer = parseInt(urlParams.get('timer')) || 5;
@@ -1079,7 +1058,7 @@
                             // Update settings with backend values
                             this.settings.backgroundColor = data.background_color || this.settings.backgroundColor;
                             this.settings.fontColor = data.font_color || this.settings.fontColor;
-                            this.settings.cloudColor = data.cloud_color || this.settings.cloudColor;
+                            this.settings.circleColor = data.cloud_color || data.circle_color || this.settings.circleColor; // Support both names
                             this.settings.timer = data.timer || this.settings.timer;
                             this.settings.useBackgroundImage = data.use_background_image || false;
                             this.settings.fontFamily = data.font_family || this.settings.fontFamily;

@@ -931,8 +931,8 @@ export function SettingsPage({ onSaveSettings }) {
               </Title>
 
               <NumberInput
-                label="Cloud Persistence Timer (seconds)"
-                description="How long name clouds remain visible after person leaves detection frame"
+                label="Circle Persistence Timer (seconds)"
+                description="How long name circles remain visible after person leaves detection frame"
                 placeholder="Enter timer value"
                 value={displayTimer}
                 onChange={setDisplayTimer}
@@ -1037,15 +1037,15 @@ export function SettingsPage({ onSaveSettings }) {
                 </Box>
               )}
 
-              <Divider my="sm" label="Cloud Settings" labelPosition="left" />
+              <Divider my="sm" label="Circle Settings" labelPosition="left" />
 
               <Group grow>
                 <Box>
                   <Text size="sm" fw={500} mb="xs">
-                    Cloud Color
+                    Circle Color
                   </Text>
                   <Text size="xs" c="dimmed" mb="sm">
-                    Color of the clouds that display user names
+                    Color of the circles that display user names
                   </Text>
                   <Group>
                     <ColorPicker
@@ -1068,7 +1068,7 @@ export function SettingsPage({ onSaveSettings }) {
                     Font Color
                   </Text>
                   <Text size="xs" c="dimmed" mb="sm">
-                    Color of the text displayed on clouds
+                    Color of the text displayed in circles
                   </Text>
                   <Group>
                     <ColorPicker
