@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState, useCallback } from 'react';
+import React, { useRef, useState, useCallback, useEffect } from 'react';
 import { io } from 'socket.io-client';
 import { SocketContext } from './SocketContext';
 
@@ -134,12 +134,26 @@ export const SocketProvider = ({ children }) => {
     return socketRef.current;
   }, []);
 
-  // Auto-connect on mount, cleanup on unmount
+  // Handle page unload to properly disconnect socket while preserving RTSP detection
   useEffect(() => {
-    return () => {
-      disconnect();
+    const handleBeforeUnload = () => {
+      // Disconnect socket so backend knows admin client is gone
+      // but don't send admin_stop=true signal
+      if (socketRef.current?.connected) {
+        console.log('🚪 Page unloading - disconnecting socket but preserving RTSP detection');
+        socketRef.current.disconnect();
+      }
     };
-  }, [disconnect]);
+
+    window.addEventListener('beforeunload', handleBeforeUnload);
+
+    // Cleanup on unmount
+    return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+      // Only disconnect if page is actually unloading, not just component unmounting
+      // This prevents disconnection during normal navigation within the app
+    };
+  }, []);
 
   const value = {
     isConnected,

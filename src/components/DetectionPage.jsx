@@ -667,27 +667,60 @@ export function DetectionPage({ onDetection }) {
     };
   }, [isConnected, on, handleBinaryFrameResult, handleDetectionResult, handleBatchRecognitionResult, handleIndividualRecognitionResult, actualCameraSource]);
 
-  // Cleanup on unmount
+  // Handle page unload/navigation to properly signal admin disconnect
+  useEffect(() => {
+    const handleBeforeUnload = () => {
+      console.log('🚪 Page unloading - signaling admin disconnect but preserving RTSP detection');
+      if (isConnected && isDetectingRef.current) {
+        // Signal non-admin stop to remove from detection_active but preserve RTSP
+        emit('stop_detection', { admin_stop: false });
+        console.log('📡 Signaled non-admin stop_detection before page unload');
+      }
+    };
+
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+    };
+  }, [isConnected, emit]);
+
+  // Cleanup on unmount - signal admin client disconnect but preserve RTSP detection
   useEffect(() => {
     return () => {
-      console.log('🧹 Component cleanup triggered - preserving detection state');
+      console.log('🧹 DetectionPage cleanup - signaling admin disconnect but preserving RTSP detection');
 
-      // IMPORTANT: Do NOT call disconnect() here to preserve detection state
-      // The SocketProvider will handle disconnection, but the backend detection should continue
+      // Signal to backend that admin client is disconnecting (removes from detection_active)
+      // but does NOT stop independent detection (admin_stop: false)
+      if (isConnected && isDetectingRef.current) {
+        emit('stop_detection', { admin_stop: false });
+        console.log('📡 Signaled non-admin stop_detection to backend');
+      }
 
-      // Only clean up local UI state
+      // Clean up local UI state and resources
       setIsVideoStarted(false);
       setIsDetecting(false);
 
-      // Clean up blob URL on unmount
+      // Stop browser webcam if active (doesn't affect RTSP)
+      if (browserWebcamStream) {
+        browserWebcamStream.getTracks().forEach(track => track.stop());
+        setBrowserWebcamStream(null);
+      }
+
+      // Clean up frame processing
+      if (frameProcessingIntervalRef.current) {
+        cancelAnimationFrame(frameProcessingIntervalRef.current);
+        frameProcessingIntervalRef.current = null;
+      }
+
+      // Clean up blob URL
       if (currentBlobUrlRef.current) {
         URL.revokeObjectURL(currentBlobUrlRef.current);
         currentBlobUrlRef.current = null;
       }
 
-      console.log('🔄 Detection should continue running independently for welcome screens');
+      console.log('🔄 Admin client cleanup complete, RTSP detection should continue for welcome screens');
     };
-  }, []); // Empty dependency array - only run on mount/unmount
+  }, [browserWebcamStream, isConnected, emit]); // Include dependencies
 
   // Note: Removed automatic stream cleanup on page unload to preserve detection state
   // Detection should persist across admin page refreshes for welcome screens

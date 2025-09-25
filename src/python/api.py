@@ -224,7 +224,8 @@ async def run_with_auto_retry(process_func, stream_id: str, source_type: str, ma
 # Recognition timing globals (inspired by original PyQt5 implementation)
 last_detected_name = ""
 last_recognition_time = 0.0
-recognition_cooldown = 30.0  # Seconds - prevents spam while allowing reasonable re-detection of same person
+recognition_cooldown = 2.0  # Seconds - reduced to 2s to work with welcome screen's 3s timeout
+# This ensures continuous display when someone remains in view (3s timeout > 2s cooldown)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -295,7 +296,8 @@ async def stop_detection(sid, data):
     is_admin_stop = data and data.get('admin_stop', False)
 
     print(f"🛑 Stopping face detection for client {sid} (admin_stop: {is_admin_stop})")
-    if sid in detection_active:
+    was_admin_client = sid in detection_active
+    if was_admin_client:
         del detection_active[sid]
 
     # Only stop independent detection if explicitly requested by admin
@@ -320,8 +322,19 @@ async def stop_detection(sid, data):
     elif len(welcome_screens) == 0 and len(detection_active) == 0:
         # Detection remains active in config - welcome screens can still connect and receive events
         print(f"🔄 No connected clients, but keeping detection active (persistent state: {get_independent_detection_active()}) for potential welcome screens")
+        # Reset cooldown to ensure welcome screens get immediate updates when they reconnect
+        global last_detected_name, last_recognition_time
+        last_detected_name = ""
+        last_recognition_time = 0.0
+        print(f"🔄 Reset recognition cooldown for continuous welcome screen updates")
     else:
         print(f"🔄 Keeping independent detection active (persistent state: {get_independent_detection_active()}) - {len(welcome_screens)} welcome screens, {len(detection_active)} admin clients")
+        # Also reset cooldown when admin disconnects but welcome screens remain
+        if not is_admin_stop and was_admin_client:
+            # Use the already declared global variables
+            last_detected_name = ""
+            last_recognition_time = 0.0
+            print(f"🔄 Admin disconnected - reset cooldown for continuous welcome screen updates")
 
     await sio.emit('detection_stopped', {'status': 'stopped'}, to=sid)
 
