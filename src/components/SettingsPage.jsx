@@ -1478,6 +1478,9 @@ export function SettingsPage({ onSaveSettings }) {
                                 <Text size="xs" c="dimmed">
                                   ID: {person.id}
                                 </Text>
+                                <Text size="xs" c="dimmed">
+                                  Cvent Registration Number: {person.cvent_registration_number}
+                                </Text>
                                 {person.title && (
                                   <Text size="xs" c="blue.6">
                                     {person.title}

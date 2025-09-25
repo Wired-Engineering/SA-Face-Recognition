@@ -71,12 +71,13 @@ class ApiService {
     return this.request('/api/people');
   }
 
-  async registerperson(personName, personTitle, imageData) {
+  async registerperson(personName, personTitle, personRegistration, imageData) {
     return this.request('/api/people/register', {
       method: 'POST',
       body: JSON.stringify({
         person_name: personName,
         person_title: personTitle,
+        person_registration: personRegistration,
         image_data: imageData,
       }),
     });

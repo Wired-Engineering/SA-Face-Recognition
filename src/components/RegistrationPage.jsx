@@ -22,6 +22,7 @@ import apiService, { imageUtils, webcamUtils } from '../services/api';
 export function RegistrationPage({ onRegister }) {
   const [personName, setpersonName] = useState('');
   const [personTitle, setpersonTitle] = useState('');
+  const [personRegistration, setpersonRegistration] = useState('');
   const [photoFile, setPhotoFile] = useState(null);
   const [capturedPhoto, setCapturedPhoto] = useState(null);
   const [isCapturing] = useState(false);
@@ -136,7 +137,7 @@ export function RegistrationPage({ onRegister }) {
   };
 
   const handleRegister = async () => {
-    if (!personName || !personTitle || (!photoFile && !capturedPhoto)) {
+    if (!personName || !personTitle || !personRegistration || (!photoFile && !capturedPhoto)) {
       setError('Please fill in all fields and provide a photo');
       return;
     }
@@ -156,7 +157,7 @@ export function RegistrationPage({ onRegister }) {
         imageData = capturedPhoto;
       }
 
-      const result = await apiService.registerperson(personName, personTitle, imageData);
+      const result = await apiService.registerperson(personName, personTitle, personRegistration, imageData);
 
       if (result.success) {
         setSuccess(`Person ${personName} registered successfully! ID: ${result.person_id}`);
@@ -170,6 +171,7 @@ export function RegistrationPage({ onRegister }) {
           id: result.person_id,
           name: personName,
           title: personTitle,
+          registration: personRegistration,
           photo: imageData,
         });
       } else {
@@ -285,6 +287,7 @@ export function RegistrationPage({ onRegister }) {
     // Reset all form state
     setpersonName('');
     setpersonTitle('');
+    setpersonRegistration('');
     setPhotoFile(null);
     setPhotoFileUrl(null);
     setCapturedPhoto(null);
@@ -353,6 +356,26 @@ export function RegistrationPage({ onRegister }) {
               placeholder="Enter title here"
               value={personTitle}
               onChange={(event) => setpersonTitle(event.currentTarget.value)}
+              required
+              styles={{
+                input: {
+                  backgroundColor: 'white',
+                  border: '1px solid rgb(206, 212, 218)',
+                  '&:focus': {
+                    borderColor: 'rgb(0, 36, 61)',
+                    outline: '2px solid rgb(0, 36, 61)',
+                    outlineOffset: '2px',
+                  },
+                },
+              }}
+            />
+
+            <TextInput
+              leftSection={<IconUser size={16} />}
+              label="Cvent Registration Number"
+              placeholder="Enter registration number here"
+              value={personRegistration}
+              onChange={(event) => setpersonRegistration(event.currentTarget.value)}
               required
               styles={{
                 input: {
@@ -503,7 +526,7 @@ export function RegistrationPage({ onRegister }) {
             )}
 
             {/* Validation Alert */}
-            {!error && !success && (!personName || !personTitle || (!photoFile && !capturedPhoto)) && (
+            {!error && !success && (!personName || !personTitle || !personRegistration || (!photoFile && !capturedPhoto)) && (
               <Alert
                 icon={<IconAlertCircle size={16} />}
                 color="orange"
@@ -521,7 +544,7 @@ export function RegistrationPage({ onRegister }) {
               fullWidth
               color="signature"
               style={{ marginTop: '1rem' }}
-              disabled={!personName || !personTitle || (!photoFile && !capturedPhoto) || loading}
+              disabled={!personName || !personTitle || !personRegistration || (!photoFile && !capturedPhoto) || loading}
             >
               {loading ? 'Registering...' : 'Register'}
             </Button>

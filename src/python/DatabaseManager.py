@@ -33,7 +33,7 @@ class MySqlite3Manager:
             print(e)
     def create_table_person(self):
         self.connect()
-        command = f'''CREATE TABLE PERSON(Id TEXT, Name TEXT, Title TEXT)'''
+        command = f'''CREATE TABLE PERSON(Id TEXT, Name TEXT, Title TEXT, Registration TEXT)'''
         try:
             self.cursor.execute(command)
             self.con.commit()
@@ -59,16 +59,16 @@ class MySqlite3Manager:
                 print('data entered in admin table')
             except Exception as e:
                 print(e)
-    def insert_into_person(self, id_, name, title):
+    def insert_into_person(self, id_, name, title, registration):
         self.connect()
         command = "SELECT * FROM PERSON WHERE (Id) = ? "
         self.cursor.execute(command, (id_,))
         rows = self.cursor.fetchall()
         if rows:
             return "Id already exist"
-        command_insertvalue = f"insert into PERSON (Id,Name,Title) values (?, ?, ?)"
+        command_insertvalue = f"insert into PERSON (Id,Name,Title,Registration) values (?, ?, ?, ?)"
         try:
-            self.cursor.execute(command_insertvalue, (id_,name,title))
+            self.cursor.execute(command_insertvalue, (id_,name,title,registration))
             self.con.commit()
             self.con.close()
             return "New person Added"
@@ -137,6 +137,17 @@ class MySqlite3Manager:
             row = rows[0]
             title = row[2]
             return title
+        return None
+    
+    def get_person_registration(self, id_):
+        self.connect()
+        command = "SELECT * FROM PERSON WHERE (Id) = ? "
+        self.cursor.execute(command, (id_,))
+        rows = self.cursor.fetchall()
+        if rows:
+            row = rows[0]
+            registration = row[3]
+            return registration
         return None
     
     def get_person_list(self):

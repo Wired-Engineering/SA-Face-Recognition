@@ -1019,6 +1019,7 @@ class LoginRequest(BaseModel):
 class personRegistration(BaseModel):
     person_name: str
     person_title: str
+    person_registration: str
     image_data: str
 
 class AdditionalPhotoUpload(BaseModel):
@@ -1117,6 +1118,7 @@ async def get_people():
         for person_id in person_ids:
             person_name = db.get_person_name(person_id)
             person_title = db.get_person_title(person_id)
+            person_registration = db.get_person_registration(person_id)
             if person_name:
                 # Check if reference image exists
                 image_path = f'images/{person_id}.png'
@@ -1143,6 +1145,7 @@ async def get_people():
                     'name': person_name,
                     'title': person_title or '',
                     'has_image': has_image,
+                    'cvent_registration_number': person_registration,
                     'image_path': image_url,
                     'total_photos': len(photo_files),
                     'additional_photos_count': len(additional_photos)
@@ -1191,7 +1194,7 @@ async def register_person(request: personRegistration):
             }
 
         # Save person to database (UUID ensures uniqueness, so no conflict possible)
-        db_result = db.insert_into_person(person_id, request.person_name, request.person_title)
+        db_result = db.insert_into_person(person_id, request.person_name, request.person_title, request.person_registration)
 
         if 'already exist' in db_result:
             # This should theoretically never happen with UUID, but handle it just in case
@@ -1212,6 +1215,7 @@ async def register_person(request: personRegistration):
             'success': True,
             'message': 'Person registered successfully',
             'person_id': person_id,
+            'person_registartion': request.person_registration,
             'person_name': request.person_name,
             'person_title': request.person_title
         }
