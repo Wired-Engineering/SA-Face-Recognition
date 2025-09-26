@@ -100,7 +100,7 @@ thread_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="rtsp_worker"
 # SocketIO globals
 detection_active: Dict[str, bool] = {}
 welcome_screens: Dict[str, bool] = {}  # Track welcome screen connections
-latest_recognition: Dict = {}  # Store latest recognition result
+# Removed latest_recognition - welcome screens use WebSocket events, not polling
 rtsp_streams: Dict[str, bool] = {}  # Track active RTSP streams
 ffmpeg_streams: Dict[str, bool] = {}  # Track active ffmpeg streams with overlays
 webcam_streams: Dict[str, bool] = {}  # Track active webcam streams
@@ -268,6 +268,9 @@ async def start_detection(sid, data):
         detection_session_id = f"session_{int(time.time())}"
         print(f"🎯 Starting independent detection session: {detection_session_id}")
 
+        # Notify face recognizer that detection is starting
+        face_recognizer.start_detection()
+
         # Reset recognition cooldown when starting new detection session
         global last_detected_name, last_recognition_time
         last_detected_name = ""
@@ -309,6 +312,9 @@ async def stop_detection(sid, data):
         set_independent_detection_active(False)
         detection_session_id = None
         print(f"🛑 Admin explicitly stopped detection - setting detection.active = false")
+
+        # Notify face recognizer that detection is stopping (processes queued operations)
+        face_recognizer.stop_detection()
 
         # Stop ALL streams when admin explicitly stops detection (not just background)
         rtsp_stream_count = len(rtsp_streams)
@@ -463,7 +469,6 @@ async def process_frame_binary(sid, data):
 
         # Broadcast recognition results to welcome screens
         for recognition_data in recognition_results:
-            latest_recognition.update(recognition_data)
             for welcome_screen_sid in welcome_screens.keys():
                 await sio.emit('recognition_result', recognition_data, to=welcome_screen_sid)
 
@@ -919,8 +924,6 @@ async def process_rtsp_with_ffmpeg_overlay(rtsp_url, output_queue, stop_event):
                                     }
                                     recognition_data = create_recognition_data(best_match, current_time)
 
-                                    # Store latest recognition
-                                    latest_recognition.update(recognition_data)
 
                                     # Broadcast to welcome screens via SocketIO
                                     await broadcast_recognition_to_welcome_screens(person_name, recognition_data, "RTSP")
@@ -1849,7 +1852,8 @@ async def detect_faces(request: FaceDetectionRequest):
                     highest_score = 0
 
                     # Compare with all known faces
-                    for person_id, ref_feature in face_recognizer.dictionary.items():
+                    dictionary_copy = dict(face_recognizer.dictionary)
+                    for person_id, ref_feature in dictionary_copy.items():
                         score = face_recognizer.face_recognizer.match(feature, ref_feature)
                         if score > face_recognizer.threshold and score > highest_score:
                             highest_score = score
@@ -1900,28 +1904,7 @@ async def detect_faces(request: FaceDetectionRequest):
             'faces': []
         }
 
-@app.get("/api/recognition/latest")
-async def get_latest_recognition():
-    """Get the latest face recognition result for welcome screens"""
-    try:
-        if latest_recognition:
-            return {
-                'success': True,
-                **latest_recognition
-            }
-        else:
-            return {
-                'success': True,
-                'user': None,
-                'timestamp': None
-            }
-    except Exception as e:
-        return {
-            'success': False,
-            'message': f'Failed to get latest recognition: {str(e)}',
-            'user': None,
-            'timestamp': None
-        }
+# Removed /api/recognition/latest endpoint - welcome screens use WebSocket events for real-time recognition
 
 # Camera management endpoints
 @app.get("/api/camera/settings")
@@ -2836,7 +2819,8 @@ async def process_webcam_with_overlay(output_queue, stream_id):
                             best_match = None
                             highest_score = 0
 
-                            for person_id, ref_feature in face_recognizer.dictionary.items():
+                            dictionary_copy = dict(face_recognizer.dictionary)
+                            for person_id, ref_feature in dictionary_copy.items():
                                 score = face_recognizer.face_recognizer.match(feature, ref_feature)
 
                                 if score > face_recognizer.threshold and score > highest_score:
@@ -2867,8 +2851,6 @@ async def process_webcam_with_overlay(output_queue, stream_id):
                                     # Create standardized recognition data
                                     recognition_data = create_recognition_data(best_match, current_time)
 
-                                    # Store latest recognition
-                                    latest_recognition.update(recognition_data)
 
                                     # Broadcast to welcome screens via SocketIO
                                     await broadcast_recognition_to_welcome_screens(person_name, recognition_data, "WEBCAM")

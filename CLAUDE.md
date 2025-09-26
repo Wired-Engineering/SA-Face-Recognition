@@ -124,7 +124,6 @@ node server.js
 
 ### Face Recognition
 - `POST /api/recognition/detect` - Process image for face detection
-- `GET /api/recognition/latest` - Get latest recognition result (for popup polling)
 
 ### Camera Settings
 - `GET /api/camera/settings` - Get camera configuration

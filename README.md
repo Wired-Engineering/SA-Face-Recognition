@@ -28,7 +28,7 @@ A face recognition application for welcoming guests into an area - built with Re
 
 ### Prerequisites
 
-- **Node.js** 18+ and **ppnpm**
+- **Node.js** 18+ and **pnpm**
 - **Python** 3.8+ < 3.12 with pip
 - **Webcam** or RTSP camera access
 
@@ -38,7 +38,7 @@ A face recognition application for welcoming guests into an area - built with Re
    ```bash
    git clone <repository>
    cd SA-Face-Recognition
-   ppnpm install
+   pnpm install
    ```
 
 2. **Install Python dependencies**

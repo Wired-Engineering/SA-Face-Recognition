@@ -569,7 +569,6 @@
                 });
                 this.setupKioskMode();
                 this.connectSocketIO();
-                this.setupFallbackPolling();
                 this.setupMessageListener();
                 this.startQueueProcessor();
 
@@ -1373,25 +1372,8 @@
                 }
             }
 
-            setupFallbackPolling() {
-                setInterval(async () => {
-                    if (this.isConnected) return; // Skip if SocketIO is working
-
-                    try {
-                        // Use dynamic API base for HTTP API
-                        const apiUrl = this.apiBase + '/api/recognition/latest';
-                        const response = await fetch(apiUrl);
-                        if (response.ok) {
-                            const data = await response.json();
-                            if (data.user && data.timestamp) {
-                                this.addToRecognitionQueue(data.user);
-                            }
-                        }
-                    } catch (error) {
-                        console.error('Failed to poll recognition data:', error);
-                    }
-                }, 1000);
-            }
+            // Removed polling - Welcome popup should only use WebSocket events for real-time recognition
+            // The api/recognition/latest endpoint is incorrect for this use case
 
             updateConnectionStatus(connected) {
                 this.isConnected = connected;

@@ -18,9 +18,22 @@ import yaml
 import json
 import numpy as np
 import logging
+import threading
 from typing import Optional, Tuple, List, Dict, Any
 from dataclasses import dataclass
 from pathlib import Path
+from queue import Queue
+from enum import Enum
+
+class DatabaseOperation(Enum):
+    """Types of database operations that can be queued"""
+    REBUILD = "rebuild"
+
+@dataclass
+class QueuedOperation:
+    """Represents a queued database operation"""
+    operation: DatabaseOperation
+    data: Dict[str, Any] = None
 
 # Import SCRFD+ArcFace+FAISS components
 from models.scrfd import SCRFD
@@ -74,6 +87,11 @@ class SCRFDFaceRecognizer:
         self.detection_times = []
         self.recognition_times = []
         self.last_processed_time = time.time()
+
+        # Queue system for database operations during detection
+        self.operation_queue = Queue()
+        self.detection_active = False
+        self.queue_lock = threading.Lock()
 
         # Load configuration from existing config.yaml
         self._load_config()
@@ -341,93 +359,14 @@ class SCRFDFaceRecognizer:
     def create_features(self):
         """
         Create/update face features database from existing images directory
-        This is called after every registration to add new faces to FAISS
+        This method now uses queuing to avoid conflicts during detection
         """
-        print("🔄 Updating face database with new registrations...")
-
-        # Clear and rebuild the database to ensure all faces are included
-        # This is necessary because new images may have been added
-        self.face_database = FaceDatabase(
-            embedding_size=512,
-            db_path=str(Path("system/faiss_database")),
-            max_workers=4
-        )
-        self.person_id_to_name = {}
-
-        print("🔄 Processing all face images in database...")
-
-        # Process images from existing directory structure
-        images_dir = Path("images")
-        if not images_dir.exists():
-            print(f"⚠️ Images directory not found: {images_dir}")
-            return
-
-        processed_count = 0
-        failed_count = 0
-
-        # Process all face images (PNG, JPG)
-        for image_file in images_dir.glob("*.png"):
-            if image_file.name.startswith('.'):
-                continue
-
-            try:
-                # Load image
-                image = cv2.imread(str(image_file))
-                if image is None:
-                    print(f"⚠️ Could not load {image_file}")
-                    failed_count += 1
-                    continue
-
-                # Detect face using SCRFD
-                face_detections = self.detect_faces(image)
-
-                if not face_detections:
-                    print(f"⚠️ No face detected in {image_file}")
-                    failed_count += 1
-                    continue
-
-                # Use best quality face if multiple detected
-                if len(face_detections) > 1:
-                    face_detections = [max(face_detections, key=lambda f: f.quality_score)]
-
-                detection = face_detections[0]
-
-                # Extract ArcFace embedding
-                if detection.landmarks is not None:
-                    embedding = self.recognizer.get_embedding(
-                        image,
-                        detection.landmarks,
-                        normalized=True
-                    )
-
-                    # Use filename as person name (compatible with existing system)
-                    person_name = image_file.stem
-                    person_id = person_name  # Simple mapping for now
-
-                    # Add to FAISS database
-                    self.face_database.add_face(embedding, person_name)
-                    self.person_id_to_name[person_id] = person_name
-
-                    processed_count += 1
-                    print(f"✅ Processed {person_name} (quality: {detection.quality_score:.2f}, conf: {detection.confidence:.2f})")
-                else:
-                    print(f"❌ No landmarks detected in {image_file}")
-                    failed_count += 1
-
-            except Exception as e:
-                print(f"❌ Error processing {image_file}: {e}")
-                failed_count += 1
-
-        print(f"🎯 Database migration complete: {processed_count} faces added, {failed_count} failed")
-
-        # Save FAISS database and person mapping
-        if processed_count > 0:
-            try:
-                self.face_database.save()
-                self._save_person_mapping()
-                print("💾 FAISS database saved successfully")
-            except Exception as e:
-                print(f"❌ Failed to save database: {e}")
+        # Use the queue system to handle database rebuilds safely
+        queued = self.queue_rebuild()
+        if queued:
+            print("📋 Database rebuild queued - will process when detection stops")
+        else:
+            print("✅ Database rebuild completed immediately")
 
     def _name_to_person_id(self, name: str) -> str:
         """Convert name to person_id (API compatibility)"""
@@ -525,7 +464,9 @@ class SCRFDFaceRecognizer:
 
         # Collect all matches above threshold
         matches = {}
-        for person_id, ref_feature in self.dictionary.items():
+        # Create a copy to avoid "dictionary changed size during iteration" errors
+        dictionary_copy = dict(self.dictionary)
+        for person_id, ref_feature in dictionary_copy.items():
             score = self.match(feature, ref_feature)
 
             # Extract base person ID (handle multiple photos like person_id%1, person_id%2)
@@ -587,6 +528,17 @@ class SCRFDFaceRecognizer:
 
         return features, face_detections
 
+    def extract_features(self, image: np.ndarray) -> Tuple[List[np.ndarray], List[FaceDetection]]:
+        """
+        Extract features from faces in image - compatibility method for existing API
+        This is an alias for recognize_face to maintain API compatibility
+        Args:
+            image: Input image
+        Returns:
+            Tuple of (features, face_detections)
+        """
+        return self.recognize_face(image)
+
     def detect(self, image: np.ndarray) -> List[str]:
         """Compatibility method for existing detect() calls"""
         results = self.detect_and_recognize(image)
@@ -602,6 +554,117 @@ class SCRFDFaceRecognizer:
             self.max_faces = kwargs['max_faces']
 
         print(f"✅ SCRFD configuration updated: detection_confidence={self.detection_confidence}, max_faces={self.max_faces}")
+
+    def start_detection(self):
+        """Mark detection as active and process any queued operations from previous session"""
+        with self.queue_lock:
+            self.detection_active = True
+            print("🔴 Detection started - database operations will be queued")
+
+    def stop_detection(self):
+        """Mark detection as inactive and process all queued operations"""
+        with self.queue_lock:
+            self.detection_active = False
+            print("🟢 Detection stopped - processing queued database operations")
+
+            # Process all queued operations
+            operations_processed = 0
+            while not self.operation_queue.empty():
+                try:
+                    operation = self.operation_queue.get_nowait()
+                    if operation.operation == DatabaseOperation.REBUILD:
+                        print(f"🔄 Processing queued database rebuild...")
+                        self._rebuild_features_internal()
+                        operations_processed += 1
+                    self.operation_queue.task_done()
+                except Exception as e:
+                    print(f"⚠️ Error processing queued operation: {e}")
+
+            if operations_processed > 0:
+                print(f"✅ Processed {operations_processed} queued operations")
+            else:
+                print("ℹ️ No queued operations to process")
+
+    def queue_rebuild(self):
+        """Queue a database rebuild operation if detection is active"""
+        with self.queue_lock:
+            if self.detection_active:
+                self.operation_queue.put(QueuedOperation(DatabaseOperation.REBUILD))
+                print("📋 Database rebuild queued (detection active)")
+                return True
+            else:
+                # Detection not active, rebuild immediately
+                self._rebuild_features_internal()
+                return False
+
+    def _rebuild_features_internal(self):
+        """Internal method to rebuild features - called by create_features() and queue processor"""
+        print("🔄 Updating face database with new registrations...")
+
+        # Clear and rebuild the database to ensure all faces are included
+        self.face_database = FaceDatabase(
+            embedding_size=512,
+            db_path=str(Path("system/faiss_database")),
+            max_workers=4
+        )
+        self.person_id_to_name = {}
+
+        print("🔄 Processing all face images in database...")
+
+        # Process images from existing directory structure
+        images_dir = Path("images")
+        if not images_dir.exists():
+            print(f"⚠️ Images directory not found: {images_dir}")
+            return
+
+        processed_count = 0
+        failed_count = 0
+
+        # Process all face images (PNG, JPG)
+        for image_file in images_dir.glob("*.png"):
+            if image_file.name.startswith('.'):
+                continue
+
+            try:
+                # Extract person ID from filename (before first . or %)
+                person_id = image_file.stem.split('%')[0]
+
+                # Load and process image
+                image = cv2.imread(str(image_file))
+                if image is None:
+                    print(f"⚠️ Could not load image: {image_file}")
+                    failed_count += 1
+                    continue
+
+                # Extract face features using ArcFace
+                features, detections = self.extract_features(image)
+
+                if len(features) > 0 and len(detections) > 0:
+                    # Use the best quality face detection
+                    best_idx = max(range(len(detections)), key=lambda i: detections[i].quality_score)
+                    feature = features[best_idx]
+
+                    # Generate a unique photo identifier
+                    photo_id = f"{person_id}%{image_file.stem.split('%')[1] if '%' in image_file.stem else '1'}"
+
+                    # Add to database
+                    self.face_database.add_face(feature, photo_id)
+                    self.person_id_to_name[photo_id] = person_id
+                    processed_count += 1
+
+                else:
+                    print(f"⚠️ No face detected in {image_file}")
+                    failed_count += 1
+
+            except Exception as e:
+                print(f"⚠️ Error processing {image_file}: {e}")
+                failed_count += 1
+
+        print(f"✅ Database updated: {processed_count} faces processed, {failed_count} failed")
+
+        # FAISS index is ready to use immediately after adding embeddings
+        if processed_count > 0:
+            print("✅ FAISS index ready for fast similarity search")
 
     def get_performance_stats(self) -> Dict[str, Any]:
         """Get performance statistics (API compatibility)"""
