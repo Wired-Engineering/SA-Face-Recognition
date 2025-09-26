@@ -1,10 +1,12 @@
 from fastapi import FastAPI, HTTPException, File, UploadFile, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
+from sse_starlette.sse import EventSourceResponse
 from pydantic import BaseModel
 import uvicorn
 import base64
 import cv2
+import json
 import numpy as np
 from PIL import Image
 from io import BytesIO
@@ -26,6 +28,7 @@ from DatabaseManager import MySqlite3Manager
 from utils import get_current_datetime_other_format
 from SCRFD_Face_recognizer import SCRFDFaceRecognizer as FaceRecognizer
 from config_manager import config_manager
+from services.csv_processor import process_csv
 
 # Lifespan manager for startup and shutdown
 @asynccontextmanager
@@ -1242,6 +1245,407 @@ async def register_person(request: personRegistration):
             'success': False,
             'message': f'Registration failed: {str(e)}'
         }
+
+async def process_csv_with_progress_streaming(csv_content: str, face_recognizer):
+    """Process CSV with progress callbacks - no async context managers"""
+    import aiohttp
+    import json
+    from services.csv_processor import CSVProcessor
+
+    # Create session and processor outside of any context manager
+    session = aiohttp.ClientSession()
+    processor = CSVProcessor(face_recognizer, external_session=True)
+    processor.session = session
+
+    try:
+        # Parse CSV
+        yield f"event: progress\ndata: {json.dumps({'stage': 'parsing', 'message': 'Parsing CSV file...'})}\n\n"
+
+        rows, error = processor.parse_csv_content(csv_content)
+        if error:
+            yield f"event: error\ndata: {json.dumps({'error': error})}\n\n"
+            return
+
+        yield f"event: progress\ndata: {json.dumps({'stage': 'downloading', 'message': f'Downloading images for {len(rows)} users...'})}\n\n"
+
+        # Process each row
+        processed_rows = []
+        total_rows = len(rows)
+
+        for idx, row in enumerate(rows, 1):
+            # Send progress for each user
+            progress_data = {
+                "stage": "downloading",
+                "message": f"Downloading image for {row['full_name']}...",
+                "total": total_rows,
+                "current": idx,
+                "percentage": int((idx / total_rows) * 50)  # First 50% for downloads
+            }
+            yield f"event: progress\ndata: {json.dumps(progress_data)}\n\n"
+
+            row_result = {
+                "row_number": row["row_number"],
+                "full_name": row["full_name"],
+                "title": row["title"],
+                "registration_number": row["registration_number"],
+                "image_downloaded": False,
+                "image_data": None,
+                "error": None
+            }
+
+            # Download image if URL provided
+            if row["image_url"]:
+                image_data, error = await processor.download_image(row["image_url"])
+                if error:
+                    row_result["error"] = error
+                else:
+                    row_result["image_downloaded"] = True
+                    row_result["image_data"] = image_data
+
+            processed_rows.append(row_result)
+
+        # Now process registrations
+        yield f"event: progress\ndata: {json.dumps({'stage': 'registering', 'message': 'Starting user registrations...'})}\n\n"
+
+        successful_registrations = []
+        failed_registrations = []
+        skipped_no_image = []
+
+        for idx, row in enumerate(processed_rows, 1):
+            # Send registration progress
+            progress_data = {
+                "stage": "registering",
+                "message": f"Registering {row['full_name']}...",
+                "total": len(processed_rows),
+                "current": idx,
+                "percentage": 50 + int((idx / len(processed_rows)) * 50)  # Second 50% for registration
+            }
+            yield f"event: progress\ndata: {json.dumps(progress_data)}\n\n"
+
+            try:
+                # Skip users without image data
+                if not row['image_data']:
+                    skipped_no_image.append({
+                        'row_number': row['row_number'],
+                        'name': row['full_name'],
+                        'title': row['title'],
+                        'registration_number': row['registration_number'],
+                        'reason': 'No image URL provided or image download failed'
+                    })
+                    continue
+
+                # Generate unique ID for person
+                person_id = str(uuid.uuid4())
+
+                # Convert bytes to base64 if needed
+                if isinstance(row['image_data'], bytes):
+                    image_data_b64 = base64.b64encode(row['image_data']).decode('utf-8')
+                else:
+                    image_data_b64 = row['image_data']
+
+                # Decode image
+                image_bytes = base64.b64decode(image_data_b64) if isinstance(image_data_b64, str) else row['image_data']
+                image = Image.open(BytesIO(image_bytes))
+
+                # Convert to OpenCV format
+                image_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+
+                # Detect faces
+                _, faces = face_recognizer.recognize_face(image_cv, f"{person_id}.png")
+
+                if faces is None or len(faces) == 0:
+                    failed_registrations.append({
+                        'row_number': row['row_number'],
+                        'name': row['full_name'],
+                        'title': row['title'],
+                        'registration_number': row['registration_number'],
+                        'error': 'No face detected in image'
+                    })
+                    continue
+
+                if len(faces) > 1:
+                    failed_registrations.append({
+                        'row_number': row['row_number'],
+                        'name': row['full_name'],
+                        'title': row['title'],
+                        'registration_number': row['registration_number'],
+                        'error': 'Multiple faces detected in image'
+                    })
+                    continue
+
+                # Save image
+                os.makedirs('images', exist_ok=True)
+                image_path = f'images/{person_id}.png'
+                cv2.imwrite(image_path, image_cv)
+
+                # Insert person to database
+                db_result = db.insert_into_person(
+                    person_id,
+                    row['full_name'],
+                    row['title'],
+                    row['registration_number']
+                )
+
+                if 'already exist' in db_result:
+                    failed_registrations.append({
+                        'row_number': row['row_number'],
+                        'name': row['full_name'],
+                        'title': row['title'],
+                        'registration_number': row['registration_number'],
+                        'error': 'Person already exists'
+                    })
+                    continue
+
+                successful_registrations.append({
+                    'row_number': row['row_number'],
+                    'person_id': person_id,
+                    'name': row['full_name'],
+                    'title': row['title'],
+                    'registration_number': row['registration_number'],
+                    'has_image': True
+                })
+
+            except Exception as e:
+                failed_registrations.append({
+                    'row_number': row['row_number'],
+                    'name': row['full_name'],
+                    'title': row.get('title', ''),
+                    'registration_number': row.get('registration_number', ''),
+                    'error': str(e)
+                })
+
+        # Recreate features dictionary if any successful registrations
+        if successful_registrations:
+            face_recognizer.create_features()
+
+        # Send final results
+        final_data = {
+            'success': True,
+            'total_rows': len(rows),
+            'successful_registrations': len(successful_registrations),
+            'failed_registrations': len(failed_registrations),
+            'skipped_no_image': len(skipped_no_image),
+            'details': {
+                'successful': successful_registrations,
+                'failed': failed_registrations,
+                'skipped': skipped_no_image
+            }
+        }
+        yield f"event: complete\ndata: {json.dumps(final_data)}\n\n"
+
+    finally:
+        # Always close session
+        await session.close()
+
+@app.post("/api/people/upload-csv-stream")
+async def upload_csv_bulk_registration_stream(file: UploadFile = File(...)):
+    """Process CSV file for bulk person registration with progress streaming"""
+
+    # Validate file is CSV
+    if not file.filename.endswith('.csv'):
+        async def error_generator():
+            yield f"event: error\ndata: {json.dumps({'error': 'File must be a CSV file'})}\n\n"
+        return EventSourceResponse(error_generator())
+
+    # Read CSV content before creating the generator
+    try:
+        content = await file.read()
+        csv_content = content.decode('utf-8')
+    except Exception as e:
+        async def error_generator():
+            yield f"event: error\ndata: {json.dumps({'error': f'Failed to read file: {str(e)}'})}\n\n"
+        return EventSourceResponse(error_generator())
+
+    # Create the streaming generator with the CSV content
+    async def generate_progress():
+        try:
+            # Process CSV with progress streaming
+            async for event in process_csv_with_progress_streaming(csv_content, face_recognizer):
+                yield event
+
+        except Exception as e:
+            import traceback
+            error_details = f'Failed to process CSV: {str(e)}\nTraceback: {traceback.format_exc()}'
+            print(f"CSV Processing Error: {error_details}")
+            yield f"event: error\ndata: {json.dumps({'error': f'Failed to process CSV: {str(e)}'})}\n\n"
+
+    return EventSourceResponse(generate_progress())
+
+@app.get("/api/test-stream")
+async def test_stream():
+    """Simple test streaming endpoint"""
+    async def test_generator():
+        yield f"event: test\ndata: {json.dumps({'message': 'Hello from stream!'})}\n\n"
+
+    return EventSourceResponse(test_generator())
+
+@app.post("/api/people/upload-csv")
+async def upload_csv_bulk_registration(file: UploadFile = File(...)):
+    """Process CSV file for bulk person registration"""
+    try:
+        # Validate file is CSV
+        if not file.filename.endswith('.csv'):
+            return {
+                'success': False,
+                'error': 'File must be a CSV file'
+            }
+
+        # Read CSV content
+        content = await file.read()
+        csv_content = content.decode('utf-8')
+
+        # Process CSV with face recognizer for automatic face cropping
+        result = await process_csv(csv_content, face_recognizer)
+
+        if not result['success']:
+            return {
+                'success': False,
+                'error': result.get('error', 'Failed to process CSV'),
+                'required_columns': result.get('required_columns', [])
+            }
+
+        # Process each row and register people
+        successful_registrations = []
+        failed_registrations = []
+        skipped_no_image = []
+
+        total_to_process = len(result['processed_rows'])
+
+        for idx, row in enumerate(result['processed_rows'], 1):
+            try:
+                # Skip users without image data
+                if not row['image_data']:
+                    skipped_no_image.append({
+                        'row_number': row['row_number'],
+                        'name': row['full_name'],
+                        'title': row['title'],
+                        'registration_number': row['registration_number'],
+                        'reason': 'No image URL provided or image download failed'
+                    })
+                    continue
+
+                # Generate unique ID for person
+                person_id = str(uuid.uuid4())
+
+                # Convert bytes to base64 if needed
+                if isinstance(row['image_data'], bytes):
+                    image_data_b64 = base64.b64encode(row['image_data']).decode('utf-8')
+                else:
+                    image_data_b64 = row['image_data']
+
+                # Decode image
+                image_bytes = base64.b64decode(image_data_b64) if isinstance(image_data_b64, str) else row['image_data']
+                image = Image.open(BytesIO(image_bytes))
+
+                # Convert to OpenCV format
+                image_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+
+                # Detect faces
+                _, faces = face_recognizer.recognize_face(image_cv, f"{person_id}.png")
+
+                if faces is None or len(faces) == 0:
+                    failed_registrations.append({
+                        'row_number': row['row_number'],
+                        'name': row['full_name'],
+                        'title': row['title'],
+                        'registration_number': row['registration_number'],
+                        'error': 'No face detected in image'
+                    })
+                    continue
+
+                if len(faces) > 1:
+                    failed_registrations.append({
+                        'row_number': row['row_number'],
+                        'name': row['full_name'],
+                        'title': row['title'],
+                        'registration_number': row['registration_number'],
+                        'error': 'Multiple faces detected in image'
+                    })
+                    continue
+
+                # Save image
+                os.makedirs('images', exist_ok=True)
+                image_path = f'images/{person_id}.png'
+                cv2.imwrite(image_path, image_cv)
+
+                # Insert person to database
+                db_result = db.insert_into_person(
+                    person_id,
+                    row['full_name'],
+                    row['title'],
+                    row['registration_number']
+                )
+
+                if 'already exist' in db_result:
+                    failed_registrations.append({
+                        'row_number': row['row_number'],
+                        'name': row['full_name'],
+                        'title': row['title'],
+                        'registration_number': row['registration_number'],
+                        'error': 'Person already exists'
+                    })
+                    continue
+
+                successful_registrations.append({
+                    'row_number': row['row_number'],
+                    'person_id': person_id,
+                    'name': row['full_name'],
+                    'title': row['title'],
+                    'registration_number': row['registration_number'],
+                    'has_image': True
+                })
+
+            except Exception as e:
+                failed_registrations.append({
+                    'row_number': row['row_number'],
+                    'name': row['full_name'],
+                    'title': row.get('title', ''),
+                    'registration_number': row.get('registration_number', ''),
+                    'error': str(e)
+                })
+
+        # Recreate features dictionary if any successful registrations
+        if successful_registrations:
+            face_recognizer.create_features()
+
+        return {
+            'success': True,
+            'total_rows': result['total_rows'],
+            'successful_registrations': len(successful_registrations),
+            'failed_registrations': len(failed_registrations),
+            'skipped_no_image': len(skipped_no_image),
+            'details': {
+                'successful': successful_registrations,
+                'failed': failed_registrations,
+                'skipped': skipped_no_image
+            }
+        }
+
+    except Exception as e:
+        return {
+            'success': False,
+            'error': f'Failed to process CSV: {str(e)}'
+        }
+
+@app.get("/api/people/csv-requirements")
+async def get_csv_requirements():
+    """Get the required CSV column headers for bulk upload"""
+    return {
+        'success': True,
+        'required_columns': [
+            "First_Name",
+            "Last_Name",
+            "Title",
+            "Registration_Confirmation_Number",
+            "Image_URL"
+        ],
+        'notes': [
+            "First_Name and Last_Name will be combined into full name",
+            "Image_URL is optional but recommended for face recognition",
+            "CSV must have headers in the first row",
+            "Empty Image_URL fields are allowed"
+        ]
+    }
 
 @app.post("/api/people/{person_id}/add-photo")
 async def add_additional_photo(person_id: str, request: AdditionalPhotoUpload):

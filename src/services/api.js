@@ -92,6 +92,130 @@ class ApiService {
     });
   }
 
+  async uploadCSV(file) {
+    const formData = new FormData();
+    formData.append('file', file);
+
+    return this.request('/api/people/upload-csv', {
+      method: 'POST',
+      body: formData,
+      headers: {}, // Empty headers to let browser set Content-Type with boundary
+    });
+  }
+
+  uploadCSVStream(file, onProgress, onComplete, onError) {
+    // Note: EventSource cannot handle POST requests with file uploads
+    // We need to use a different approach: upload file first, then stream progress
+
+    // For now, let's try a hybrid approach: use fetch for the upload with manual SSE parsing
+    const formData = new FormData();
+    formData.append('file', file);
+
+    // Connect directly to FastAPI server for streaming (bypassing Vite proxy which may not handle SSE properly)
+    const streamURL = window.location.hostname === 'localhost'
+      ? 'http://localhost:8000/api/people/upload-csv-stream'
+      : `${this.baseURL}/api/people/upload-csv-stream`;
+
+
+    // We need to use fetch to handle file upload with streaming response
+    fetch(streamURL, {
+      method: 'POST',
+      body: formData,
+    })
+    .then(response => {
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      const processChunk = ({ done, value }) => {
+        if (done) {
+          return;
+        }
+
+        const chunk = decoder.decode(value, { stream: true });
+        buffer += chunk;
+
+        // Process complete SSE events (separated by double newline - handle both \r\n\r\n and \n\n)
+        const separator = buffer.includes('\r\n\r\n') ? '\r\n\r\n' : '\n\n';
+
+        while (buffer.includes(separator)) {
+          const endIndex = buffer.indexOf(separator);
+          const eventBlock = buffer.substring(0, endIndex);
+          buffer = buffer.substring(endIndex + separator.length);
+
+          if (eventBlock.trim()) {
+            this.parseSSEEvent(eventBlock, onProgress, onComplete, onError);
+          }
+        }
+
+        reader.read().then(processChunk);
+      };
+
+      reader.read().then(processChunk);
+    })
+    .catch(error => {
+      onError?.({ error: error.message });
+    });
+  }
+
+  parseSSEEvent(eventBlock, onProgress, onComplete, onError) {
+    // Handle both \r\n and \n line endings
+    const lines = eventBlock.split(/\r?\n/);
+    let eventType = null;
+    let eventData = null;
+
+    lines.forEach(line => {
+      const trimmedLine = line.trim();
+
+      // Handle "data: event: progress" format
+      if (trimmedLine.startsWith('data: event: ')) {
+        eventType = trimmedLine.slice(13).trim(); // Remove "data: event: "
+      }
+      // Handle "data: data: {...}" format
+      else if (trimmedLine.startsWith('data: data: ')) {
+        try {
+          const jsonString = trimmedLine.slice(12); // Remove "data: data: "
+          eventData = JSON.parse(jsonString);
+        } catch (e) {
+          console.error('Error parsing SSE data:', e, trimmedLine);
+        }
+      }
+      // Handle standard SSE format (fallback)
+      else if (trimmedLine.startsWith('event: ')) {
+        eventType = trimmedLine.slice(7).trim();
+      } else if (trimmedLine.startsWith('data: ')) {
+        try {
+          const jsonString = trimmedLine.slice(6);
+          eventData = JSON.parse(jsonString);
+        } catch {
+          // Ignore non-JSON data lines
+        }
+      }
+    });
+
+    if (eventType && eventData) {
+      switch (eventType) {
+        case 'progress':
+          onProgress?.(eventData);
+          break;
+        case 'complete':
+          onComplete?.(eventData);
+          break;
+        case 'error':
+          onError?.(eventData);
+          break;
+      }
+    }
+  }
+
+  async getCSVRequirements() {
+    return this.request('/api/people/csv-requirements');
+  }
+
   async deleteperson(personId) {
     return this.request(`/api/people/${personId}`, {
       method: 'DELETE',

@@ -14,9 +14,14 @@ import {
   Divider,
   List,
   ThemeIcon,
+  Badge,
+  Collapse,
+  ScrollArea,
+  ActionIcon,
+  Progress,
 } from '@mantine/core';
 import { useDisclosure } from '@mantine/hooks';
-import { IconUser, IconCamera, IconUpload, IconUserPlus, IconAlertCircle, IconCheck, IconPhoto, IconSun, IconEye, IconDeviceDesktop } from '@tabler/icons-react';
+import { IconUser, IconCamera, IconUpload, IconUserPlus, IconAlertCircle, IconCheck, IconPhoto, IconSun, IconEye, IconFileUpload, IconInfoCircle, IconUserCheck, IconUserX, IconUserOff, IconChevronDown, IconChevronUp, IconDownload } from '@tabler/icons-react';
 import apiService, { imageUtils, webcamUtils } from '../services/api';
 
 export function RegistrationPage({ onRegister }) {
@@ -24,6 +29,7 @@ export function RegistrationPage({ onRegister }) {
   const [personTitle, setpersonTitle] = useState('');
   const [personRegistration, setpersonRegistration] = useState('');
   const [photoFile, setPhotoFile] = useState(null);
+  const [csvFile, setCsvFile] = useState(null);
   const [capturedPhoto, setCapturedPhoto] = useState(null);
   const [isCapturing] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -44,12 +50,21 @@ export function RegistrationPage({ onRegister }) {
   const [additionalStream, setAdditionalStream] = useState(null);
   const additionalVideoRef = useRef(null);
 
+  // CSV Upload state
+  const [csvLoading, setCsvLoading] = useState(false);
+  const [csvResults, setCsvResults] = useState(null);
+  const [showCsvDetails, setShowCsvDetails] = useState(false);
+  const [csvRequirements, setCsvRequirements] = useState(null);
+  const [uploadProgress, setUploadProgress] = useState(null);
+  const [uploadMessage, setUploadMessage] = useState('');
+
   const videoRef = useRef(null);
 
-  // Fetch camera settings on component mount
+  // Fetch camera settings and CSV requirements on component mount
   useEffect(() => {
-    const fetchCameraSettings = async () => {
+    const fetchInitialData = async () => {
       try {
+        // Fetch camera settings
         const settings = await apiService.getCameraSettings();
         if (settings.success) {
           setCameraSettings(settings);
@@ -59,9 +74,19 @@ export function RegistrationPage({ onRegister }) {
         // Use default settings if fetch fails
         setCameraSettings({ source: 'default', device_id: null, rtsp_url: null });
       }
+
+      try {
+        // Fetch CSV requirements
+        const requirements = await apiService.getCSVRequirements();
+        if (requirements.success) {
+          setCsvRequirements(requirements);
+        }
+      } catch (error) {
+        console.error('Failed to fetch CSV requirements:', error);
+      }
     };
 
-    fetchCameraSettings();
+    fetchInitialData();
   }, []);
 
   // Handle photo file URL creation and cleanup
@@ -126,6 +151,109 @@ export function RegistrationPage({ onRegister }) {
       setPhotoFileUrl(null);
       handleStopCapture();
     }
+  };
+
+  const handleCSVUpload = async () => {
+    if (!csvFile) {
+      setError('Please select a CSV file');
+      return;
+    }
+
+    setCsvLoading(true);
+    setError('');
+    setCsvResults(null);
+    setUploadProgress(0);
+    setUploadMessage('Uploading CSV file...');
+
+    try {
+      // Use streaming API for real-time progress updates
+      apiService.uploadCSVStream(
+        csvFile,
+        // onProgress callback
+        (progressData) => {
+          setUploadProgress(progressData.percentage || 0);
+          setUploadMessage(progressData.message || 'Processing...');
+        },
+        // onComplete callback
+        (completeData) => {
+          setUploadProgress(100);
+          setUploadMessage('Complete!');
+
+          if (completeData.success) {
+            setCsvResults(completeData);
+            setSuccess(`CSV processed: ${completeData.successful_registrations} registered, ${completeData.failed_registrations} failed, ${completeData.skipped_no_image} skipped`);
+
+            // Reset CSV file after successful upload
+            setCsvFile(null);
+
+            // Call parent callback if provided
+            if (completeData.successful_registrations > 0 && onRegister) {
+              onRegister({
+                type: 'bulk',
+                count: completeData.successful_registrations
+              });
+            }
+          } else {
+            setError(completeData.error || 'Failed to process CSV');
+          }
+
+          setTimeout(() => {
+            setCsvLoading(false);
+            setUploadProgress(null);
+            setUploadMessage('');
+          }, 1000);
+        },
+        // onError callback
+        (errorData) => {
+          setError(`Failed to upload CSV: ${errorData.error || 'Unknown error'}`);
+          setCsvLoading(false);
+          setUploadProgress(null);
+          setUploadMessage('');
+        }
+      );
+    } catch (error) {
+      setError(`Failed to upload CSV: ${error.message}`);
+      setCsvLoading(false);
+      setUploadProgress(null);
+      setUploadMessage('');
+    }
+  };
+
+  const downloadFailedUsersCSV = () => {
+    if (!csvResults || !csvResults.details) return;
+
+    const { failed, skipped } = csvResults.details;
+    const allFailed = [...(failed || []), ...(skipped || [])];
+
+    if (allFailed.length === 0) return;
+
+    // Create CSV content
+    const headers = ['Row Number', 'Name', 'Title', 'Registration Number', 'Error/Reason'];
+    const rows = allFailed.map(user => [
+      user.row_number || '',
+      user.name || '',
+      user.title || '',
+      user.registration_number || '',
+      user.error || user.reason || ''
+    ]);
+
+    const csvContent = [
+      headers.join(','),
+      ...rows.map(row => row.map(cell => `"${cell}"`).join(','))
+    ].join('\n');
+
+    // Create download link
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement('a');
+    const url = URL.createObjectURL(blob);
+
+    link.setAttribute('href', url);
+    link.setAttribute('download', `failed_registrations_${new Date().toISOString().split('T')[0]}.csv`);
+    link.style.visibility = 'hidden';
+
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
   };
 
   const handleStopCapture = () => {
@@ -306,11 +434,11 @@ export function RegistrationPage({ onRegister }) {
 
   return (
     <Box style={{ width: '100%', minHeight: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-      <Stack gap="xl" style={{ maxWidth: '600px' }}>
+      <Stack gap="xl" style={{ width: '600px', maxWidth: '100%' }}>
         {/* Header */}
         <Box ta="center" mb="md">
           <Title order={2} mb="xs">
-            person Registration
+            Person Registration
           </Title>
         </Box>
 
@@ -321,6 +449,7 @@ export function RegistrationPage({ onRegister }) {
           radius="md"
           style={{
             backgroundColor: 'white',
+            width: '100%',
           }}
         >
           <Stack gap="md">
@@ -328,7 +457,174 @@ export function RegistrationPage({ onRegister }) {
               Register New Person
             </Title>
 
-            {/* Person Information */}
+            {/* CSV Upload Section */}
+            <Box>
+              <Group justify="space-between" mb="xs">
+                <Text size="sm" fw={700}>
+                  Bulk Registration via CSV
+                </Text>
+                {csvRequirements && (
+                  <ActionIcon
+                    variant="subtle"
+                    onClick={() => setShowCsvDetails(!showCsvDetails)}
+                    title="CSV Requirements"
+                  >
+                    {showCsvDetails ? <IconChevronUp size={16} /> : <IconChevronDown size={16} />}
+                  </ActionIcon>
+                )}
+              </Group>
+
+              <Collapse in={showCsvDetails}>
+                <Alert
+                  icon={<IconInfoCircle size={16} />}
+                  color="blue"
+                  mb="md"
+                >
+                  <Text size="sm" fw={500} mb="xs">Required CSV Columns:</Text>
+                  <List size="sm" spacing="xs">
+                    {csvRequirements?.required_columns?.map((col) => (
+                      <List.Item key={col}>{col}</List.Item>
+                    ))}
+                  </List>
+                  <Text size="xs" c="dimmed" mt="xs">
+                    Note: Users without valid Image URLs will be skipped
+                  </Text>
+                </Alert>
+              </Collapse>
+
+              <Group grow>
+                <FileInput
+                  leftSection={<IconFileUpload size={16} />}
+                  placeholder="Select CSV file"
+                  accept=".csv"
+                  value={csvFile}
+                  onChange={setCsvFile}
+                  disabled={csvLoading}
+                  styles={{
+                    input: {
+                      backgroundColor: 'white',
+                      border: '1px solid rgb(206, 212, 218)',
+                      '&:focus': {
+                        borderColor: 'rgb(0, 36, 61)',
+                        outline: '2px solid rgb(0, 36, 61)',
+                        outlineOffset: '2px',
+                      },
+                    },
+                  }}
+                />
+                <Button
+                  leftSection={<IconUpload size={16} />}
+                  onClick={handleCSVUpload}
+                  loading={csvLoading}
+                  disabled={!csvFile || csvLoading}
+                  color="signature"
+                >
+                  Process CSV
+                </Button>
+              </Group>
+
+              {/* Upload Progress */}
+              {csvLoading && (
+                <Box mt="md">
+                  <Text size="sm" mb="xs">{uploadMessage || 'Processing CSV...'}</Text>
+                  <Progress
+                    value={uploadProgress || 0}
+                    animated
+                    striped
+                    size="lg"
+                  />
+                </Box>
+              )}
+
+              {/* CSV Upload Results */}
+              {csvResults && (
+                <Box mt="md">
+                  <Group justify="center" gap="md" mb="md">
+                    <Badge
+                      size="lg"
+                      color="green"
+                      leftSection={<IconUserCheck size={14} />}
+                    >
+                      {csvResults.successful_registrations} Registered
+                    </Badge>
+                    {csvResults.failed_registrations > 0 && (
+                      <Badge
+                        size="lg"
+                        color="red"
+                        leftSection={<IconUserX size={14} />}
+                      >
+                        {csvResults.failed_registrations} Failed
+                      </Badge>
+                    )}
+                    {csvResults.skipped_no_image > 0 && (
+                      <Badge
+                        size="lg"
+                        color="orange"
+                        leftSection={<IconUserOff size={14} />}
+                      >
+                        {csvResults.skipped_no_image} Skipped (No Image)
+                      </Badge>
+                    )}
+                  </Group>
+
+                  {/* Download Failed Users Button */}
+                  {(csvResults.details?.failed?.length > 0 || csvResults.details?.skipped?.length > 0) && (
+                    <Group justify="center" mb="md">
+                      <Button
+                        leftSection={<IconDownload size={16} />}
+                        onClick={downloadFailedUsersCSV}
+                        variant="outline"
+                        color="signature"
+                      >
+                        Download Failed/Skipped Users CSV
+                      </Button>
+                    </Group>
+                  )}
+
+                  {/* Show details of skipped users */}
+                  {csvResults.details?.skipped?.length > 0 && (
+                    <Alert
+                      color="orange"
+                      title="Users Skipped (No Image URL)"
+                      mb="md"
+                    >
+                      <ScrollArea h={100}>
+                        <List size="xs" spacing="xs">
+                          {csvResults.details.skipped.map((user) => (
+                            <List.Item key={user.row_number}>
+                              Row {user.row_number}: {user.name} ({user.title})
+                            </List.Item>
+                          ))}
+                        </List>
+                      </ScrollArea>
+                    </Alert>
+                  )}
+
+                  {/* Show failed registrations */}
+                  {csvResults.details?.failed?.length > 0 && (
+                    <Alert
+                      color="red"
+                      title="Failed Registrations"
+                      mb="md"
+                    >
+                      <ScrollArea h={100}>
+                        <List size="xs" spacing="xs">
+                          {csvResults.details.failed.map((user) => (
+                            <List.Item key={user.row_number}>
+                              Row {user.row_number}: {user.name} - {user.error}
+                            </List.Item>
+                          ))}
+                        </List>
+                      </ScrollArea>
+                    </Alert>
+                  )}
+                </Box>
+              )}
+            </Box>
+
+            <Divider my="xl" label="OR" labelPosition="center" />
+
+            {/* Manual Person Information */}
 
             <TextInput
               leftSection={<IconUser size={16} />}
@@ -526,7 +822,7 @@ export function RegistrationPage({ onRegister }) {
             )}
 
             {/* Validation Alert */}
-            {!error && !success && (!personName || !personTitle || !personRegistration || (!photoFile && !capturedPhoto)) && (
+            {!error && !success && !csvFile && (!personName || !personTitle || !personRegistration || (!photoFile && !capturedPhoto)) && (
               <Alert
                 icon={<IconAlertCircle size={16} />}
                 color="orange"
@@ -544,7 +840,7 @@ export function RegistrationPage({ onRegister }) {
               fullWidth
               color="signature"
               style={{ marginTop: '1rem' }}
-              disabled={!personName || !personTitle || !personRegistration || (!photoFile && !capturedPhoto) || loading}
+              disabled={!personName || !personTitle || !personRegistration || (!photoFile && !capturedPhoto) || loading || csvFile}
             >
               {loading ? 'Registering...' : 'Register'}
             </Button>
@@ -559,6 +855,7 @@ export function RegistrationPage({ onRegister }) {
             radius="md"
             style={{
               backgroundColor: 'white',
+              width: '100%',
             }}
           >
             <Stack gap="md">
