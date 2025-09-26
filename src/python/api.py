@@ -1367,7 +1367,7 @@ async def process_csv_with_progress_streaming(csv_content: str, face_recognizer)
                         'name': row['full_name'],
                         'title': row['title'],
                         'registration_number': row['registration_number'],
-                        'reason': row['error']
+                        'error': row['error']
                     })
                     continue
 
@@ -1378,7 +1378,7 @@ async def process_csv_with_progress_streaming(csv_content: str, face_recognizer)
                         'name': row['full_name'],
                         'title': row['title'],
                         'registration_number': row['registration_number'],
-                        'reason': 'No image URL provided or image download failed'
+                        'error': 'No image URL provided or image download failed'
                     })
                     continue
 
@@ -1398,33 +1398,11 @@ async def process_csv_with_progress_streaming(csv_content: str, face_recognizer)
                 # Convert to OpenCV format
                 image_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
 
-                # Detect faces
-                _, faces = face_recognizer.recognize_face(image_cv, f"{person_id}.png")
-
-                if faces is None or len(faces) == 0:
-                    failed_registrations.append({
-                        'row_number': row['row_number'],
-                        'name': row['full_name'],
-                        'title': row['title'],
-                        'registration_number': row['registration_number'],
-                        'error': 'No face detected in image'
-                    })
-                    continue
-
-                if len(faces) > 1:
-                    failed_registrations.append({
-                        'row_number': row['row_number'],
-                        'name': row['full_name'],
-                        'title': row['title'],
-                        'registration_number': row['registration_number'],
-                        'error': 'Multiple faces detected in image'
-                    })
-                    continue
-
-                # Save image
+                # Save processed image (already cropped and optimized by CSV processor)
                 os.makedirs('images', exist_ok=True)
                 image_path = f'images/{person_id}.png'
                 cv2.imwrite(image_path, image_cv)
+
 
                 # Insert person to database
                 db_result = db.insert_into_person(
@@ -1568,7 +1546,7 @@ async def upload_csv_bulk_registration(file: UploadFile = File(...)):
                         'name': row['full_name'],
                         'title': row['title'],
                         'registration_number': row['registration_number'],
-                        'reason': row['error']
+                        'error': row['error']
                     })
                     continue
 
@@ -1579,7 +1557,7 @@ async def upload_csv_bulk_registration(file: UploadFile = File(...)):
                         'name': row['full_name'],
                         'title': row['title'],
                         'registration_number': row['registration_number'],
-                        'reason': 'No image URL provided or image download failed'
+                        'error': 'No image URL provided or image download failed'
                     })
                     continue
 
@@ -1599,33 +1577,11 @@ async def upload_csv_bulk_registration(file: UploadFile = File(...)):
                 # Convert to OpenCV format
                 image_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
 
-                # Detect faces
-                _, faces = face_recognizer.recognize_face(image_cv, f"{person_id}.png")
-
-                if faces is None or len(faces) == 0:
-                    failed_registrations.append({
-                        'row_number': row['row_number'],
-                        'name': row['full_name'],
-                        'title': row['title'],
-                        'registration_number': row['registration_number'],
-                        'error': 'No face detected in image'
-                    })
-                    continue
-
-                if len(faces) > 1:
-                    failed_registrations.append({
-                        'row_number': row['row_number'],
-                        'name': row['full_name'],
-                        'title': row['title'],
-                        'registration_number': row['registration_number'],
-                        'error': 'Multiple faces detected in image'
-                    })
-                    continue
-
-                # Save image
+                # Save processed image (already cropped and optimized by CSV processor)
                 os.makedirs('images', exist_ok=True)
                 image_path = f'images/{person_id}.png'
                 cv2.imwrite(image_path, image_cv)
+
 
                 # Insert person to database
                 db_result = db.insert_into_person(
