@@ -135,7 +135,15 @@ class SCRFDFaceRecognizer:
             self.detection_confidence = mp_config.get('detection_confidence', 0.15)
             self.max_faces = mp_config.get('max_faces', 10)
 
+            # Registration-specific settings (higher sensitivity for static images)
+            reg_config = self.config.get('registration', {})
+            self.registration_detection_confidence = reg_config.get('detection_confidence', 0.3)
+            self.registration_quality_threshold = reg_config.get('quality_threshold', 0.15)
+            self.registration_min_face_size = reg_config.get('min_face_size', 80)
+            self.registration_enhancement = reg_config.get('enable_enhancement', True)
+
             print(f"📊 Loaded config: detection_confidence={self.detection_confidence}, max_faces={self.max_faces}")
+            print(f"📋 Registration config: detection_confidence={self.registration_detection_confidence}, quality_threshold={self.registration_quality_threshold}")
 
         except Exception as e:
             print(f"⚠️ Config loading failed: {e}, using defaults")
@@ -143,6 +151,11 @@ class SCRFDFaceRecognizer:
             self.use_gpu = True
             self.detection_confidence = 0.15
             self.max_faces = 10
+            # Registration defaults
+            self.registration_detection_confidence = 0.3
+            self.registration_quality_threshold = 0.15
+            self.registration_min_face_size = 80
+            self.registration_enhancement = True
 
     def _initialize_models(self):
         """Initialize SCRFD detection and ArcFace recognition models with GPU support"""
@@ -221,7 +234,8 @@ class SCRFDFaceRecognizer:
             faces = []
             for bbox, kps in zip(bboxes, kpss):
                 # Extract bbox coordinates (SCRFD format: x1, y1, x2, y2, confidence)
-                x1, y1, x2, y2, conf = bbox.astype(int)
+                x1, y1, x2, y2, conf = bbox
+                x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)  # Only convert coordinates to int
                 x, y, w, h = x1, y1, x2 - x1, y2 - y1
 
                 # Ensure bbox is within image bounds
@@ -412,11 +426,22 @@ class SCRFDFaceRecognizer:
                 # Get embedding from FAISS index
                 embedding = self.face_database.index.reconstruct(i)
 
-                # Get the person name from metadata
+                # Get the photo_id from metadata (e.g., "person_id%1")
                 if i < len(self.face_database.metadata):
-                    person_name = self.face_database.metadata[i]
-                    # Find person_id from name
-                    person_id = self._name_to_person_id(person_name)
+                    photo_id = self.face_database.metadata[i]
+
+                    # Extract person_id from photo_id
+                    # Handle both "person_id" and "person_id%photo_num" formats
+                    if '%' in photo_id:
+                        person_id = photo_id.split('%')[0]
+                    else:
+                        # Check if this is a photo_id that maps to a person_id
+                        if photo_id in self.person_id_to_name:
+                            person_id = self.person_id_to_name[photo_id]
+                        else:
+                            person_id = photo_id
+
+                    # Only keep one embedding per person_id (the last one encountered)
                     face_dict[person_id] = embedding
 
         return face_dict
@@ -544,6 +569,113 @@ class SCRFDFaceRecognizer:
         results = self.detect_and_recognize(image)
         return [result['person_name'] for result in results if result['person_name'] != 'Unknown']
 
+    def detect_faces_for_registration(self, image: np.ndarray) -> List[FaceDetection]:
+        """
+        Enhanced face detection specifically for registration (manual/bulk upload)
+        Uses higher sensitivity and quality filtering for static images
+        """
+        start_time = time.time()
+
+        try:
+            if image is None or image.size == 0:
+                return []
+
+            # Temporarily adjust detector confidence for registration
+            original_conf = self.detector.conf_thres
+            self.detector.conf_thres = self.registration_detection_confidence
+
+            try:
+                # SCRFD detection with registration-optimized settings
+                bboxes, kpss = self.detector.detect(
+                    image,
+                    max_num=5  # Limit to 5 faces for registration (avoid crowds)
+                )
+
+                faces = []
+                height, width = image.shape[:2]
+
+                for bbox, kps in zip(bboxes, kpss):
+                    # Extract bbox coordinates (SCRFD format: x1, y1, x2, y2, confidence)
+                    x1, y1, x2, y2, conf = bbox
+                    x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)  # Only convert coordinates to int
+                    x, y, w, h = x1, y1, x2 - x1, y2 - y1
+
+                    # Ensure bbox is within image bounds
+                    x = max(0, min(x, width - 1))
+                    y = max(0, min(y, height - 1))
+                    w = max(1, min(w, width - x))
+                    h = max(1, min(h, height - y))
+
+                    # Registration-specific quality filtering
+                    face_area = w * h
+                    image_area = width * height
+                    size_ratio = face_area / image_area
+
+                    # Enhanced quality checks for registration
+                    if w < self.registration_min_face_size or h < self.registration_min_face_size:
+                        continue  # Skip faces that are too small
+
+                    # Note: Confidence check not needed here - detector already filters by conf_thres
+
+                    # Calculate enhanced quality score for registration
+                    quality_score = (conf * 0.7 + min(size_ratio * 10, 1.0) * 0.3)
+
+                    # Create face detection object
+                    face_detection = FaceDetection(
+                        bbox=(x, y, w, h),
+                        confidence=float(conf),
+                        landmarks=kps,
+                        quality_score=quality_score,
+                        face_area=face_area,
+                        is_frontal=quality_score > self.registration_quality_threshold
+                    )
+
+                    faces.append(face_detection)
+
+                # Sort by quality score (best faces first) for registration
+                faces.sort(key=lambda f: f.quality_score, reverse=True)
+
+                # Update performance tracking
+                detection_time = time.time() - start_time
+                print(f"🎯 Registration detection: {len(faces)} faces found in {detection_time:.3f}s (conf={self.registration_detection_confidence})")
+
+                return faces
+
+            finally:
+                # Restore original confidence threshold
+                self.detector.conf_thres = original_conf
+
+        except Exception as e:
+            print(f"❌ Registration face detection error: {e}")
+            return []
+
+    def recognize_face_for_registration(self, image: np.ndarray, file_name: Optional[str] = None) -> Tuple[List[np.ndarray], List[FaceDetection]]:
+        """
+        Enhanced face recognition specifically for registration with higher sensitivity
+        """
+        # Use registration-specific detection
+        face_detections = self.detect_faces_for_registration(image)
+
+        # Extract features for each detection
+        features = []
+        for detection in face_detections:
+            if detection.landmarks is not None:
+                try:
+                    # Get face embedding using ArcFace
+                    embedding = self.recognizer.get_embedding(
+                        image,
+                        detection.landmarks,
+                        normalized=True
+                    )
+                    features.append(embedding)
+                except Exception as e:
+                    print(f"⚠️ Failed to extract features for registration: {e}")
+                    features.append(np.zeros(512))
+            else:
+                features.append(np.zeros(512))
+
+        return features, face_detections
+
     def configure_mediapipe(self, **kwargs):
         """Compatibility method - reconfigure SCRFD settings"""
         if 'detection_confidence' in kwargs:
@@ -665,6 +797,156 @@ class SCRFDFaceRecognizer:
         # FAISS index is ready to use immediately after adding embeddings
         if processed_count > 0:
             print("✅ FAISS index ready for fast similarity search")
+
+    def remove_person(self, person_id: str) -> bool:
+        """
+        Remove a person from the FAISS database efficiently without rebuilding.
+
+        Args:
+            person_id: ID of the person to remove
+
+        Returns:
+            True if person was removed, False otherwise
+        """
+        try:
+            # Remove from FAISS index
+            removed_count = self.face_database.remove_faces([person_id])
+
+            # Update person_id_to_name mapping
+            keys_to_remove = []
+            for key, value in self.person_id_to_name.items():
+                if key == person_id or key.startswith(f"{person_id}%"):
+                    keys_to_remove.append(key)
+
+            for key in keys_to_remove:
+                del self.person_id_to_name[key]
+
+            if removed_count > 0:
+                print(f"✅ Removed {removed_count} face(s) for person {person_id} from FAISS database")
+                # Optionally save the updated database to disk
+                try:
+                    self.face_database.save()
+                except Exception as e:
+                    print(f"⚠️ Failed to save FAISS database after removal: {e}")
+                return True
+            else:
+                print(f"ℹ️ No faces found for person {person_id} in FAISS database")
+                return False
+
+        except Exception as e:
+            print(f"❌ Error removing person {person_id} from FAISS database: {e}")
+            # Fallback to rebuilding if removal fails
+            print("🔄 Falling back to database rebuild...")
+            self.create_features()
+            return True
+
+    def cleanup_orphaned_faces(self) -> Dict[str, Any]:
+        """
+        Clean up both orphaned image files and FAISS database entries.
+        Removes image files for people who don't exist in the database,
+        and FAISS entries that don't have corresponding database records.
+
+        Returns:
+            Dictionary with cleanup statistics
+        """
+        print("🧹 Starting comprehensive cleanup...")
+
+        try:
+            from DatabaseManager import MySqlite3Manager
+            db = MySqlite3Manager()
+
+            # Phase 1: Find and remove orphaned image files (files without database records)
+            images_dir = Path("images")
+            orphaned_files = []
+            valid_person_ids = set()
+
+            if images_dir.exists():
+                for image_file in images_dir.glob("*.png"):
+                    if not image_file.name.startswith('.'):
+                        # Extract person ID from filename
+                        person_id = image_file.stem.split('%')[0]
+
+                        # Check if person exists in database
+                        person_name = db.get_person_name(person_id)
+                        if person_name is None:
+                            orphaned_files.append(image_file)
+                            print(f"🗑️ Found orphaned image file: {image_file.name}")
+                        else:
+                            valid_person_ids.add(person_id)
+
+            # Remove orphaned image files
+            deleted_files = []
+            for image_file in orphaned_files:
+                try:
+                    image_file.unlink()
+                    deleted_files.append(image_file.name)
+                    print(f"🗑️ Deleted orphaned image: {image_file.name}")
+                except Exception as e:
+                    print(f"❌ Failed to delete {image_file.name}: {e}")
+
+            print(f"📁 Removed {len(deleted_files)} orphaned image files")
+            print(f"📁 Found {len(valid_person_ids)} valid person IDs with database records")
+
+            # Phase 2: Find orphaned entries in FAISS (this should be minimal now)
+            orphaned_faiss_ids = set()
+            if hasattr(self.face_database, 'metadata'):
+                for entry in self.face_database.metadata:
+                    # Extract person_id from the entry
+                    person_id = entry.split('%')[0] if '%' in entry else entry
+                    if person_id not in valid_person_ids:
+                        orphaned_faiss_ids.add(person_id)
+
+            # Also check person_id_to_name mapping
+            for key in list(self.person_id_to_name.keys()):
+                person_id = key.split('%')[0] if '%' in key else key
+                if person_id not in valid_person_ids:
+                    orphaned_faiss_ids.add(person_id)
+
+            # Remove orphaned FAISS entries
+            total_faiss_removed = 0
+            if orphaned_faiss_ids:
+                print(f"🔍 Found {len(orphaned_faiss_ids)} orphaned FAISS entries to remove")
+                for person_id in orphaned_faiss_ids:
+                    removed = self.face_database.remove_faces([person_id])
+                    total_faiss_removed += removed
+
+                    # Clean up person_id_to_name mapping
+                    keys_to_remove = [k for k in self.person_id_to_name.keys()
+                                     if k == person_id or k.startswith(f"{person_id}%")]
+                    for key in keys_to_remove:
+                        del self.person_id_to_name[key]
+
+            # Phase 3: Rebuild FAISS database to ensure consistency
+            if len(deleted_files) > 0 or total_faiss_removed > 0:
+                print("🔄 Rebuilding FAISS database for consistency...")
+                self._rebuild_features_internal()
+
+                # Save cleaned database
+                try:
+                    self.face_database.save()
+                    print(f"✅ Cleanup complete: removed {len(deleted_files)} image files and {total_faiss_removed} FAISS entries")
+                except Exception as e:
+                    print(f"⚠️ Failed to save FAISS database after cleanup: {e}")
+
+            return {
+                'success': True,
+                'message': f'Successfully removed {len(deleted_files)} orphaned image files and {total_faiss_removed} FAISS entries',
+                'orphaned_files_count': len(orphaned_files),
+                'deleted_files_count': len(deleted_files),
+                'orphaned_faiss_count': len(orphaned_faiss_ids),
+                'removed_faiss_count': total_faiss_removed,
+                'valid_persons': len(valid_person_ids),
+                'deleted_files': deleted_files,
+                'orphaned_faiss_ids': list(orphaned_faiss_ids)
+            }
+
+        except Exception as e:
+            print(f"❌ Error during cleanup: {e}")
+            return {
+                'success': False,
+                'message': f'Cleanup failed: {str(e)}',
+                'error': str(e)
+            }
 
     def get_performance_stats(self) -> Dict[str, Any]:
         """Get performance statistics (API compatibility)"""

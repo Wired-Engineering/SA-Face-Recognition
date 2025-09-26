@@ -562,7 +562,7 @@ export function RegistrationPage({ onRegister }) {
                         color="orange"
                         leftSection={<IconUserOff size={14} />}
                       >
-                        {csvResults.skipped_no_image} Skipped (No Image)
+                        {csvResults.skipped_no_image} Skipped (No Image URL)
                       </Badge>
                     )}
                   </Group>
@@ -585,7 +585,7 @@ export function RegistrationPage({ onRegister }) {
                   {csvResults.details?.skipped?.length > 0 && (
                     <Alert
                       color="orange"
-                      title="Users Skipped (No Image URL)"
+                      title="Users Skipped"
                       mb="md"
                     >
                       <ScrollArea h={100}>
@@ -593,6 +593,7 @@ export function RegistrationPage({ onRegister }) {
                           {csvResults.details.skipped.map((user) => (
                             <List.Item key={user.row_number}>
                               Row {user.row_number}: {user.name} ({user.title})
+                              {user.reason && <Text size="xs" c="dimmed"> - {user.reason}</Text>}
                             </List.Item>
                           ))}
                         </List>
@@ -611,7 +612,9 @@ export function RegistrationPage({ onRegister }) {
                         <List size="xs" spacing="xs">
                           {csvResults.details.failed.map((user) => (
                             <List.Item key={user.row_number}>
-                              Row {user.row_number}: {user.name} - {user.error}
+                              Row {user.row_number}: {user.name} ({user.title})
+                              {user.reason && <Text size="xs" c="dimmed"> - {user.reason}</Text>}
+                              {user.error && <Text size="xs" c="dimmed"> - {user.error}</Text>}
                             </List.Item>
                           ))}
                         </List>

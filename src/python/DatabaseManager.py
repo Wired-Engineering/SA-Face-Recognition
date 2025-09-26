@@ -149,7 +149,15 @@ class MySqlite3Manager:
             registration = row[3]
             return registration
         return None
-    
+
+    def check_registration_exists(self, registration_id):
+        """Check if a registration ID already exists in the database"""
+        self.connect()
+        command = "SELECT Id FROM PERSON WHERE Registration = ?"
+        self.cursor.execute(command, (registration_id,))
+        rows = self.cursor.fetchall()
+        return len(rows) > 0
+
     def get_person_list(self):
         self.connect()
         command = "SELECT * FROM PERSON "

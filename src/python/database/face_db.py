@@ -167,6 +167,66 @@ class FaceDatabase:
             self.index.add(np.array(normalized_embeddings, dtype=np.float32))
             self.metadata.extend(names)
 
+    def remove_faces(self, person_ids: List[str]) -> int:
+        """
+        Remove faces from the database by person ID(s).
+        Since FAISS IndexFlat doesn't support direct removal, we rebuild the index
+        without the specified person IDs.
+
+        Args:
+            person_ids: List of person IDs to remove
+
+        Returns:
+            Number of faces removed
+        """
+        if not person_ids:
+            return 0
+
+        with self.lock:
+            if self.index.ntotal == 0:
+                return 0
+
+            # Find indices to keep (not matching any person_id)
+            indices_to_keep = []
+            for i, name in enumerate(self.metadata):
+                # Check if this face belongs to any of the person_ids to remove
+                should_remove = False
+                for person_id in person_ids:
+                    # Handle both exact matches and photo IDs (person_id%photo_number)
+                    if name == person_id or name.startswith(f"{person_id}%"):
+                        should_remove = True
+                        break
+                if not should_remove:
+                    indices_to_keep.append(i)
+
+            removed_count = len(self.metadata) - len(indices_to_keep)
+
+            if removed_count == 0:
+                return 0
+
+            # If removing all faces, just reset
+            if not indices_to_keep:
+                self.index = faiss.IndexFlatIP(self.embedding_size)
+                self.metadata = []
+                return removed_count
+
+            # Reconstruct embeddings from the current index
+            all_embeddings = faiss.vector_to_array(self.index.reconstruct_n(0, self.index.ntotal))
+            all_embeddings = all_embeddings.reshape(self.index.ntotal, self.embedding_size)
+
+            # Keep only the embeddings we want
+            kept_embeddings = all_embeddings[indices_to_keep]
+            kept_metadata = [self.metadata[i] for i in indices_to_keep]
+
+            # Create new index with remaining faces
+            self.index = faiss.IndexFlatIP(self.embedding_size)
+            if len(kept_embeddings) > 0:
+                self.index.add(kept_embeddings)
+            self.metadata = kept_metadata
+
+            logging.info(f"Removed {removed_count} faces from database. Remaining: {self.index.ntotal}")
+            return removed_count
+
     def save(self) -> None:
         """
         Save the FAISS index and metadata to disk thread-safely.

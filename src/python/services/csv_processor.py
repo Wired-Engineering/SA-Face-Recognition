@@ -8,7 +8,7 @@ import logging
 from urllib.parse import urlparse
 import numpy as np
 import cv2
-from PIL import Image
+from PIL import Image, ImageOps
 import base64
 
 logger = logging.getLogger(__name__)
@@ -22,9 +22,10 @@ REQUIRED_COLUMNS = [
 ]
 
 class CSVProcessor:
-    def __init__(self, face_recognizer=None, external_session=False):
+    def __init__(self, face_recognizer=None, database=None, external_session=False):
         self.session = None
         self.face_recognizer = face_recognizer
+        self.database = database
         self.external_session = external_session
 
     async def __aenter__(self):
@@ -126,11 +127,14 @@ class CSVProcessor:
             # Convert bytes to PIL Image
             image = Image.open(BytesIO(image_data))
 
+            # Fix EXIF orientation (this handles sideways/rotated images)
+            image = ImageOps.exif_transpose(image)
+
             # Convert to OpenCV format
             image_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
 
-            # Detect faces using the face recognizer
-            _, face_detections = self.face_recognizer.recognize_face(image_cv, "temp.png")
+            # Detect faces using the registration-specific face recognizer
+            _, face_detections = self.face_recognizer.recognize_face_for_registration(image_cv, "temp.png")
 
             if face_detections and len(face_detections) > 0:
                 # Get the first (largest) face
@@ -250,6 +254,12 @@ class CSVProcessor:
                 "error": None
             }
 
+            # Check if registration ID already exists (if database is available)
+            if self.database and self.database.check_registration_exists(row["registration_number"]):
+                row_result["error"] = f'Registration ID "{row["registration_number"]}" already exists in database'
+                processed_rows.append(row_result)
+                continue
+
             # Download image if URL provided
             if row["image_url"]:
                 print(f"DEBUG: Attempting to download image for {row['full_name']}")
@@ -279,9 +289,9 @@ class CSVProcessor:
             "required_columns": REQUIRED_COLUMNS
         }
 
-async def process_csv(csv_content: str, face_recognizer=None) -> Dict[str, Any]:
+async def process_csv(csv_content: str, face_recognizer=None, database=None) -> Dict[str, Any]:
     """
     Convenience function to process CSV content.
     """
-    async with CSVProcessor(face_recognizer) as processor:
+    async with CSVProcessor(face_recognizer, database) as processor:
         return await processor.process_csv_for_registration(csv_content)

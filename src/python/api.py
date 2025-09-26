@@ -8,7 +8,7 @@ import base64
 import cv2
 import json
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageOps
 from io import BytesIO
 import os
 from typing import Optional, Dict
@@ -1186,6 +1186,13 @@ async def get_people():
 async def register_person(request: personRegistration):
     """Register a new person with auto-generated UUID"""
     try:
+        # Check if registration ID already exists
+        if db.check_registration_exists(request.person_registration):
+            return {
+                'success': False,
+                'message': f'Registration ID "{request.person_registration}" already exists. Please use a unique registration ID.'
+            }
+
         # Generate a unique UUID for the person
         person_id = str(uuid.uuid4())
 
@@ -1198,11 +1205,14 @@ async def register_person(request: personRegistration):
         image_bytes = base64.b64decode(image_data)
         image = Image.open(BytesIO(image_bytes))
 
+        # Fix EXIF orientation (handles sideways/rotated images from phones)
+        image = ImageOps.exif_transpose(image)
+
         # Convert to OpenCV format
         image_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
 
-        # Use the face recognizer to detect faces
-        _, faces = face_recognizer.recognize_face(image_cv, f"{person_id}.png")
+        # Use the registration-specific face recognizer with higher sensitivity
+        _, faces = face_recognizer.recognize_face_for_registration(image_cv, f"{person_id}.png")
 
         if faces is None or len(faces) == 0:
             return {
@@ -1216,6 +1226,24 @@ async def register_person(request: personRegistration):
                 'message': 'Multiple faces detected. Please use an image with only one face.'
             }
 
+        # Crop face with padding (same as bulk upload process)
+        face = faces[0]
+        x, y, w, h = face.bbox
+
+        # Add padding around the face (20% on each side, same as bulk upload)
+        padding = 0.2
+        x_pad = int(w * padding)
+        y_pad = int(h * padding)
+
+        # Calculate new boundaries with padding
+        x1 = max(0, x - x_pad)
+        y1 = max(0, y - y_pad)
+        x2 = min(image_cv.shape[1], x + w + x_pad)
+        y2 = min(image_cv.shape[0], y + h + y_pad)
+
+        # Crop the face with padding
+        cropped_face = image_cv[y1:y2, x1:x2]
+
         # Save person to database (UUID ensures uniqueness, so no conflict possible)
         db_result = db.insert_into_person(person_id, request.person_name, request.person_title, request.person_registration)
 
@@ -1226,10 +1254,10 @@ async def register_person(request: personRegistration):
                 'message': 'Unexpected ID collision occurred, please try again'
             }
 
-        # Save face image
+        # Save cropped face image (consistent with bulk upload)
         os.makedirs('images', exist_ok=True)
         image_path = f'images/{person_id}.png'
-        cv2.imwrite(image_path, image_cv)
+        cv2.imwrite(image_path, cropped_face)
 
         # Recreate features dictionary with new person
         face_recognizer.create_features()
@@ -1257,7 +1285,7 @@ async def process_csv_with_progress_streaming(csv_content: str, face_recognizer)
 
     # Create session and processor outside of any context manager
     session = aiohttp.ClientSession()
-    processor = CSVProcessor(face_recognizer, external_session=True)
+    processor = CSVProcessor(face_recognizer, db, external_session=True)
     processor.session = session
 
     try:
@@ -1296,6 +1324,12 @@ async def process_csv_with_progress_streaming(csv_content: str, face_recognizer)
                 "error": None
             }
 
+            # Check if registration ID already exists
+            if db.check_registration_exists(row["registration_number"]):
+                row_result["error"] = f'Registration ID "{row["registration_number"]}" already exists in database'
+                processed_rows.append(row_result)
+                continue
+
             # Download image if URL provided
             if row["image_url"]:
                 image_data, error = await processor.download_image(row["image_url"])
@@ -1326,6 +1360,17 @@ async def process_csv_with_progress_streaming(csv_content: str, face_recognizer)
             yield f"event: progress\ndata: {json.dumps(progress_data)}\n\n"
 
             try:
+                # Skip users with errors (including duplicate registration IDs)
+                if row['error']:
+                    failed_registrations.append({
+                        'row_number': row['row_number'],
+                        'name': row['full_name'],
+                        'title': row['title'],
+                        'registration_number': row['registration_number'],
+                        'reason': row['error']
+                    })
+                    continue
+
                 # Skip users without image data
                 if not row['image_data']:
                     skipped_no_image.append({
@@ -1498,7 +1543,7 @@ async def upload_csv_bulk_registration(file: UploadFile = File(...)):
         csv_content = content.decode('utf-8')
 
         # Process CSV with face recognizer for automatic face cropping
-        result = await process_csv(csv_content, face_recognizer)
+        result = await process_csv(csv_content, face_recognizer, db)
 
         if not result['success']:
             return {
@@ -1516,6 +1561,17 @@ async def upload_csv_bulk_registration(file: UploadFile = File(...)):
 
         for idx, row in enumerate(result['processed_rows'], 1):
             try:
+                # Skip users with errors (including duplicate registration IDs)
+                if row['error']:
+                    failed_registrations.append({
+                        'row_number': row['row_number'],
+                        'name': row['full_name'],
+                        'title': row['title'],
+                        'registration_number': row['registration_number'],
+                        'reason': row['error']
+                    })
+                    continue
+
                 # Skip users without image data
                 if not row['image_data']:
                     skipped_no_image.append({
@@ -1734,12 +1790,14 @@ async def delete_person(person_id: str):
                         except Exception as e:
                             print(f"Error deleting photo {filename}: {e}")
 
-            # Recreate features dictionary after deletion
-            face_recognizer.create_features()
+            # Efficiently remove from FAISS database without full rebuild
+            faiss_removed = face_recognizer.remove_person(person_id)
 
             message = f'Person deleted successfully'
             if deleted_photos:
                 message += f' (removed {len(deleted_photos)} photos)'
+            if faiss_removed:
+                message += ' and removed from recognition database'
 
             return {
                 'success': True,
@@ -1760,29 +1818,51 @@ async def delete_all_people():
         person_ids = db.get_all_person_ids()
         deleted_count = 0
         failed_deletions = []
+        deleted_photos = []
 
+        # Delete from database and remove photo files
         for person_id in person_ids:
             result = db.delete_data_from_person(person_id)
             if result:
                 deleted_count += 1
+
+                # Delete all photo files for this person
+                if os.path.exists('images'):
+                    for filename in os.listdir('images'):
+                        if filename.startswith(f'{person_id}.png') or filename.startswith(f'{person_id}%'):
+                            file_path = os.path.join('images', filename)
+                            try:
+                                os.remove(file_path)
+                                deleted_photos.append(filename)
+                            except Exception as e:
+                                print(f"Error deleting photo {filename}: {e}")
             else:
                 failed_deletions.append(person_id)
 
-        # Recreate features dictionary after deletion
-        face_recognizer.create_features()
+        # Batch remove from FAISS database (more efficient than individual removals)
+        if deleted_count > 0:
+            if deleted_count == len(person_ids):
+                # If all people deleted, just rebuild empty database
+                face_recognizer.create_features()
+            else:
+                # Remove specific people from FAISS
+                successful_deletions = [pid for pid in person_ids if pid not in failed_deletions]
+                face_recognizer.face_database.remove_faces(successful_deletions)
 
         if len(failed_deletions) == 0:
             return {
                 'success': True,
                 'message': f'All {deleted_count} people deleted successfully',
-                'deleted_count': deleted_count
+                'deleted_count': deleted_count,
+                'deleted_photos': len(deleted_photos)
             }
         else:
             return {
                 'success': False,
                 'message': f'Deleted {deleted_count} people, but failed to delete {len(failed_deletions)} people',
                 'deleted_count': deleted_count,
-                'failed_deletions': failed_deletions
+                'failed_deletions': failed_deletions,
+                'deleted_photos': len(deleted_photos)
             }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -2559,6 +2639,32 @@ async def invalidate_face_cache():
             "message": f"Failed to invalidate cache: {str(e)}"
         }
 
+@app.post("/api/system/cleanup-faiss")
+async def cleanup_faiss_database():
+    """
+    Clean up orphaned entries in FAISS database.
+    Removes entries for people who were deleted before FAISS synchronization was implemented.
+    """
+    try:
+        cleanup_result = face_recognizer.cleanup_orphaned_faces()
+
+        return {
+            "success": cleanup_result.get("success", False),
+            "message": cleanup_result.get("message", ""),
+            "statistics": {
+                "orphaned_found": cleanup_result.get("orphaned_count", 0),
+                "entries_removed": cleanup_result.get("removed_count", 0),
+                "valid_persons": cleanup_result.get("valid_persons", 0),
+                "orphaned_ids": cleanup_result.get("orphaned_ids", [])
+            }
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "message": f"Failed to clean up FAISS database: {str(e)}",
+            "error": str(e)
+        }
+
 @app.post("/api/test/trigger-recognition")
 async def trigger_test_recognition():
     """Test endpoint to manually trigger a recognition event"""
@@ -3125,6 +3231,14 @@ if __name__ == "__main__":
     print("📊 Database initialized")
     print("🤖 AI models loaded")
     print("📷 Camera system ready")
+
+    # Run FAISS cleanup on startup to remove orphaned entries
+    print("🧹 Checking for orphaned FAISS entries...")
+    cleanup_result = face_recognizer.cleanup_orphaned_faces()
+    if cleanup_result.get("orphaned_count", 0) > 0:
+        print(f"✅ Cleaned up {cleanup_result.get('removed_count', 0)} orphaned face entries")
+    else:
+        print("✅ FAISS database is clean")
     print("✅ API ready at http://localhost:8000/api")
     print("📚 API docs available at http://localhost:8000/api/docs")
 
