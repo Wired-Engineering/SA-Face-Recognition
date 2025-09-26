@@ -76,8 +76,8 @@ export function SettingsPage({ onSaveSettings }) {
   const [peopleLoading, setPeopleLoading] = useState(false);
   const [uploadingPhotos, setUploadingPhotos] = useState({});
 
-  // MediaPipe settings state
-  const [mediapipeSettings, setMediapipeSettings] = useState({
+  // Face detection settings state
+  const [detectionSettings, setDetectionSettings] = useState({
     detection_confidence: 0.6,  // Good default for video
     tracking_confidence: 0.7,   // Optimized for video tracking
     max_faces: 20,
@@ -85,9 +85,9 @@ export function SettingsPage({ onSaveSettings }) {
     unlimited_faces: false,
     include_landmarks: false    // Debug only
   });
-  const [mediapipePresets, setMediapipePresets] = useState({});
-  const [mediapipePerformance, setMediapipePerformance] = useState({});
-  const [mediapipeLoading, setMediapipeLoading] = useState(false);
+  const [detectionPresets, setDetectionPresets] = useState({});
+  const [detectionPerformance, setDetectionPerformance] = useState({});
+  const [detectionLoading, setDetectionLoading] = useState(false);
 
   // Loading and error states
   const [adminLoading, setAdminLoading] = useState(false);
@@ -179,8 +179,8 @@ export function SettingsPage({ onSaveSettings }) {
         // Load people data for data management tab
         await loadPeopleData();
 
-        // Load MediaPipe settings
-        await loadMediaPipeSettings();
+        // Load face detection settings
+        await loadDetectionSettings();
       } catch (error) {
         console.error('Error loading settings:', error);
       }
@@ -205,17 +205,17 @@ export function SettingsPage({ onSaveSettings }) {
     }
   };
 
-  const loadMediaPipeSettings = async () => {
+  const loadDetectionSettings = async () => {
     try {
-      setMediapipeLoading(true);
+      setDetectionLoading(true);
 
       // Load current settings
       const response = await fetch('/api/mediapipe/settings');
       const data = await response.json();
 
       if (data.success) {
-        setMediapipeSettings(data.settings);
-        setMediapipePerformance(data.performance || {});
+        setDetectionSettings(data.settings);
+        setDetectionPerformance(data.performance || {});
       }
 
       // Load presets
@@ -223,19 +223,19 @@ export function SettingsPage({ onSaveSettings }) {
       const presetsData = await presetsResponse.json();
 
       if (presetsData.success) {
-        setMediapipePresets(presetsData.presets);
+        setDetectionPresets(presetsData.presets);
       }
     } catch (error) {
-      console.error('Error loading MediaPipe settings:', error);
-      setError('Failed to load MediaPipe settings: ' + error.message);
+      console.error('Error loading face detection settings:', error);
+      setError('Failed to load face detection settings: ' + error.message);
     } finally {
-      setMediapipeLoading(false);
+      setDetectionLoading(false);
     }
   };
 
-  const handleUpdateMediaPipeSettings = async (newSettings) => {
+  const handleUpdateDetectionSettings = async (newSettings) => {
     try {
-      setMediapipeLoading(true);
+      setDetectionLoading(true);
       setError('');
       setSuccess('');
 
@@ -248,30 +248,30 @@ export function SettingsPage({ onSaveSettings }) {
       const data = await response.json();
 
       if (data.success) {
-        setMediapipeSettings(prev => ({ ...prev, ...newSettings }));
-        setSuccess('MediaPipe settings updated successfully!');
+        setDetectionSettings(prev => ({ ...prev, ...newSettings }));
+        setSuccess('Face detection settings updated successfully!');
 
         // Reload to get updated performance stats
-        await loadMediaPipeSettings();
+        await loadDetectionSettings();
 
         onSaveSettings?.({
-          type: 'mediapipe',
+          type: 'detection',
           ...newSettings
         });
       } else {
-        setError(data.message || 'Failed to update MediaPipe settings');
+        setError(data.message || 'Failed to update face detection settings');
       }
     } catch (error) {
-      setError('Failed to update MediaPipe settings: ' + error.message);
-      console.error('MediaPipe update error:', error);
+      setError('Failed to update face detection settings: ' + error.message);
+      console.error('Face detection update error:', error);
     } finally {
-      setMediapipeLoading(false);
+      setDetectionLoading(false);
     }
   };
 
   const handleApplyPreset = async (presetName) => {
     try {
-      setMediapipeLoading(true);
+      setDetectionLoading(true);
       setError('');
       setSuccess('');
 
@@ -284,13 +284,13 @@ export function SettingsPage({ onSaveSettings }) {
       const data = await response.json();
 
       if (data.success) {
-        setSuccess(`Applied preset: ${mediapipePresets[presetName]?.name || presetName}`);
+        setSuccess(`Applied preset: ${detectionPresets[presetName]?.name || presetName}`);
 
         // Reload settings to reflect the preset
-        await loadMediaPipeSettings();
+        await loadDetectionSettings();
 
         onSaveSettings?.({
-          type: 'mediapipe_preset',
+          type: 'detection_preset',
           preset: presetName
         });
       } else {
@@ -300,13 +300,13 @@ export function SettingsPage({ onSaveSettings }) {
       setError('Failed to apply preset: ' + error.message);
       console.error('Preset apply error:', error);
     } finally {
-      setMediapipeLoading(false);
+      setDetectionLoading(false);
     }
   };
 
   const handleOptimizeResolution = async () => {
     try {
-      setMediapipeLoading(true);
+      setDetectionLoading(true);
       setError('');
       setSuccess('');
 
@@ -327,10 +327,10 @@ export function SettingsPage({ onSaveSettings }) {
         setSuccess('Resolution optimization applied!');
 
         // Reload settings to reflect the optimization
-        await loadMediaPipeSettings();
+        await loadDetectionSettings();
 
         onSaveSettings?.({
-          type: 'mediapipe_optimization',
+          type: 'detection_optimization',
           resolution: '1280x720'
         });
       } else {
@@ -340,7 +340,7 @@ export function SettingsPage({ onSaveSettings }) {
       setError('Failed to optimize resolution: ' + error.message);
       console.error('Resolution optimization error:', error);
     } finally {
-      setMediapipeLoading(false);
+      setDetectionLoading(false);
     }
   };
 
@@ -1235,7 +1235,7 @@ export function SettingsPage({ onSaveSettings }) {
           </Card>
         </Tabs.Panel>
 
-        {/* MediaPipe Face Detection Settings Tab */}
+        {/* SCRFD Face Detection Settings Tab */}
         <Tabs.Panel value="mediapipe">
           <Stack gap="md">
             {/* Quick Presets Section */}
@@ -1251,7 +1251,7 @@ export function SettingsPage({ onSaveSettings }) {
                 </Text>
 
                 <Group grow>
-                  {Object.entries(mediapipePresets).map(([key, preset]) => (
+                  {Object.entries(detectionPresets).map(([key, preset]) => (
                     <Card
                       key={key}
                       withBorder
@@ -1261,7 +1261,7 @@ export function SettingsPage({ onSaveSettings }) {
                         transition: 'all 0.2s ease',
                         ':hover': { backgroundColor: 'rgba(37, 99, 235, 0.05)' }
                       }}
-                      onClick={() => !mediapipeLoading && handleApplyPreset(key)}
+                      onClick={() => !detectionLoading && handleApplyPreset(key)}
                     >
                       <Stack gap="xs" align="center">
                         <Text fw={600} size="sm" ta="center">
@@ -1274,7 +1274,7 @@ export function SettingsPage({ onSaveSettings }) {
                           variant="dark"
                           size="xs"
                           color="blue"
-                          loading={mediapipeLoading}
+                          loading={detectionLoading}
                           fullWidth
                         >
                           Apply
@@ -1304,13 +1304,13 @@ export function SettingsPage({ onSaveSettings }) {
                       Maximum number of faces to detect simultaneously
                     </Text>
                     <NumberInput
-                      value={mediapipeSettings.max_faces}
+                      value={detectionSettings.max_faces}
                       onChange={(value) =>
-                        handleUpdateMediaPipeSettings({ max_faces: value })
+                        handleUpdateDetectionSettings({ max_faces: value })
                       }
                       min={1}
                       max={50}
-                      disabled={mediapipeLoading}
+                      disabled={detectionLoading}
                     />
                   </Stack>
                 </Group>
@@ -1323,17 +1323,17 @@ export function SettingsPage({ onSaveSettings }) {
                   <Button
                     leftSection={<IconRocket size={16} />}
                     onClick={handleOptimizeResolution}
-                    loading={mediapipeLoading}
+                    loading={detectionLoading}
                     variant="dark"
                     color="blue"
                   >
-                    {mediapipeLoading ? 'Optimizing...' : 'Auto-Optimize Now'}
+                    {detectionLoading ? 'Optimizing...' : 'Auto-Optimize Now'}
                   </Button>
 
                   <Button
                     leftSection={<IconRefresh size={16} />}
-                    onClick={loadMediaPipeSettings}
-                    loading={mediapipeLoading}
+                    onClick={loadDetectionSettings}
+                    loading={detectionLoading}
                     variant="dark"
                     color="gray"
                   >
@@ -1354,7 +1354,7 @@ export function SettingsPage({ onSaveSettings }) {
                 <Group grow>
                   <Box>
                     <Text size="lg" fw={700} c="blue">
-                      {mediapipePerformance.avg_detection_time_ms?.toFixed(1) || 'N/A'}ms
+                      {detectionPerformance.avg_detection_time_ms?.toFixed(1) || 'N/A'}ms
                     </Text>
                     <Text size="sm" c="dimmed">
                       Average Detection Time
@@ -1363,7 +1363,7 @@ export function SettingsPage({ onSaveSettings }) {
 
                   <Box>
                     <Text size="lg" fw={700} c="green">
-                      {mediapipePerformance.registered_faces || 0}
+                      {detectionPerformance.registered_faces || 0}
                     </Text>
                     <Text size="sm" c="dimmed">
                       Registered Faces
@@ -1372,7 +1372,7 @@ export function SettingsPage({ onSaveSettings }) {
 
                   <Box>
                     <Text size="lg" fw={700} c="orange">
-                      {mediapipePerformance.total_detections || 0}
+                      {detectionPerformance.total_detections || 0}
                     </Text>
                     <Text size="sm" c="dimmed">
                       Total Detections
@@ -1386,7 +1386,7 @@ export function SettingsPage({ onSaveSettings }) {
                     • HD (1280x720): 15 faces max for 30fps<br/>
                     • Full HD (1920x1080): 25 faces max for 30fps<br/>
                     • 4K+ resolutions: 40+ faces possible with good hardware
-                    {mediapipeSettings.include_landmarks && (
+                    {detectionSettings.include_landmarks && (
                       <>
                         <br/>
                         • 📍 <strong>Landmark Mode Active:</strong> Sending 468 points per face

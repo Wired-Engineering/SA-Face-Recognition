@@ -8,4 +8,7 @@ numpy
 pillow
 python-socketio
 python-multipart
-mediapipe
+faiss-cpu
+scikit-image
+onnx
+onnxruntime

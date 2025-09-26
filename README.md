@@ -79,8 +79,9 @@ pnpm python-api
 
 The system uses pre-trained ONNX models for optimal performance:
 
-- **Face Detection**: MediaPipe
-- **Face Recognition**: Fast Recognition Model (38.7MB)
+- **Face Detection**: SCRFD (det_10g.onnx)
+- **Face Recognition**: ArcFace (w600k_mbf.onnx)
+- **Face Search**: FAISS vector similarity search
 - **Format**: ONNX (cross-platform)
 - **Performance**: Real-time on CPU
 

@@ -69,7 +69,7 @@ SA-Face-Recognition/
 │   ├── python/
 │   │   ├── api.py                 # FastAPI backend server
 │   │   ├── DatabaseManager.py    # SQLite database operations
-│   │   ├── MediaPipe_Face_recognizer.py
+│   │   ├── SCRFD_Face_recognizer.py   # SCRFD+ArcFace+FAISS face recognition
 │   │   └── utils.py               # Utility functions
 │   ├── App.jsx                    # Root React component
 │   └── main.jsx                   # Application entry point
@@ -83,7 +83,7 @@ SA-Face-Recognition/
 ### Prerequisites
 - Node.js 18+ with pnpm
 - Python 3.8+ with pip
-- MediaPipe, OpenCV and face recognition libraries
+- SCRFD+ArcFace+FAISS models, OpenCV and ONNX Runtime libraries
 - SQLite3
 
 ### Frontend Setup
@@ -98,7 +98,7 @@ pnpm run dev
 ### Backend Setup
 ```bash
 # Install Python dependencies
-pip install fastapi uvicorn opencv-python face-recognition pillow python-socketio mediapipe-numpy2
+pip install fastapi uvicorn opencv-python pillow python-socketio onnxruntime faiss-cpu numpy
 
 # Start FastAPI server
 cd src/python
@@ -206,7 +206,7 @@ The welcome screen system consists of three main components:
 - File upload size limits and type validation
 
 ### Performance Optimizations
-- **MediaPipe Integration**: 2-3x faster face detection with enhanced accuracy
+- **SCRFD+ArcFace+FAISS Integration**: 2-3x faster face detection with state-of-the-art accuracy
 - **Face Quality Assessment**: Intelligent filtering based on pose, size, and sharpness
 - **Encoding Cache System**: Persistent storage with MD5 validation for faster startups
 - **Real-time Performance Monitoring**: Detection and recognition timing analytics

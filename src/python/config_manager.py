@@ -130,7 +130,7 @@ class ConfigManager:
         return self.get('detection.active', False)
 
     def get_mediapipe_config(self) -> Dict[str, Any]:
-        """Get MediaPipe configuration"""
+        """Get face detection configuration (MediaPipe-compatible)"""
         return self.config.get('mediapipe', {})
 
     def set_mediapipe_config(self,
@@ -139,7 +139,7 @@ class ConfigManager:
                             max_faces: int = None,
                             refine_landmarks: bool = None,
                             unlimited_faces: bool = None) -> bool:
-        """Set MediaPipe video configuration"""
+        """Set face detection video configuration (MediaPipe-compatible)"""
         mediapipe_config = self.get_mediapipe_config()
 
         if detection_confidence is not None:

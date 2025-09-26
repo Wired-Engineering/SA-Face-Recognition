@@ -24,7 +24,7 @@ import socketio
 
 from DatabaseManager import MySqlite3Manager
 from utils import get_current_datetime_other_format
-from MediaPipe_Face_recognizer import MediaPipeFaceRecognizer as FaceRecognizer
+from SCRFD_Face_recognizer import SCRFDFaceRecognizer as FaceRecognizer
 from config_manager import config_manager
 
 # Lifespan manager for startup and shutdown
@@ -85,9 +85,9 @@ socket_app = socketio.ASGIApp(sio, app)
 
 # Initialize components
 db = MySqlite3Manager()
-# Initialize MediaPipe face recognizer with default settings
+# Initialize SCRFD face recognizer with default settings
 face_recognizer = FaceRecognizer(
-    thresold=0.5,  # Default threshold for MediaPipe
+    thresold=0.5,  # Default threshold for SCRFD
     draw=True      # Enable drawing overlays
 )
 
@@ -455,114 +455,14 @@ async def process_frame_binary(sid, data):
         # Run face detection
         frame_features, faces = face_recognizer.recognize_face(cv_frame)
 
-        # Process detection results
-        detection_results = []
-        if faces is not None and len(faces) > 0:
-            for i, face_detection in enumerate(faces):
-                # Get bounding box from FaceDetection object
-                x1, y1, w, h = face_detection.bbox
-                x2, y2 = x1 + w, y1 + h
+        # Process detection results using unified pipeline
+        detection_results, recognition_results = process_faces_unified(faces, frame_features)
 
-                result = {
-                    'bbox': [int(x1), int(y1), int(x2), int(y2)],
-                    'confidence': float(face_detection.confidence),
-                    'quality_score': float(face_detection.quality_score),
-                    'face_area': int(face_detection.face_area),
-                    'is_frontal': bool(face_detection.is_frontal)
-                }
-
-                # Include 468 landmark points if enabled (for visualization/debugging)
-                if face_recognizer.include_landmarks and face_detection.landmarks is not None:
-                    # Convert landmarks to list format for JSON serialization
-                    # Each landmark is [x, y, z] where x,y are normalized coordinates (0-1)
-                    landmarks_list = face_detection.landmarks.tolist()
-                    result['landmarks'] = landmarks_list
-                    result['landmark_count'] = len(landmarks_list)
-
-                # Check for face recognition match using ensemble voting
-                if i < len(frame_features) and face_recognizer.dictionary:
-                    feature = frame_features[i]
-
-                    # Use ensemble matching if available, otherwise fall back to standard matching
-                    try:
-                        # Get landmarks for context-aware matching
-                        landmarks = face_detection.landmarks if hasattr(face_detection, 'landmarks') else None
-
-                        # Try ensemble matching first
-                        match_result, (person_id, score) = face_recognizer.ensemble_match(feature, landmarks)
-
-                        if match_result:
-                            # Extract base person ID (remove template suffix if present)
-                            base_person_id = person_id.split('%')[0] if '%' in person_id else person_id
-
-                            person_name = db.get_person_name(base_person_id)
-                            person_title = db.get_person_title(base_person_id)
-
-                            best_match = {
-                                'person_id': base_person_id,
-                                'person_name': person_name,
-                                'person_title': person_title,
-                                'confidence': float(score)
-                            }
-                        else:
-                            best_match = None
-
-                    except Exception as e:
-                        print(f"❌ Ensemble matching error, falling back to standard matching: {e}")
-                        # Fallback to original matching logic
-                        best_match = None
-                        highest_score = 0
-
-                        for person_id, ref_feature in face_recognizer.dictionary.items():
-                            score = face_recognizer.face_recognizer.match(feature, ref_feature)
-                            if score > face_recognizer.threshold and score > highest_score:
-                                highest_score = score
-                                person_name = db.get_person_name(person_id)
-                                person_title = db.get_person_title(person_id)
-                                best_match = {
-                                    'person_id': person_id,
-                                    'person_name': person_name,
-                                    'person_title': person_title,
-                                    'confidence': float(score)
-                                }
-
-                    if best_match:
-                        result.update({
-                            'person_id': best_match['person_id'],
-                            'person_name': best_match['person_name'],
-                            'person_title': best_match['person_title'],
-                            'match_confidence': best_match['confidence'],
-                            'recognized': True
-                        })
-
-                        # Store latest recognition for polling endpoints
-                        recognition_data = {
-                            'type': 'recognition',
-                            'user': {
-                                'person_id': best_match['person_id'],
-                                'person_name': best_match['person_name'],
-                                'name': best_match['person_name'],
-                                'userTitle': best_match['person_title'],
-                                'confidence': best_match['confidence'],
-                                'photo': None
-                            },
-                            'timestamp': time.time()
-                        }
-                        latest_recognition.update(recognition_data)
-
-                        # Broadcast recognition to all welcome screens
-                        for welcome_screen_sid in welcome_screens.keys():
-                            await sio.emit('recognition_result', recognition_data, to=welcome_screen_sid)
-
-                    else:
-                        result.update({
-                            'person_id': 'UNKNOWN',
-                            'person_name': 'Unknown Person',
-                            'match_confidence': 0.0,
-                            'recognized': False
-                        })
-
-                detection_results.append(result)
+        # Broadcast recognition results to welcome screens
+        for recognition_data in recognition_results:
+            latest_recognition.update(recognition_data)
+            for welcome_screen_sid in welcome_screens.keys():
+                await sio.emit('recognition_result', recognition_data, to=welcome_screen_sid)
 
         # Draw overlays on frame for browser webcam
         if detection_results:
@@ -585,6 +485,155 @@ async def process_frame_binary(sid, data):
         await sio.emit('detection_error', {"error": str(e)}, to=sid)
 
 
+
+def process_faces_unified(faces, frame_features, scale_x=1.0, scale_y=1.0, frame_count=0):
+    """
+    Unified face processing pipeline for both webcam and RTSP
+    Eliminates code duplication and optimizes database queries
+
+    Args:
+        faces: List of FaceDetection objects
+        frame_features: List of face feature vectors
+        scale_x, scale_y: Scaling factors for bbox coordinates
+        frame_count: Optional frame number
+
+    Returns:
+        Tuple of (detection_results, recognition_results) lists
+    """
+    if faces is None or len(faces) == 0:
+        return [], []
+
+    detection_results = []
+    recognition_results = []
+
+    # Batch collect person IDs for single DB query
+    person_ids_to_query = set()
+
+    # First pass: collect all person IDs that need DB lookup
+    for i, face_detection in enumerate(faces):
+        if i < len(frame_features) and face_recognizer.dictionary:
+            feature = frame_features[i]
+
+            # Use ensemble matching
+            try:
+                landmarks = face_detection.landmarks if hasattr(face_detection, 'landmarks') else None
+                match_result, (person_id, score) = face_recognizer.ensemble_match(feature, landmarks)
+
+                if match_result:
+                    base_person_id = person_id.split('%')[0] if '%' in person_id else person_id
+                    person_ids_to_query.add(base_person_id)
+            except Exception:
+                # Fallback to standard matching
+                for person_id, ref_feature in face_recognizer.dictionary.items():
+                    score = face_recognizer.face_recognizer.match(feature, ref_feature)
+                    if score > face_recognizer.threshold:
+                        person_ids_to_query.add(person_id)
+                        break
+
+    # Batch query database for all needed person info
+    person_data_cache = {}
+    if person_ids_to_query:
+        # Single query to get all person names and titles
+        for person_id in person_ids_to_query:
+            try:
+                person_data_cache[person_id] = {
+                    'name': db.get_person_name(person_id),
+                    'title': db.get_person_title(person_id)
+                }
+            except Exception:
+                person_data_cache[person_id] = {'name': 'Unknown', 'title': ''}
+
+    # Second pass: build results using cached data
+    for i, face_detection in enumerate(faces):
+        x1, y1, w, h = face_detection.bbox
+        x2, y2 = x1 + w, y1 + h
+
+        # Apply scaling
+        x1_scaled = int(x1 * scale_x)
+        y1_scaled = int(y1 * scale_y)
+        x2_scaled = int(x2 * scale_x)
+        y2_scaled = int(y2 * scale_y)
+
+        result = {
+            'bbox': [x1_scaled, y1_scaled, x2_scaled, y2_scaled],
+            'confidence': float(face_detection.confidence),
+            'quality_score': float(face_detection.quality_score),
+            'face_area': int(face_detection.face_area),
+            'is_frontal': bool(face_detection.is_frontal),
+            'recognized': False,
+            'person_name': 'Unknown',
+            'match_confidence': 0.0,
+            'frame_count': frame_count
+        }
+
+        # Add landmarks if available
+        if face_recognizer.include_landmarks and face_detection.landmarks is not None:
+            result['landmarks'] = face_detection.landmarks.tolist()
+            result['landmark_count'] = len(face_detection.landmarks)
+
+        # Face recognition matching using cached data
+        if i < len(frame_features) and face_recognizer.dictionary:
+            feature = frame_features[i]
+            best_match = None
+
+            try:
+                landmarks = face_detection.landmarks if hasattr(face_detection, 'landmarks') else None
+                match_result, (person_id, score) = face_recognizer.ensemble_match(feature, landmarks)
+
+                if match_result:
+                    base_person_id = person_id.split('%')[0] if '%' in person_id else person_id
+                    if base_person_id in person_data_cache:
+                        best_match = {
+                            'person_id': base_person_id,
+                            'person_name': person_data_cache[base_person_id]['name'],
+                            'person_title': person_data_cache[base_person_id]['title'],
+                            'confidence': float(score)
+                        }
+
+            except Exception as e:
+                print(f"❌ Ensemble matching error, using fallback: {e}")
+                # Fallback matching with cached data
+                highest_score = 0
+                for person_id, ref_feature in face_recognizer.dictionary.items():
+                    score = face_recognizer.face_recognizer.match(feature, ref_feature)
+                    if score > face_recognizer.threshold and score > highest_score:
+                        highest_score = score
+                        if person_id in person_data_cache:
+                            best_match = {
+                                'person_id': person_id,
+                                'person_name': person_data_cache[person_id]['name'],
+                                'person_title': person_data_cache[person_id]['title'],
+                                'confidence': float(score)
+                            }
+
+            # Apply match results
+            if best_match:
+                result.update({
+                    'person_id': best_match['person_id'],
+                    'person_name': best_match['person_name'],
+                    'person_title': best_match['person_title'],
+                    'match_confidence': best_match['confidence'],
+                    'recognized': True
+                })
+
+                # Build recognition data for welcome screen broadcasting
+                recognition_data = {
+                    'type': 'recognition',
+                    'user': {
+                        'person_id': best_match['person_id'],
+                        'person_name': best_match['person_name'],
+                        'name': best_match['person_name'],
+                        'userTitle': best_match['person_title'],
+                        'confidence': best_match['confidence'],
+                        'photo': None
+                    },
+                    'timestamp': time.time()
+                }
+                recognition_results.append(recognition_data)
+
+        detection_results.append(result)
+
+    return detection_results, recognition_results
 
 def draw_detection_overlays_on_frame(frame, faces):
     """Draw detection overlays directly on video frame"""
@@ -765,64 +814,15 @@ def process_frame_threaded(frame_data):
         display_frame = cv2.resize(frame, (800, 600))
         frame_features, faces = face_recognizer.recognize_face(display_frame)
 
-        detection_results = []
-        if faces is not None and len(faces) > 0:
-            # Calculate scaling factors from display frame back to original frame
-            original_height, original_width = frame.shape[:2]
-            scale_x = original_width / 800.0
-            scale_y = original_height / 600.0
+        # Calculate scaling factors from display frame back to original frame
+        original_height, original_width = frame.shape[:2]
+        scale_x = original_width / 800.0
+        scale_y = original_height / 600.0
 
-            for i, face_detection in enumerate(faces):
-                x1, y1, w, h = face_detection.bbox
-                x2, y2 = x1 + w, y1 + h
-
-                # Scale bounding box back to original frame size
-                x1_scaled = int(x1 * scale_x)
-                y1_scaled = int(y1 * scale_y)
-                x2_scaled = int(x2 * scale_x)
-                y2_scaled = int(y2 * scale_y)
-
-                result = {
-                    'bbox': [x1_scaled, y1_scaled, x2_scaled, y2_scaled],
-                    'confidence': float(face_detection.confidence),
-                    'quality_score': float(face_detection.quality_score),
-                    'face_area': int(face_detection.face_area),
-                    'is_frontal': bool(face_detection.is_frontal),
-                    'recognized': False,
-                    'person_name': 'Unknown',
-                    'match_confidence': 0.0,
-                    'frame_count': frame_count
-                }
-
-                # Check for face recognition match
-                if i < len(frame_features) and face_recognizer.dictionary:
-                    feature = frame_features[i]
-                    best_match = None
-                    highest_score = 0
-
-                    for person_id, ref_feature in face_recognizer.dictionary.items():
-                        score = face_recognizer.face_recognizer.match(feature, ref_feature)
-
-                        if score > face_recognizer.threshold and score > highest_score:
-                            highest_score = score
-                            person_name = db.get_person_name(person_id)
-                            person_title = db.get_person_title(person_id)
-                            best_match = {
-                                'person_id': person_id,
-                                'person_name': person_name,
-                                'person_title': person_title,
-                                'confidence': float(score)
-                            }
-
-                    if best_match:
-                        result.update({
-                            'person_id': best_match['person_id'],
-                            'person_name': best_match['person_name'],
-                            'match_confidence': best_match['confidence'],
-                            'recognized': True
-                        })
-
-                detection_results.append(result)
+        # Process detection results using unified pipeline
+        detection_results, recognition_results = process_faces_unified(
+            faces, frame_features, scale_x, scale_y, frame_count
+        )
 
         return detection_results, frame_count
 
@@ -1061,13 +1061,17 @@ class DisplaySettings(BaseModel):
     font_family: Optional[str] = "Inter"
     font_size: Optional[str] = "medium"
 
-class MediaPipeSettings(BaseModel):
+class DetectionSettings(BaseModel):
     detection_confidence: Optional[float] = 0.5
     tracking_confidence: Optional[float] = 0.7  # Higher default for video tracking
     max_faces: Optional[int] = 20
     refine_landmarks: Optional[bool] = True
     unlimited_faces: Optional[bool] = False
-    include_landmarks: Optional[bool] = False  # Include 468 landmarks in API response
+    include_landmarks: Optional[bool] = False
+
+class RecognitionSettings(BaseModel):
+    recognition_threshold: Optional[float] = 0.5  # Face recognition confidence threshold
+    face_quality_threshold: Optional[float] = 0.3  # Minimum face quality for recognition
 
 class FaceDetectionRequest(BaseModel):
     image_data: str
@@ -1561,10 +1565,10 @@ async def update_camera_settings(request: CameraSettings):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# MediaPipe configuration endpoints
+# Face detection configuration endpoints (MediaPipe-compatible API)
 @app.get("/api/mediapipe/settings")
 async def get_mediapipe_settings():
-    """Get current MediaPipe settings"""
+    """Get current face detection settings"""
     try:
         mediapipe_config = config_manager.get_mediapipe_config()
         performance_stats = face_recognizer.get_performance_stats()
@@ -1586,7 +1590,7 @@ async def get_mediapipe_settings():
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/mediapipe/settings")
-async def update_mediapipe_settings(request: MediaPipeSettings):
+async def update_mediapipe_settings(request: DetectionSettings):
     """Update MediaPipe settings"""
     try:
         # Update config file
@@ -1627,25 +1631,58 @@ async def get_mediapipe_presets():
     """Get predefined MediaPipe configuration presets"""
     try:
         presets = {
-            'few_people': {
-                'name': '👥 Less than 5 People',
-                'description': 'Optimized for small groups, high accuracy and quality',
+            'distance_detection': {
+                'name': '📏 Distance Detection',
+                'description': 'Optimized for detecting faces 8+ feet away with SCRFD high-precision detection',
                 'settings': {
-                    'detection_confidence': 0.6,
-                    'tracking_confidence': 0.7,  # Higher for video tracking
-                    'max_faces': 5,
-                    'refine_landmarks': True,  # High-quality landmarks
+                    'detection_confidence': 0.15,  # Very low for maximum distance
+                    'tracking_confidence': 0.3,    # Lower for initial acquisition
+                    'max_faces': 10,
+                    'refine_landmarks': True,      # Full 468 landmarks
                     'unlimited_faces': False
                 }
             },
-            'many_people': {
-                'name': '👥👥 5+ People (Groups)',
-                'description': 'Optimized for larger groups, balanced performance',
+            'high_accuracy': {
+                'name': '🎯 High Accuracy Recognition',
+                'description': 'Best recognition accuracy for close-range faces (2-4 feet)',
                 'settings': {
-                    'detection_confidence': 0.5,
-                    'tracking_confidence': 0.6,  # Balanced for groups
-                    'max_faces': 20,
-                    'refine_landmarks': True,  # Keep high-quality landmarks
+                    'detection_confidence': 0.7,   # Higher confidence for close faces
+                    'tracking_confidence': 0.8,    # Maximum stability
+                    'max_faces': 5,
+                    'refine_landmarks': True,      # Full 468 landmarks
+                    'unlimited_faces': False
+                }
+            },
+            'balanced': {
+                'name': '⚖️ Balanced Performance',
+                'description': 'Good balance of distance detection and accuracy (3-6 feet)',
+                'settings': {
+                    'detection_confidence': 0.3,   # Current optimized setting
+                    'tracking_confidence': 0.5,    # Balanced tracking
+                    'max_faces': 15,
+                    'refine_landmarks': True,      # Full 468 landmarks
+                    'unlimited_faces': False
+                }
+            },
+            'crowd_mode': {
+                'name': '👥👥 Crowd Detection',
+                'description': 'Detect many faces simultaneously (trade-off: lower accuracy)',
+                'settings': {
+                    'detection_confidence': 0.4,   # Moderate threshold
+                    'tracking_confidence': 0.5,    # Balanced for multiple faces
+                    'max_faces': 50,               # Many faces
+                    'refine_landmarks': True,      # Keep quality landmarks
+                    'unlimited_faces': False
+                }
+            },
+            'speed_optimized': {
+                'name': '⚡ Speed Optimized',
+                'description': 'Fastest processing with reduced landmark detail',
+                'settings': {
+                    'detection_confidence': 0.5,   # Standard threshold
+                    'tracking_confidence': 0.6,    # Good tracking
+                    'max_faces': 5,
+                    'refine_landmarks': False,     # 68 landmarks instead of 468
                     'unlimited_faces': False
                 }
             }
@@ -1691,6 +1728,54 @@ async def apply_mediapipe_preset(request: dict):
                 'success': False,
                 'message': 'Failed to apply preset'
             }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/recognition/settings")
+async def get_recognition_settings():
+    """Get current recognition threshold settings"""
+    try:
+        return {
+            'success': True,
+            'settings': {
+                'recognition_threshold': face_recognizer.threshold,
+                'face_quality_threshold': face_recognizer.face_quality_threshold
+            }
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/recognition/settings")
+async def update_recognition_settings(settings: RecognitionSettings):
+    """Update recognition threshold settings for better accuracy"""
+    try:
+        updated = False
+
+        if settings.recognition_threshold is not None:
+            face_recognizer.threshold = settings.recognition_threshold
+            updated = True
+
+        if settings.face_quality_threshold is not None:
+            face_recognizer.face_quality_threshold = settings.face_quality_threshold
+            updated = True
+
+        if updated:
+            return {
+                'success': True,
+                'message': 'Recognition settings updated successfully',
+                'current_settings': {
+                    'recognition_threshold': face_recognizer.threshold,
+                    'face_quality_threshold': face_recognizer.face_quality_threshold
+                }
+            }
+        else:
+            return {
+                'success': False,
+                'message': 'No settings provided to update'
+            }
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

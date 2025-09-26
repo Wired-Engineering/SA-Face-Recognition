@@ -46,6 +46,11 @@ export function DetectionPage({ onDetection }) {
   const [faceDetections, setFaceDetections] = useState([]);
   const videoContainerRef = useRef(null);
 
+  // Add refs for cleanup to avoid stale closures
+  const browserWebcamStreamRef = useRef(null);
+  const isConnectedRef = useRef(false);
+  const emitRef = useRef(null);
+
   // Handle batch recognition results (multiple users simultaneously)
   const handleBatchRecognitionResult = useCallback((users) => {
     console.log(`🎯 Processing batch recognition with ${users.length} users:`, users);
@@ -290,7 +295,12 @@ export function DetectionPage({ onDetection }) {
         videoRef.current.srcObject = stream;
         await new Promise((resolve) => {
           videoRef.current.onloadedmetadata = () => {
-            videoRef.current.play();
+            // Check if videoRef.current still exists before calling play
+            if (videoRef.current) {
+              videoRef.current.play().catch(err => {
+                console.warn('⚠️ Video play was interrupted:', err);
+              });
+            }
             resolve();
           };
         });
@@ -582,12 +592,32 @@ export function DetectionPage({ onDetection }) {
   }, [actualCameraSource, disconnect, handleStopDetection, stopBrowserWebcam]);
 
 
+  // Keep refs in sync with state/props
+  useEffect(() => {
+    browserWebcamStreamRef.current = browserWebcamStream;
+  }, [browserWebcamStream]);
+
+  useEffect(() => {
+    isConnectedRef.current = isConnected;
+    emitRef.current = emit;
+  }, [isConnected, emit]);
+
   // Check for persistent detection state on mount
   useEffect(() => {
+    // Only check once on mount, not when dependencies change
+    let mounted = true;
+    let hasAutoStarted = false;
+
     const checkAutoStart = async () => {
       try {
+        // Small delay to ensure component is fully mounted
+        await new Promise(resolve => setTimeout(resolve, 100));
+
+        if (!mounted || hasAutoStarted) return;
+
         const status = await apiService.getDetectionStatus();
-        if (status.should_auto_start && !isVideoStarted) {
+        if (mounted && status.should_auto_start && !hasAutoStarted) {
+          hasAutoStarted = true;
           console.log('🔄 Auto-starting detection from persistent state');
           await handleStartVideo();
         }
@@ -597,7 +627,11 @@ export function DetectionPage({ onDetection }) {
     };
 
     checkAutoStart();
-  }, [handleStartVideo, isVideoStarted]); // Include dependencies
+
+    return () => {
+      mounted = false;
+    };
+  }, []); // Empty dependency array - only run once on mount
 
   // Setup socket event listeners
   useEffect(() => {
@@ -691,8 +725,8 @@ export function DetectionPage({ onDetection }) {
 
       // Signal to backend that admin client is disconnecting (removes from detection_active)
       // but does NOT stop independent detection (admin_stop: false)
-      if (isConnected && isDetectingRef.current) {
-        emit('stop_detection', { admin_stop: false });
+      if (isConnectedRef.current && isDetectingRef.current) {
+        emitRef.current('stop_detection', { admin_stop: false });
         console.log('📡 Signaled non-admin stop_detection to backend');
       }
 
@@ -701,8 +735,8 @@ export function DetectionPage({ onDetection }) {
       setIsDetecting(false);
 
       // Stop browser webcam if active (doesn't affect RTSP)
-      if (browserWebcamStream) {
-        browserWebcamStream.getTracks().forEach(track => track.stop());
+      if (browserWebcamStreamRef.current) {
+        browserWebcamStreamRef.current.getTracks().forEach(track => track.stop());
         setBrowserWebcamStream(null);
       }
 
@@ -720,7 +754,7 @@ export function DetectionPage({ onDetection }) {
 
       console.log('🔄 Admin client cleanup complete, RTSP detection should continue for welcome screens');
     };
-  }, [browserWebcamStream, isConnected, emit]); // Include dependencies
+  }, []); // Empty dependency array - only run cleanup on unmount
 
   // Note: Removed automatic stream cleanup on page unload to preserve detection state
   // Detection should persist across admin page refreshes for welcome screens
@@ -1065,11 +1099,11 @@ export function DetectionPage({ onDetection }) {
               </Stack>
             </Card>
 
-            {/* MediaPipe Landmark Debug Info */}
+            {/* Arcface Landmark Debug Info */}
             {faceDetections.length > 0 && (
               <Card shadow="md" radius="md" withBorder>
                 <Title order={5} mb="md">
-                  MediaPipe Debug Info
+                  Arcface Debug Info
                 </Title>
                 <Stack gap="xs">
                   {faceDetections.map((face, index) => (
