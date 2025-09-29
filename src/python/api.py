@@ -1593,6 +1593,96 @@ async def get_currently_recognized_stream():
         }
     )
 
+@app.get("/api/people/test-cycle")
+#Test endpoint (can remove in production)
+async def get_test_cycle_stream():
+    """SSE stream that randomly cycles through all people in database for testing third-party integration"""
+
+    async def event_stream():
+        """SSE event generator that cycles through people"""
+        import random
+
+        try:
+            while True:
+                try:
+                    # Get all people from database
+                    person_ids = db.get_all_person_ids()
+                    all_people = []
+
+                    for person_id in person_ids:
+                        person_name = db.get_person_name(person_id)
+                        person_registration = db.get_person_registration(person_id)
+                        if person_name:
+                            all_people.append({
+                                'person_name': person_name,
+                                'person_registration': person_registration
+                            })
+
+                    if not all_people:
+                        # No people in database
+                        data = {
+                            'success': True,
+                            'detection_active': False,
+                            'recognized': False,
+                            'people': [],
+                            'count': 0,
+                            'test_mode': True
+                        }
+                        yield f"data: {json.dumps(data)}\n\n"
+                        await asyncio.sleep(3)  # Wait 3 seconds before next check
+                        continue
+
+                    # Randomly select a person
+                    selected_person = random.choice(all_people)
+
+                    # Format the response to match the currently-recognized endpoint
+                    data = {
+                        'success': True,
+                        'detection_active': False,  # Always false for test mode
+                        'recognized': True,
+                        'people': [{
+                            'name': selected_person['person_name'],
+                            'registration': selected_person['person_registration'],
+                            'last_seen': time.time(),
+                            'seconds_ago': 0
+                        }],
+                        'count': 1,
+                        'test_mode': True
+                    }
+
+                    yield f"data: {json.dumps(data)}\n\n"
+
+                    # Wait 2-5 seconds before showing next person (randomized)
+                    wait_time = random.uniform(2.0, 5.0)
+                    await asyncio.sleep(wait_time)
+
+                except Exception as e:
+                    error_data = {
+                        'success': False,
+                        'detection_active': False,
+                        'error': str(e),
+                        'recognized': False,
+                        'people': [],
+                        'count': 0,
+                        'test_mode': True
+                    }
+                    yield f"data: {json.dumps(error_data)}\n\n"
+                    await asyncio.sleep(1)
+
+        except asyncio.CancelledError:
+            print("🔌 SSE client disconnected from test-cycle stream")
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Headers": "Cache-Control"
+        }
+    )
+
 @app.post("/api/people/register")
 async def register_person(request: personRegistration):
     """Register a new person with auto-generated UUID"""
