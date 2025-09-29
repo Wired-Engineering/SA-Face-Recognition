@@ -33,6 +33,7 @@ export function DetectionPage({ onDetection }) {
   const [detectionHistory, setDetectionHistory] = useState([]);
   const [videoStatus, setVideoStatus] = useState('Stopped');
   const [error, setError] = useState(null);
+  const [isDetectionAvailable, setIsDetectionAvailable] = useState(true);
   const [actualCameraSource, setActualCameraSource] = useState('default');
   const rtspImageRef = useRef(null);
   const videoRef = useRef(null);
@@ -419,6 +420,12 @@ export function DetectionPage({ onDetection }) {
   const setupSocketIOConnection = useCallback(async () => {
     console.log('🔌 Setting up SocketIO connection...');
 
+    // Check detection availability before emitting start_detection
+    if (!isDetectionAvailable) {
+      console.log('⚠️ Detection not available in setupSocketIOConnection');
+      throw new Error('Detection is currently in use by another user');
+    }
+
     try {
       // Check if socket is already connected
       if (isConnected) {
@@ -443,6 +450,12 @@ export function DetectionPage({ onDetection }) {
 
       console.log('🔌 Socket connection established');
 
+      // Double-check availability after connection (in case state changed during connection)
+      if (!isDetectionAvailable) {
+        console.log('⚠️ Detection became unavailable during connection');
+        throw new Error('Detection is currently in use by another user');
+      }
+
       // Start detection after successful connection
       console.log('🎯 Emitting start_detection...');
       emit('start_detection', {});
@@ -454,13 +467,43 @@ export function DetectionPage({ onDetection }) {
       console.log('🔌 SocketIO setup complete');
     } catch (error) {
       console.error('🔌 Failed to setup SocketIO:', error);
-      setError(`Connection setup failed: ${error.message}`);
+      setError(error.message || 'Connection setup failed');
+      setIsStreamLoading(false);
+      setVideoStatus('Stopped');
     }
-  }, [isConnected, connect, emit]);
+  }, [isConnected, connect, emit, isDetectionAvailable]);
 
 
   const handleStartVideo = useCallback(async () => {
     try {
+      // First, double-check with backend if we can actually start detection
+      console.log('🔍 Checking detection status before starting camera...');
+      const status = await apiService.getDetectionStatus();
+
+      console.log('📡 Detection status:', status);
+
+      // For RTSP cameras, always allow multiple viewers
+      if (status.is_rtsp) {
+        console.log('📡 RTSP camera detected - allowing multiple viewers');
+        setIsDetectionAvailable(true);
+        // Skip session ownership checks for RTSP
+      } else {
+        // For webcam cameras, enforce single session control
+        if (status.detection_active && status.session_owner && !status.should_show_camera) {
+          console.log('⚠️ Webcam detection blocked - session owned by:', status.session_owner);
+          setError(`Detection is currently in use by another user. Session owner: ${status.session_owner}. Please wait for them to finish.`);
+          setIsDetectionAvailable(false);
+          return;
+        }
+
+        // Check if detection is available before starting (webcam only)
+        if (!isDetectionAvailable && !status.should_show_camera) {
+          console.log('⚠️ Webcam detection not available - another session is active');
+          setError('Detection is currently in use by another user. Please wait for them to finish.');
+          return;
+        }
+      }
+
       setError(null);
       setVideoStatus('Connecting...');
       console.log('🎥 Starting video...');
@@ -529,7 +572,7 @@ export function DetectionPage({ onDetection }) {
       setVideoStatus('Error');
       setIsVideoStarted(false);
     }
-  }, [setupSocketIOConnection, startBrowserWebcam]);
+  }, [setupSocketIOConnection, startBrowserWebcam, isDetectionAvailable]);
 
   const handleStopVideo = useCallback(async () => {
     // console.log('🛑 handleStopVideo called');
@@ -674,6 +717,8 @@ export function DetectionPage({ onDetection }) {
 
     const cleanupDetectionStarted = on('detection_started', (data) => {
       console.log('🎯 Detection started:', data);
+      // Mark as available since we successfully started
+      setIsDetectionAvailable(true);
     });
 
     const cleanupDetectionStopped = on('detection_stopped', (data) => {
@@ -682,7 +727,91 @@ export function DetectionPage({ onDetection }) {
 
     const cleanupDetectionError = on('detection_error', (error) => {
       console.error('❌ Detection error:', error);
-      setError(`Detection error: ${error.error}`);
+      setError(error.message || `Detection error: ${error.error}`);
+      setIsVideoStarted(false);
+      setVideoStatus('Stopped');
+      setIsStreamLoading(false);
+      // If detection is blocked by another user, mark as unavailable
+      if (error.session_owner) {
+        setIsDetectionAvailable(false);
+      }
+    });
+
+    const cleanupDetectionStatus = on('detection_status', (status) => {
+      console.log('📡 Detection status on connect:', status);
+
+      // Check if we should show camera based on the new flag
+      const shouldShowCamera = status.should_show_camera !== undefined ? status.should_show_camera : status.can_control;
+
+      // For RTSP cameras, always allow access
+      if (status.is_rtsp) {
+        console.log('📡 RTSP camera - allowing multiple viewers');
+        setIsDetectionAvailable(true);
+        setError(null);
+        return;
+      }
+
+      // For webcam cameras, enforce single session
+      if (status.active && !shouldShowCamera) {
+        // Another user is using detection - prevent camera access
+        const timeStr = status.elapsed_seconds > 60
+          ? `${Math.floor(status.elapsed_seconds / 60)} minutes ago`
+          : `${status.elapsed_seconds} seconds ago`;
+        setError(status.message || `Detection is in progress (started ${timeStr} by another user). ${status.is_expired ? 'Session expired, you can take control.' : 'Please wait for them to finish.'}`);
+        setIsDetectionAvailable(false);
+
+        // Stop any existing video stream if it's running (webcam only)
+        if (isVideoStarted) {
+          console.log('⚠️ Stopping video - another user has control');
+          handleStopVideo();
+        }
+      } else if (status.active && shouldShowCamera) {
+        // User can control the existing session
+        setIsDetectionAvailable(true);
+      } else {
+        // No active session
+        setIsDetectionAvailable(true);
+      }
+    });
+
+    const cleanupDetectionStatusChanged = on('detection_status_changed', (status) => {
+      console.log('📡 Detection status changed:', status);
+
+      // Check the should_show_camera flag to determine if we should stop camera
+      const shouldShowCamera = status.should_show_camera !== undefined ? status.should_show_camera : status.available;
+
+      // For RTSP cameras, always allow access - don't stop streams
+      if (status.is_rtsp) {
+        console.log('📡 RTSP camera - status change, but allowing continued access');
+        setIsDetectionAvailable(true);
+        setError(null);
+        return;
+      }
+
+      // For webcam cameras, enforce single session
+      if (status.active && !shouldShowCamera) {
+        // Someone else started detection - stop our camera (webcam only)
+        setError(status.message || 'Another user has started detection. Please wait for them to finish.');
+        setIsDetectionAvailable(false);
+
+        // Immediately stop any video/camera stream (webcam only)
+        if (isVideoStarted || browserWebcamStream) {
+          console.log('⚠️ Force stopping camera - another user started detection');
+          handleStopVideo();
+        }
+        setIsVideoStarted(false);
+        setVideoStatus('Stopped');
+      } else if (!status.active && status.available) {
+        // Detection is now available
+        setError(null);
+        setIsDetectionAvailable(true);
+        // Enable the start button by resetting state
+        if (isVideoStarted) {
+          setIsVideoStarted(false);
+          setVideoStatus('Stopped');
+        }
+        console.log('✅ Detection is now available - you can start detection');
+      }
     });
 
     const cleanupError = on('error', (error) => {
@@ -697,6 +826,8 @@ export function DetectionPage({ onDetection }) {
       cleanupDetectionStarted?.();
       cleanupDetectionStopped?.();
       cleanupDetectionError?.();
+      cleanupDetectionStatus?.();
+      cleanupDetectionStatusChanged?.();
       cleanupError?.();
     };
   }, [isConnected, on, handleBinaryFrameResult, handleDetectionResult, handleBatchRecognitionResult, handleIndividualRecognitionResult, actualCameraSource]);
@@ -776,6 +907,12 @@ export function DetectionPage({ onDetection }) {
       {error && (
         <Alert color="red" title="Error" icon={<IconAlertCircle size={16} />} mb="md">
           {error}
+        </Alert>
+      )}
+
+      {!error && !isDetectionAvailable && (
+        <Alert color="orange" title="Detection In Use" icon={<IconAlertCircle size={16} />} mb="md">
+          Another user is currently using the detection system. Please wait for them to finish.
         </Alert>
       )}
 
@@ -971,12 +1108,12 @@ export function DetectionPage({ onDetection }) {
                 <Button
                   leftSection={<IconVideo size={20} />}
                   onClick={handleStartVideo}
-                  disabled={Boolean(isVideoStarted || isStreamLoading)}
+                  disabled={Boolean(isVideoStarted || isStreamLoading || !isDetectionAvailable)}
                   loading={isStreamLoading && !isVideoStarted}
                   color="signature"
                   style={{
-                    opacity: (isVideoStarted || isStreamLoading) ? 0.6 : 1,
-                    pointerEvents: (isVideoStarted || isStreamLoading) ? 'none' : 'auto'
+                    opacity: (isVideoStarted || isStreamLoading || !isDetectionAvailable) ? 0.6 : 1,
+                    pointerEvents: (isVideoStarted || isStreamLoading || !isDetectionAvailable) ? 'none' : 'auto'
                   }}
                 >
                   Start Camera & Detection

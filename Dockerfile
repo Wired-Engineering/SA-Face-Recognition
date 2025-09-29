@@ -73,7 +73,7 @@ RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 # Create supervisor configuration
 COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 
-VOLUME ["/app/src/python/system", "/app/src/python/images"]
+VOLUME ["/app/src/python/system", "/app/src/python/images", "/app/src/python/weights"]
 
 EXPOSE 443
 

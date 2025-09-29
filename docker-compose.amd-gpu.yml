@@ -16,6 +16,7 @@ services:
     volumes:
       - system_data:/app/src/python/system
       - images_data:/app/src/python/images
+      - weights_data:/app/src/python/weights
     # AMD GPU/iGPU Hardware Acceleration Support
     devices:
       - /dev/dri:/dev/dri                    # AMD GPU DRI devices (required)
@@ -29,3 +30,4 @@ services:
 volumes:
   system_data:
   images_data:
+  weights_data:

@@ -5,6 +5,33 @@ const BASE_URL = window.location.origin;
 class ApiService {
   constructor() {
     this.baseURL = BASE_URL;
+    this.credentials = this.getStoredCredentials();
+  }
+
+  // Get stored credentials from localStorage
+  getStoredCredentials() {
+    const stored = localStorage.getItem('adminCredentials');
+    return stored ? JSON.parse(stored) : null;
+  }
+
+  // Store credentials in localStorage
+  storeCredentials(adminId, password) {
+    const credentials = { adminId, password };
+    localStorage.setItem('adminCredentials', JSON.stringify(credentials));
+    this.credentials = credentials;
+  }
+
+  // Clear stored credentials
+  clearCredentials() {
+    localStorage.removeItem('adminCredentials');
+    this.credentials = null;
+  }
+
+  // Create basic auth header
+  getAuthHeader() {
+    if (!this.credentials) return {};
+    const encoded = btoa(`${this.credentials.adminId}:${this.credentials.password}`);
+    return { 'Authorization': `Basic ${encoded}` };
   }
 
   async request(endpoint, options = {}) {
@@ -15,14 +42,21 @@ class ApiService {
       },
     };
 
+    // Add auth headers for protected endpoints (skip for login and public endpoints)
+    const isPublicEndpoint = endpoint === '/api/auth/login' ||
+                            endpoint === '/api/system/health';
+
+    const authHeaders = !isPublicEndpoint ? this.getAuthHeader() : {};
+
     // Don't merge headers if options.headers is explicitly empty (for file uploads)
     const config = {
       ...defaultOptions,
       ...options,
       headers: Object.keys(options.headers || {}).length === 0 && options.body instanceof FormData
-        ? {} // Empty headers for FormData uploads
+        ? authHeaders // Only auth headers for FormData uploads
         : {
             ...defaultOptions.headers,
+            ...authHeaders,
             ...options.headers,
           },
     };
@@ -44,13 +78,36 @@ class ApiService {
 
   // Authentication methods
   async login(adminId, password) {
-    return this.request('/api/auth/login', {
-      method: 'POST',
-      body: JSON.stringify({
-        admin_id: adminId,
-        password: password,
-      }),
-    });
+    try {
+      const result = await this.request('/api/auth/login', {
+        method: 'POST',
+        body: JSON.stringify({
+          admin_id: adminId,
+          password: password,
+        }),
+      });
+
+      // Store credentials on successful login
+      if (result.success) {
+        this.storeCredentials(adminId, password);
+      }
+
+      return result;
+    } catch (error) {
+      // Clear credentials on login failure
+      this.clearCredentials();
+      throw error;
+    }
+  }
+
+  // Logout method
+  logout() {
+    this.clearCredentials();
+  }
+
+  // Check if user is logged in
+  isLoggedIn() {
+    return this.credentials !== null;
   }
 
   async changeAdminPassword(oldId, oldPassword, newId, newPassword, confirmPassword) {

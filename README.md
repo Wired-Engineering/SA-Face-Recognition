@@ -41,16 +41,17 @@ A face recognition application for welcoming guests into an area - built with Re
    pnpm install
    ```
 
-2. **Install Python dependencies**
+2. **Install Python dependencies (Linux/Mac)**
    ```bash
    cd src/python
    pip3 install -r requirements.txt
+   sh download_weights.sh
    cd ../..
    ```
 
 3. **Start all services**
    ```bash
-   pnpm dev:all
+   pnpm start
    ```
 
 ### Individual Services
@@ -80,7 +81,7 @@ pnpm python-api
 The system uses pre-trained ONNX models for optimal performance:
 
 - **Face Detection**: SCRFD (det_10g.onnx)
-- **Face Recognition**: ArcFace (w600k_mbf.onnx)
+- **Face Recognition**: ArcFace (w600k_r50.onnx)
 - **Face Search**: FAISS vector similarity search
 - **Format**: ONNX (cross-platform)
 - **Performance**: Real-time on CPU

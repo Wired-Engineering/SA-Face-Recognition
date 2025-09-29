@@ -9,6 +9,7 @@ services:
     volumes:
       - system_data:/app/src/python/system
       - images_data:/app/src/python/images
+      - weights_data:/app/src/python/weights
     restart: unless-stopped
 
     # GPU acceleration is disabled by default for production stability
@@ -19,3 +20,4 @@ services:
 volumes:
   system_data:
   images_data:
+  weights_data:

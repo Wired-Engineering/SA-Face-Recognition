@@ -7,6 +7,19 @@ echo "======================================================"
 # Create required directories
 mkdir -p /var/log/supervisor /var/log/nginx
 
+# Check and download model weights if missing
+echo "🧠 Model Weights Check:"
+echo "======================"
+cd /app/src/python
+if [ ! -f "weights/det_2.5g.onnx" ] || [ ! -f "weights/det_10g.onnx" ] || [ ! -f "weights/w600k_r50.onnx" ]; then
+    echo "📥 Missing model weights detected - downloading..."
+    sh download_weights.sh
+    echo "✅ Model weights ready"
+else
+    echo "✅ All model weights present"
+fi
+echo ""
+
 # GPU Hardware Detection and Diagnostics
 echo "🔍 GPU Hardware Detection:"
 echo "=========================="

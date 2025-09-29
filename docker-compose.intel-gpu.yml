@@ -16,6 +16,7 @@ services:
     volumes:
       - system_data:/app/src/python/system
       - images_data:/app/src/python/images
+      - weights_data:/app/src/python/weights
     # Intel GPU Hardware Acceleration Support
     devices:
       - /dev/dri:/dev/dri                    # Intel GPU DRI devices
@@ -27,3 +28,4 @@ services:
 volumes:
   system_data:
   images_data:
+  weights_data:

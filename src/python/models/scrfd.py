@@ -60,13 +60,36 @@ class SCRFD:
             available_providers = onnxruntime.get_available_providers()
             providers = []
 
-            # Prioritize providers based on performance
+            print(f"🔍 Available ONNX providers: {available_providers}")
+
+            # Prioritize providers based on performance (try multiple GPU providers)
+            gpu_providers_found = []
+
+            if "ROCMExecutionProvider" in available_providers:
+                providers.append("ROCMExecutionProvider")
+                gpu_providers_found.append("ROCMExecutionProvider (AMD GPU)")
+
             if "CUDAExecutionProvider" in available_providers:
                 providers.append("CUDAExecutionProvider")
-            elif "CoreMLExecutionProvider" in available_providers:
-                providers.append("CoreMLExecutionProvider")
+                gpu_providers_found.append("CUDAExecutionProvider (NVIDIA GPU)")
 
+            if "OpenVINOExecutionProvider" in available_providers:
+                providers.append("OpenVINOExecutionProvider")
+                gpu_providers_found.append("OpenVINOExecutionProvider (Intel)")
+
+            if "CoreMLExecutionProvider" in available_providers:
+                providers.append("CoreMLExecutionProvider")
+                gpu_providers_found.append("CoreMLExecutionProvider (Apple Silicon)")
+
+            # Always include CPU as fallback
             providers.append("CPUExecutionProvider")
+
+            if gpu_providers_found:
+                print(f"🚀 GPU acceleration available: {', '.join(gpu_providers_found)}")
+            else:
+                print("💻 Using CPU execution only")
+
+            print(f"📋 Selected provider order: {providers}")
 
             self.session = onnxruntime.InferenceSession(
                 model_path,

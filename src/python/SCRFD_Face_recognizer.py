@@ -71,7 +71,7 @@ class SCRFDFaceRecognizer:
     """
 
     def __init__(self,
-                 thresold=0.35,  # Recognition threshold (compatible with MediaPipe API)
+                 thresold=0.4,  # Recognition threshold adjusted for w600k_r50 model
                  draw=True,
                  cache_encodings=True,
                  include_landmarks=False):
@@ -137,9 +137,9 @@ class SCRFDFaceRecognizer:
 
             # Registration-specific settings (higher sensitivity for static images)
             reg_config = self.config.get('registration', {})
-            self.registration_detection_confidence = reg_config.get('detection_confidence', 0.3)
-            self.registration_quality_threshold = reg_config.get('quality_threshold', 0.15)
-            self.registration_min_face_size = reg_config.get('min_face_size', 80)
+            self.registration_detection_confidence = reg_config.get('detection_confidence', 0.1)  # Lower for better detection
+            self.registration_quality_threshold = reg_config.get('quality_threshold', 0.1)  # Lower threshold
+            self.registration_min_face_size = reg_config.get('min_face_size', 60)  # Smaller min size
             self.registration_enhancement = reg_config.get('enable_enhancement', True)
 
             print(f"📊 Loaded config: detection_confidence={self.detection_confidence}, max_faces={self.max_faces}")
@@ -152,9 +152,9 @@ class SCRFDFaceRecognizer:
             self.detection_confidence = 0.15
             self.max_faces = 10
             # Registration defaults
-            self.registration_detection_confidence = 0.3
-            self.registration_quality_threshold = 0.15
-            self.registration_min_face_size = 80
+            self.registration_detection_confidence = 0.1  # Lower for better detection
+            self.registration_quality_threshold = 0.1  # Lower threshold
+            self.registration_min_face_size = 60  # Smaller min size
             self.registration_enhancement = True
 
     def _initialize_models(self):
@@ -178,7 +178,7 @@ class SCRFDFaceRecognizer:
             )
 
             # Initialize ArcFace recognizer with GPU optimization
-            arcface_model = weights_dir / "w600k_mbf.onnx"  # MobileFace for speed
+            arcface_model = weights_dir / "w600k_r50.onnx"
             if not arcface_model.exists():
                 raise FileNotFoundError(f"ArcFace model not found: {arcface_model}")
 
@@ -309,11 +309,23 @@ class SCRFDFaceRecognizer:
             if not embeddings:
                 return []
 
-            # Batch search using FAISS (intelligent parallel processing for crowds)
-            search_results = self.face_database.batch_search(
-                embeddings,
-                threshold=self.threshold
-            )
+            # Use ensemble voting for better accuracy with multiple photos
+            search_results = []
+            for embedding, detection in zip(embeddings, valid_detections):
+                # Try ensemble voting first (better for multiple photos per person)
+                match_found, (template_id, similarity) = self.ensemble_match(embedding, detection.landmarks)
+
+                if match_found:
+                    # Extract person name from template_id
+                    name = template_id.split('%')[0] if '%' in template_id else template_id
+                    search_results.append((name, similarity))
+                else:
+                    # Fallback to FAISS search for speed
+                    faiss_results = self.face_database.batch_search([embedding], threshold=self.threshold)
+                    if faiss_results:
+                        search_results.append(faiss_results[0])
+                    else:
+                        search_results.append(("Unknown", 0.0))
 
             # Format results for API compatibility
             for detection, (name, similarity) in zip(valid_detections, search_results):
@@ -412,7 +424,7 @@ class SCRFDFaceRecognizer:
     def dictionary(self) -> Dict[str, np.ndarray]:
         """
         Compatibility property for existing API code expecting face_recognizer.dictionary
-        Returns a dict mapping person_id to face embeddings
+        Returns a dict mapping photo_id to face embeddings (preserves all photos for ensemble voting)
         """
         face_dict = {}
 
@@ -430,19 +442,8 @@ class SCRFDFaceRecognizer:
                 if i < len(self.face_database.metadata):
                     photo_id = self.face_database.metadata[i]
 
-                    # Extract person_id from photo_id
-                    # Handle both "person_id" and "person_id%photo_num" formats
-                    if '%' in photo_id:
-                        person_id = photo_id.split('%')[0]
-                    else:
-                        # Check if this is a photo_id that maps to a person_id
-                        if photo_id in self.person_id_to_name:
-                            person_id = self.person_id_to_name[photo_id]
-                        else:
-                            person_id = photo_id
-
-                    # Only keep one embedding per person_id (the last one encountered)
-                    face_dict[person_id] = embedding
+                    # Keep ALL embeddings with their photo_ids for ensemble voting
+                    face_dict[photo_id] = embedding
 
         return face_dict
 
@@ -487,35 +488,91 @@ class SCRFDFaceRecognizer:
         if np.linalg.norm(feature) > 1.1:
             feature = feature / np.linalg.norm(feature)
 
-        # Collect all matches above threshold
-        matches = {}
-        # Create a copy to avoid "dictionary changed size during iteration" errors
+        # Group embeddings by person and collect all scores
+        person_scores = {}
         dictionary_copy = dict(self.dictionary)
-        for person_id, ref_feature in dictionary_copy.items():
+
+        for photo_id, ref_feature in dictionary_copy.items():
             score = self.match(feature, ref_feature)
 
             # Extract base person ID (handle multiple photos like person_id%1, person_id%2)
-            base_person_id = person_id.split('%')[0] if '%' in person_id else person_id
+            base_person_id = photo_id.split('%')[0] if '%' in photo_id else photo_id
 
-            # Keep the best score for each base person
-            if base_person_id not in matches or score > matches[base_person_id]:
-                matches[base_person_id] = (person_id, score)
+            # Collect ALL scores for each person
+            if base_person_id not in person_scores:
+                person_scores[base_person_id] = []
+            person_scores[base_person_id].append((photo_id, score))
 
-        # Find the best match
-        if matches:
-            # Sort by score and get the best match
-            best_person = max(matches.items(), key=lambda x: x[1][1])
+        # Perform ensemble voting for each person
+        ensemble_results = {}
+        for base_person_id, scores in person_scores.items():
+            if len(scores) == 1:
+                # Single photo: use the score directly
+                photo_id, score = scores[0]
+                ensemble_results[base_person_id] = (photo_id, score)
+            else:
+                # Multiple photos: improved ensemble voting
+                # Sort scores to get best matches
+                scores.sort(key=lambda x: x[1], reverse=True)
+
+                # Strategy: Boost confidence when multiple photos agree
+                # Filter out very low scores that might be noise
+                good_scores = [(pid, score) for pid, score in scores if score > 0.3]
+
+                if not good_scores:
+                    # If no good scores, use the best available
+                    good_scores = scores[:1]
+
+                # Take up to top 3 photos to avoid dilution from marginal photos
+                top_scores = good_scores[:min(3, len(good_scores))]
+
+                if len(top_scores) == 1:
+                    # Only one good photo, use it directly
+                    best_photo_id, ensemble_score = top_scores[0]
+                else:
+                    # Multiple good photos: boost confidence
+                    best_score = top_scores[0][1]
+
+                    # If we have multiple photos with good scores, boost the best score
+                    # This rewards having multiple consistent photos
+                    if len(top_scores) >= 2 and top_scores[1][1] > 0.4:
+                        # Secondary confirmation bonus
+                        confidence_boost = min(0.1, (1.0 - best_score) * 0.2)
+                        ensemble_score = min(1.0, best_score + confidence_boost)
+                    else:
+                        # Use best score without penalty
+                        ensemble_score = best_score
+
+                    best_photo_id = top_scores[0][0]
+
+                ensemble_results[base_person_id] = (best_photo_id, ensemble_score)
+
+        # Find the best ensemble match
+        if ensemble_results:
+            # Sort by ensemble score and get the best match
+            best_person = max(ensemble_results.items(), key=lambda x: x[1][1])
             base_person_id = best_person[0]
-            template_id, best_score = best_person[1]
+            template_id, ensemble_score = best_person[1]
 
-            # Check if score meets threshold
-            if best_score > self.threshold:
+            # Check if ensemble score meets threshold
+            if ensemble_score > self.threshold:
                 # Boost score slightly if we have good quality landmarks
                 if landmarks is not None:
-                    quality_boost = min(0.05, (1.0 - best_score) * 0.1)  # Small quality boost
-                    best_score = min(1.0, best_score + quality_boost)
+                    quality_boost = min(0.03, (1.0 - ensemble_score) * 0.1)  # Small quality boost
+                    ensemble_score = min(1.0, ensemble_score + quality_boost)
 
-                return True, (template_id, best_score)
+                # Debug logging for ensemble voting
+                person_photo_count = len(person_scores.get(base_person_id, []))
+                if person_photo_count > 1:
+                    # Get the individual scores for this person
+                    individual_scores = [score for _, score in person_scores[base_person_id]]
+                    individual_scores.sort(reverse=True)
+                    scores_str = ", ".join([f"{s:.3f}" for s in individual_scores[:3]])
+                    print(f"🎯 Ensemble match: {base_person_id} with {person_photo_count} photos")
+                    print(f"   Individual scores: [{scores_str}{'...' if len(individual_scores) > 3 else ''}]")
+                    print(f"   Final ensemble score: {ensemble_score:.3f}")
+
+                return True, (template_id, ensemble_score)
 
         return False, ("", 0.0)
 
@@ -768,8 +825,9 @@ class SCRFDFaceRecognizer:
                     failed_count += 1
                     continue
 
-                # Extract face features using ArcFace
-                features, detections = self.extract_features(image)
+                # Extract face features using ArcFace with registration settings
+                # Use registration-specific detection for saved images
+                features, detections = self.recognize_face_for_registration(image, str(image_file))
 
                 if len(features) > 0 and len(detections) > 0:
                     # Use the best quality face detection
@@ -808,37 +866,44 @@ class SCRFDFaceRecognizer:
         Returns:
             True if person was removed, False otherwise
         """
-        try:
-            # Remove from FAISS index
-            removed_count = self.face_database.remove_faces([person_id])
+        print(f"🗑️ Removing person: {person_id}")
 
-            # Update person_id_to_name mapping
-            keys_to_remove = []
-            for key, value in self.person_id_to_name.items():
-                if key == person_id or key.startswith(f"{person_id}%"):
-                    keys_to_remove.append(key)
+        # Remove image files from disk
+        images_dir = Path("images")
+        removed_files = 0
+        if images_dir.exists():
+            # Find all image files for this person (including multiple photos)
+            for image_file in images_dir.glob("*.png"):
+                if image_file.name.startswith('.'):
+                    continue
 
-            for key in keys_to_remove:
-                del self.person_id_to_name[key]
+                # Extract person ID from filename
+                file_person_id = image_file.stem.split('%')[0]
 
-            if removed_count > 0:
-                print(f"✅ Removed {removed_count} face(s) for person {person_id} from FAISS database")
-                # Optionally save the updated database to disk
-                try:
-                    self.face_database.save()
-                except Exception as e:
-                    print(f"⚠️ Failed to save FAISS database after removal: {e}")
-                return True
-            else:
-                print(f"ℹ️ No faces found for person {person_id} in FAISS database")
-                return False
+                if file_person_id == person_id:
+                    try:
+                        image_file.unlink()  # Delete the file
+                        removed_files += 1
+                        print(f"🗑️ Removed image file: {image_file.name}")
+                    except Exception as e:
+                        print(f"⚠️ Failed to remove {image_file.name}: {e}")
 
-        except Exception as e:
-            print(f"❌ Error removing person {person_id} from FAISS database: {e}")
-            # Fallback to rebuilding if removal fails
-            print("🔄 Falling back to database rebuild...")
-            self.create_features()
-            return True
+        # Remove from our mapping
+        keys_to_remove = []
+        for key, _ in self.person_id_to_name.items():
+            if key == person_id or key.startswith(f"{person_id}%"):
+                keys_to_remove.append(key)
+
+        removed_mappings = len(keys_to_remove)
+        for key in keys_to_remove:
+            del self.person_id_to_name[key]
+
+        print(f"🗑️ Removed {removed_files} image file(s) and {removed_mappings} mapping(s) for person {person_id}")
+
+        # Rebuild the database - now the person won't be re-added
+        self.create_features()
+
+        return True
 
     def cleanup_orphaned_faces(self) -> Dict[str, Any]:
         """

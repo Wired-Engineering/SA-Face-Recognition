@@ -26,5 +26,6 @@ dist-ssr
 
 src/python/system/*
 src/python/images/*
+src/python/weights/*.onnx
 .venv*
 __pycache__

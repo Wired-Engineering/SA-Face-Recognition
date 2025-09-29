@@ -22,3 +22,4 @@ src/python/images
 src/python/system
 src/python/.venv
 src/python/__pycache__
+src/python/weights

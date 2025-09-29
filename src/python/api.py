@@ -1,6 +1,7 @@
-from fastapi import FastAPI, HTTPException, File, UploadFile, Request
+from fastapi import FastAPI, HTTPException, File, UploadFile, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from sse_starlette.sse import EventSourceResponse
 from pydantic import BaseModel
 import uvicorn
@@ -30,6 +31,41 @@ from SCRFD_Face_recognizer import SCRFDFaceRecognizer as FaceRecognizer
 from config_manager import config_manager
 from services.csv_processor import process_csv
 
+# Basic Authentication
+security = HTTPBasic()
+
+def verify_credentials(credentials: HTTPBasicCredentials = Depends(security)):
+    """Verify basic auth credentials against database"""
+    try:
+        result = db.authenticate_admin(credentials.username, credentials.password)
+        if result == 'Login Success':
+            return credentials.username
+        else:
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid authentication credentials",
+                headers={"WWW-Authenticate": "Basic"},
+            )
+    except Exception:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid authentication credentials",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+
+# Authentication dependency
+def get_current_admin(admin_id: str = Depends(verify_credentials)):
+    return admin_id
+
+# Public endpoints that don't require authentication
+PUBLIC_ENDPOINTS = {
+    "/api/auth/login",
+    "/api/system/health",
+    "/api/docs",
+    "/api/openapi.json",
+    "/api/redoc"
+}
+
 # Lifespan manager for startup and shutdown
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -45,9 +81,14 @@ async def lifespan(app: FastAPI):
     os.makedirs("images", exist_ok=True)
     os.makedirs("system", exist_ok=True)
 
-    # Load persistent detection state
+    # Load persistent detection state but clear session ownership on startup
     if get_independent_detection_active():
         print(f"🔄 Restored detection state: active (persistent from config)")
+        # Clear session ownership so new clients can control detection
+        global detection_session_owner, detection_session_start_time
+        detection_session_owner = None
+        detection_session_start_time = None
+        print(f"🔄 Cleared session ownership - clients can now control detection")
     else:
         print(f"🔄 Detection state: inactive")
 
@@ -83,6 +124,53 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Global authentication middleware
+@app.middleware("http")
+async def authenticate_requests(request: Request, call_next):
+    """Global authentication middleware - protect all endpoints except public ones"""
+    path = request.url.path
+
+    # Skip authentication for public endpoints
+    if path in PUBLIC_ENDPOINTS or path.startswith("/api/docs") or path.startswith("/static"):
+        response = await call_next(request)
+        return response
+
+    # Check for basic auth header
+    auth_header = request.headers.get("authorization")
+    if not auth_header or not auth_header.startswith("Basic "):
+        from fastapi.responses import JSONResponse
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "Authentication required"},
+            headers={"WWW-Authenticate": "Basic"}
+        )
+
+    # Decode and verify credentials
+    try:
+        encoded_credentials = auth_header.split(" ")[1]
+        decoded = base64.b64decode(encoded_credentials).decode("utf-8")
+        username, password = decoded.split(":", 1)
+
+        result = db.authenticate_admin(username, password)
+        if result != 'Login Success':
+            from fastapi.responses import JSONResponse
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "Invalid authentication credentials"},
+                headers={"WWW-Authenticate": "Basic"}
+            )
+    except Exception:
+        from fastapi.responses import JSONResponse
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "Invalid authentication credentials"},
+            headers={"WWW-Authenticate": "Basic"}
+        )
+
+    # Continue to endpoint
+    response = await call_next(request)
+    return response
+
 # Mount SocketIO app
 socket_app = socketio.ASGIApp(sio, app)
 
@@ -107,14 +195,74 @@ webcam_streams: Dict[str, bool] = {}  # Track active webcam streams
 
 # Independent detection system - load state from config on startup
 detection_session_id = None  # Track the current detection session
+detection_session_owner = None  # Track who started the detection session
+detection_session_start_time = None  # Track when detection started
+DETECTION_SESSION_TIMEOUT = 3600  # 1 hour timeout for abandoned sessions
 
 def get_independent_detection_active():
     """Get detection state from persistent config"""
     return config_manager.is_detection_active()
 
-def set_independent_detection_active(active: bool):
+def set_independent_detection_active(active: bool, owner_sid: str = None):
     """Set detection state and persist to config"""
+    global detection_session_owner, detection_session_start_time
+
+    if active and owner_sid:
+        detection_session_owner = owner_sid
+        detection_session_start_time = time.time()
+        print(f"📝 Detection session started by: {owner_sid}")
+    elif not active:
+        detection_session_owner = None
+        detection_session_start_time = None
+        print(f"📝 Detection session cleared")
+
     return config_manager.set_detection_active(active)
+
+def is_detection_session_expired():
+    """Check if the current detection session has expired"""
+    if not detection_session_start_time:
+        return False
+
+    elapsed = time.time() - detection_session_start_time
+    return elapsed > DETECTION_SESSION_TIMEOUT
+
+def can_control_detection(sid: str):
+    """Check if a client can control detection (start/stop)"""
+    # Get camera configuration to determine source type
+    camera_config = config_manager.get_camera_config()
+    camera_source = camera_config.get('source', 'default')
+
+    # For RTSP cameras, allow multiple viewers since backend handles everything
+    if camera_source == 'rtsp':
+        print(f"📡 RTSP camera detected - allowing multiple viewers for {sid}")
+        return True
+
+    # For webcam/browser cameras, enforce single session control
+    # If no active session, anyone can start
+    if not get_independent_detection_active():
+        return True
+
+    # If detection is active but no owner (e.g., restored from config), allow anyone to take control
+    if detection_session_owner is None:
+        print(f"🔄 Detection active with no owner - allowing {sid} to take control")
+        return True
+
+    # Check if session has expired
+    if is_detection_session_expired():
+        print(f"⏱️ Detection session expired (started {time.time() - detection_session_start_time:.0f}s ago)")
+        return True
+
+    # Check if this is the session owner
+    if detection_session_owner == sid:
+        return True
+
+    # For now, also allow if the original owner has disconnected
+    # This handles the case where someone leaves and comes back
+    if detection_session_owner and detection_session_owner not in detection_active:
+        print(f"👤 Original session owner {detection_session_owner} disconnected, allowing takeover by {sid}")
+        return True
+
+    return False
 
 # Consolidated recognition and broadcasting functions
 async def broadcast_recognition_to_welcome_screens(person_name: str, recognition_data: dict, source_type: str = ""):
@@ -175,8 +323,11 @@ def should_broadcast_recognition(person_name: str, current_time: float, cooldown
         last_detected_name = person_name
         last_recognition_time = current_time
         print(f"🎯 Broadcasting recognition for {person_name} (time since last: {time_since_last:.1f}s)")
-    else:
-        print(f"🔄 Skipping recognition for {person_name} (cooldown: {time_since_last:.1f}s < {cooldown}s)")
+
+        # Signal SSE clients of recognition change
+        signal_recognition_change()
+    #else:
+        # print(f"🔄 Skipping recognition for {person_name} (cooldown: {time_since_last:.1f}s < {cooldown}s)")
 
     return should_broadcast
 
@@ -230,6 +381,49 @@ last_recognition_time = 0.0
 recognition_cooldown = 2.0  # Seconds - reduced to 2s to work with welcome screen's 3s timeout
 # This ensures continuous display when someone remains in view (3s timeout > 2s cooldown)
 
+# Multi-person recognition tracking for SSE
+currently_recognized_people = {}  # Dict of {person_name: {'registration': str, 'last_seen': timestamp}}
+recognition_expiry_time = 3.0  # Seconds - remove people after 3 seconds of not being detected
+
+# SSE clients tracking for real-time recognition updates
+sse_recognition_clients = set()
+# Simple flag to signal SSE clients when recognition data changes
+recognition_data_changed = False
+
+def update_recognized_person(person_name: str, registration: str):
+    """Add or update a currently recognized person"""
+    global currently_recognized_people
+    current_time = time.time()
+
+    currently_recognized_people[person_name] = {
+        'registration': registration,
+        'last_seen': current_time
+    }
+
+    signal_recognition_change()
+
+def cleanup_expired_recognitions():
+    """Remove people who haven't been seen recently"""
+    global currently_recognized_people
+    current_time = time.time()
+    expired_people = []
+
+    for person_name, data in currently_recognized_people.items():
+        time_since_last = current_time - data['last_seen']
+        if time_since_last > recognition_expiry_time:
+            expired_people.append(person_name)
+
+    for person_name in expired_people:
+        del currently_recognized_people[person_name]
+
+    if expired_people:
+        signal_recognition_change()
+
+def signal_recognition_change():
+    """Simple function to signal SSE clients that recognition data has changed"""
+    global recognition_data_changed
+    recognition_data_changed = True
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 
@@ -237,6 +431,34 @@ logging.basicConfig(level=logging.INFO)
 @sio.event
 async def connect(sid, environ):
     print(f"🔌 Client connected: {sid}")
+
+    # Check if independent detection is active when client connects
+    if get_independent_detection_active():
+        print(f"📋 Client connected while detection active (persistent state: True)")
+
+        # Send detailed detection status to the new client
+        elapsed = int(time.time() - detection_session_start_time) if detection_session_start_time else 0
+        can_control = can_control_detection(sid)
+        is_expired = is_detection_session_expired()
+
+        # Get camera source to determine if multiple viewers are allowed
+        camera_config = config_manager.get_camera_config()
+        is_rtsp = camera_config.get('source') == 'rtsp'
+
+        # For RTSP, always allow camera viewing; for webcam, only if they can control
+        should_show_camera = is_rtsp or can_control
+
+        await sio.emit('detection_status', {
+            'active': True,
+            'session_owner': detection_session_owner,
+            'elapsed_seconds': elapsed,
+            'can_control': can_control,
+            'is_expired': is_expired,
+            'should_show_camera': should_show_camera,
+            'camera_source': camera_config.get('source', 'default'),
+            'is_rtsp': is_rtsp,
+            'message': 'RTSP stream - multiple viewers allowed' if is_rtsp and not can_control else ('Detection in progress by another user' if not can_control else 'Detection session active')
+        }, to=sid)
 
 @sio.event
 async def disconnect(sid):
@@ -259,31 +481,89 @@ async def start_detection(sid, data):
     """Start face detection for a client"""
     global detection_session_id
 
+    # Check if this client can control detection
+    if not can_control_detection(sid):
+        elapsed = time.time() - detection_session_start_time if detection_session_start_time else 0
+        print(f"⚠️ Detection already in progress by {detection_session_owner} ({elapsed:.0f}s ago) - rejecting request from client {sid}")
+        await sio.emit('detection_error', {
+            'status': 'error',
+            'message': 'Detection is already in progress by another user. Please wait until the current session is finished.',
+            'session_owner': detection_session_owner,
+            'elapsed_time': int(elapsed)
+        }, to=sid)
+        return
+
     print(f"🔍 Starting face detection for client {sid}")
     detection_active[sid] = True
 
-    # Start independent detection if not already active
-    if not get_independent_detection_active():
-        set_independent_detection_active(True)
-        detection_session_id = f"session_{int(time.time())}"
-        print(f"🎯 Starting independent detection session: {detection_session_id}")
+    # Start independent detection with owner tracking
+    set_independent_detection_active(True, owner_sid=sid)
+    detection_session_id = f"session_{int(time.time())}"
+    print(f"🎯 Starting independent detection session: {detection_session_id}")
 
-        # Notify face recognizer that detection is starting
-        face_recognizer.start_detection()
+    # Notify face recognizer that detection is starting
+    face_recognizer.start_detection()
 
-        # Reset recognition cooldown when starting new detection session
-        global last_detected_name, last_recognition_time
-        last_detected_name = ""
-        last_recognition_time = 0.0
-        print(f"🔄 Reset recognition cooldown for new detection session")
+    # Reset recognition cooldown when starting new detection session
+    global last_detected_name, last_recognition_time
+    last_detected_name = ""
+    last_recognition_time = 0.0
+    print(f"🔄 Reset recognition cooldown for new detection session")
 
-        # Start background stream processing for recognition if camera is configured
-        camera_config = config_manager.get_camera_config()
-        print(f"🔍 Camera config: source={camera_config.get('source')}, rtsp_url={camera_config.get('rtsp_url')}")
+    # Start background stream processing for recognition if camera is configured
+    camera_config = config_manager.get_camera_config()
+    print(f"🔍 Camera config: source={camera_config.get('source')}, rtsp_url={camera_config.get('rtsp_url')}")
 
-        await start_background_processing_for_camera_type()
+    await start_background_processing_for_camera_type()
 
+    # Notify the requesting client that detection started
     await sio.emit('detection_started', {'status': 'started'}, to=sid)
+
+    # Get camera configuration to determine broadcast behavior
+    camera_config = config_manager.get_camera_config()
+    is_rtsp = camera_config.get('source') == 'rtsp'
+
+    # For RTSP, allow multiple viewers; for webcam, restrict to one
+    if is_rtsp:
+        # RTSP allows multiple viewers - broadcast that stream is available to all
+        await sio.emit('detection_status_changed', {
+            'active': True,
+            'available': True,  # RTSP remains available for others
+            'session_owner': sid,
+            'should_show_camera': True,  # RTSP allows multiple camera viewers
+            'camera_source': 'rtsp',
+            'is_rtsp': True,
+            'message': 'RTSP detection active - multiple viewers supported'
+        }, skip_sid=sid)
+    else:
+        # Webcam restricts to single user - broadcast unavailable to others
+        await sio.emit('detection_status_changed', {
+            'active': True,
+            'available': False,
+            'session_owner': sid,
+            'should_show_camera': False,  # Other clients should not show camera
+            'camera_source': camera_config.get('source', 'default'),
+            'is_rtsp': False,
+            'message': 'Detection session started by another user'
+        }, skip_sid=sid)
+
+    # Also send immediate status to all currently connected clients
+    try:
+        # Get all connected clients in the default namespace
+        connected_clients = list(sio.manager.get_participants('/', '/'))
+        for client_sid in connected_clients:
+            if client_sid != sid:  # Skip the session owner
+                await sio.emit('detection_status', {
+                    'active': True,
+                    'session_owner': sid,
+                    'can_control': is_rtsp,  # For RTSP, all can control; for webcam, only owner
+                    'should_show_camera': is_rtsp,  # For RTSP, all can view; for webcam, only owner
+                    'camera_source': camera_config.get('source', 'default'),
+                    'is_rtsp': is_rtsp,
+                    'message': 'RTSP stream available for viewing' if is_rtsp else 'Detection in progress by another user'
+                }, to=client_sid)
+    except Exception as e:
+        print(f"⚠️ Error notifying connected clients: {e}")
 
 
 @sio.event
@@ -301,6 +581,16 @@ async def stop_detection(sid, data):
     # Check if this is an explicit admin stop request
     is_admin_stop = data and data.get('admin_stop', False)
 
+    # Only allow stopping if this client can control detection
+    if is_admin_stop and not can_control_detection(sid):
+        print(f"⚠️ Client {sid} not authorized to stop detection started by {detection_session_owner}")
+        await sio.emit('detection_error', {
+            'status': 'error',
+            'message': 'You cannot stop a detection session started by another user.',
+            'session_owner': detection_session_owner
+        }, to=sid)
+        return
+
     print(f"🛑 Stopping face detection for client {sid} (admin_stop: {is_admin_stop})")
     was_admin_client = sid in detection_active
     if was_admin_client:
@@ -309,7 +599,7 @@ async def stop_detection(sid, data):
     # Only stop independent detection if explicitly requested by admin
     # OR if no welcome screens AND no admin clients are connected AND not a page refresh
     if is_admin_stop:
-        set_independent_detection_active(False)
+        set_independent_detection_active(False, owner_sid=None)
         detection_session_id = None
         print(f"🛑 Admin explicitly stopped detection - setting detection.active = false")
 
@@ -327,6 +617,14 @@ async def stop_detection(sid, data):
 
         total_stopped = rtsp_stream_count + ffmpeg_stream_count + webcam_stream_count
         print(f"🛑 Admin stop: Cleared {rtsp_stream_count} RTSP, {ffmpeg_stream_count} FFmpeg, {webcam_stream_count} webcam streams (total: {total_stopped})")
+
+        # Broadcast to all clients that detection is now stopped and available
+        await sio.emit('detection_status_changed', {
+            'active': False,
+            'available': True,
+            'message': 'Detection session stopped - detection is now available',
+            'previous_owner': detection_session_owner
+        })
 
     elif len(welcome_screens) == 0 and len(detection_active) == 0:
         # Detection remains active in config - welcome screens can still connect and receive events
@@ -541,15 +839,16 @@ def process_faces_unified(faces, frame_features, scale_x=1.0, scale_y=1.0, frame
     # Batch query database for all needed person info
     person_data_cache = {}
     if person_ids_to_query:
-        # Single query to get all person names and titles
+        # Single query to get all person names, titles, and registrations
         for person_id in person_ids_to_query:
             try:
                 person_data_cache[person_id] = {
                     'name': db.get_person_name(person_id),
-                    'title': db.get_person_title(person_id)
+                    'title': db.get_person_title(person_id),
+                    'registration': db.get_person_registration(person_id)
                 }
             except Exception:
-                person_data_cache[person_id] = {'name': 'Unknown', 'title': ''}
+                person_data_cache[person_id] = {'name': 'Unknown', 'title': '', 'registration': 'N/A'}
 
     # Second pass: build results using cached data
     for i, face_detection in enumerate(faces):
@@ -638,6 +937,13 @@ def process_faces_unified(faces, frame_features, scale_x=1.0, scale_y=1.0, frame
                     'timestamp': time.time()
                 }
                 recognition_results.append(recognition_data)
+
+                # Update multi-person SSE tracking - get registration from our person_data lookup
+                person_registration = person_data_cache.get(best_match['person_id'], {}).get('registration', 'N/A')
+                update_recognized_person(best_match['person_name'], person_registration)
+
+                # Also trigger original welcome screen broadcast for compatibility
+                should_broadcast_recognition(best_match['person_name'], time.time(), recognition_cooldown)
 
         detection_results.append(result)
 
@@ -944,6 +1250,8 @@ async def process_rtsp_with_ffmpeg_overlay(rtsp_url, output_queue, stop_event):
                     print(f"🔄 No faces detected - resetting recognition state (was: {last_detected_name})")
                     last_detected_name = ""
                     last_recognition_time = 0.0
+                    # Signal SSE clients of recognition change
+                    signal_recognition_change()
 
             # Send detection results to frontend for UI updates
             if detection_results_cache and get_independent_detection_active():
@@ -1181,6 +1489,109 @@ async def get_people():
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/people/currently-recognized")
+async def get_currently_recognized_stream():
+    """SSE stream of currently recognized person information for third-party integration"""
+
+    def get_current_recognition_data():
+        """Helper function to get current recognition status for all people"""
+        global currently_recognized_people
+
+        # Clean up expired recognitions first
+        cleanup_expired_recognitions()
+
+        current_time = time.time()
+        detection_active = get_independent_detection_active()
+
+        if currently_recognized_people:
+            # Build list of all currently recognized people
+            people_list = []
+
+            for person_name, data in currently_recognized_people.items():
+                time_since_last = current_time - data['last_seen']
+                people_list.append({
+                    'name': person_name,
+                    'registration': data['registration'],
+                    'last_seen': data['last_seen'],
+                    'seconds_ago': time_since_last
+                })
+
+            return {
+                'success': True,
+                'detection_active': detection_active,
+                'recognized': True,
+                'people': people_list,
+                'count': len(people_list)
+            }
+        else:
+            # No one currently recognized
+            return {
+                'success': True,
+                'detection_active': detection_active,
+                'recognized': False,
+                'people': [],
+                'count': 0
+            }
+
+    async def event_stream():
+        """SSE event generator"""
+        global recognition_data_changed
+        last_sent_data = None
+
+        try:
+            # Send initial data immediately
+            current_data = get_current_recognition_data()
+            data_json = json.dumps(current_data)
+            yield f"data: {data_json}\n\n"
+            last_sent_data = current_data
+
+            while True:
+                try:
+                    # Check every 100ms for changes (more responsive)
+                    await asyncio.sleep(0.1)
+
+                    # Only check data if the flag indicates a change, or for periodic heartbeat
+                    should_check = recognition_data_changed or (int(time.time() * 10) % 50 == 0)  # Every 5 seconds heartbeat
+
+                    if should_check:
+                        # Reset the flag
+                        was_flagged = recognition_data_changed
+                        recognition_data_changed = False
+
+                        # Get current recognition data
+                        current_data = get_current_recognition_data()
+
+                        # Only send if data has actually changed
+                        if current_data != last_sent_data:
+                            data_json = json.dumps(current_data)
+                            yield f"data: {data_json}\n\n"
+                            last_sent_data = current_data
+
+                except Exception as e:
+                    error_data = {
+                        'success': False,
+                        'detection_active': get_independent_detection_active(),
+                        'error': str(e),
+                        'recognized': False,
+                        'person': None
+                    }
+                    yield f"data: {json.dumps(error_data)}\n\n"
+                    await asyncio.sleep(1)
+
+        except asyncio.CancelledError:
+            print("🔌 SSE client disconnected from currently-recognized stream")
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Headers": "Cache-Control"
+        }
+    )
 
 @app.post("/api/people/register")
 async def register_person(request: personRegistration):
@@ -2054,59 +2465,28 @@ async def get_mediapipe_presets():
     """Get predefined MediaPipe configuration presets"""
     try:
         presets = {
-            'distance_detection': {
-                'name': '📏 Distance Detection',
-                'description': 'Optimized for detecting faces 8+ feet away with SCRFD high-precision detection',
+            'small_groups': {
+                'name': '👤 Small Groups (< 5 people)',
+                'description': 'Optimized for 1-4 people with maximum accuracy and distance detection (up to 10+ feet)',
                 'settings': {
-                    'detection_confidence': 0.15,  # Very low for maximum distance
-                    'tracking_confidence': 0.3,    # Lower for initial acquisition
-                    'max_faces': 10,
-                    'refine_landmarks': True,      # Full 468 landmarks
-                    'unlimited_faces': False
+                    'detection_confidence': 0.15,  # Very low threshold for maximum distance
+                    'tracking_confidence': 0.7,    # High stability for fewer faces
+                    'max_faces': 4,                 # Focus on small groups
+                    'refine_landmarks': True,       # Maximum landmark precision
+                    'unlimited_faces': False,
+                    'recognition_threshold': 0.4    # Higher threshold for better accuracy
                 }
             },
-            'high_accuracy': {
-                'name': '🎯 High Accuracy Recognition',
-                'description': 'Best recognition accuracy for close-range faces (2-4 feet)',
+            'large_groups': {
+                'name': '👥 Large Groups (5+ people)',
+                'description': 'Optimized for crowds and group detection with balanced performance',
                 'settings': {
-                    'detection_confidence': 0.7,   # Higher confidence for close faces
-                    'tracking_confidence': 0.8,    # Maximum stability
-                    'max_faces': 5,
-                    'refine_landmarks': True,      # Full 468 landmarks
-                    'unlimited_faces': False
-                }
-            },
-            'balanced': {
-                'name': '⚖️ Balanced Performance',
-                'description': 'Good balance of distance detection and accuracy (3-6 feet)',
-                'settings': {
-                    'detection_confidence': 0.3,   # Current optimized setting
-                    'tracking_confidence': 0.5,    # Balanced tracking
-                    'max_faces': 15,
-                    'refine_landmarks': True,      # Full 468 landmarks
-                    'unlimited_faces': False
-                }
-            },
-            'crowd_mode': {
-                'name': '👥👥 Crowd Detection',
-                'description': 'Detect many faces simultaneously (trade-off: lower accuracy)',
-                'settings': {
-                    'detection_confidence': 0.4,   # Moderate threshold
+                    'detection_confidence': 0.25,  # Slightly higher for crowd stability
                     'tracking_confidence': 0.5,    # Balanced for multiple faces
-                    'max_faces': 50,               # Many faces
-                    'refine_landmarks': True,      # Keep quality landmarks
-                    'unlimited_faces': False
-                }
-            },
-            'speed_optimized': {
-                'name': '⚡ Speed Optimized',
-                'description': 'Fastest processing with reduced landmark detail',
-                'settings': {
-                    'detection_confidence': 0.5,   # Standard threshold
-                    'tracking_confidence': 0.6,    # Good tracking
-                    'max_faces': 5,
-                    'refine_landmarks': False,     # 68 landmarks instead of 468
-                    'unlimited_faces': False
+                    'max_faces': 20,               # Handle larger groups
+                    'refine_landmarks': True,       # Keep quality landmarks
+                    'unlimited_faces': False,
+                    'recognition_threshold': 0.35   # Slightly lower for crowd flexibility
                 }
             }
         }
@@ -2134,17 +2514,30 @@ async def apply_mediapipe_preset(request: dict):
 
         preset_settings = presets[preset_name]['settings']
 
-        # Apply preset to config
+        # Extract recognition settings from preset
+        recognition_threshold = preset_settings.pop('recognition_threshold', None)
+
+        # Apply preset to config (without recognition_threshold as it's not a mediapipe setting)
         success = config_manager.set_mediapipe_config(**preset_settings)
 
         if success:
             # Apply to face recognizer
             face_recognizer.configure_mediapipe(**preset_settings)
 
+            # Apply recognition threshold if specified
+            if recognition_threshold is not None:
+                face_recognizer.threshold = recognition_threshold
+                print(f"🎯 Applied recognition threshold: {recognition_threshold}")
+
+            # Re-add recognition_threshold to the response
+            response_settings = preset_settings.copy()
+            if recognition_threshold is not None:
+                response_settings['recognition_threshold'] = recognition_threshold
+
             return {
                 'success': True,
                 'message': f'Applied preset: {presets[preset_name]["name"]}',
-                'applied_settings': preset_settings
+                'applied_settings': response_settings
             }
         else:
             return {
@@ -2561,13 +2954,41 @@ async def health_check():
 
 @app.get("/api/system/detection-status")
 async def get_detection_status():
-    """Get current detection status"""
+    """Get current detection status with session information"""
+    active = get_independent_detection_active()
+    elapsed = 0
+    is_expired = False
+
+    # Get camera configuration
+    camera_config = config_manager.get_camera_config()
+    camera_source = camera_config.get('source', 'default')
+    is_rtsp = camera_source == 'rtsp'
+
+    if active and detection_session_start_time:
+        elapsed = int(time.time() - detection_session_start_time)
+        is_expired = is_detection_session_expired()
+
+    # For RTSP, allow multiple viewers - should_auto_start is always True
+    # For webcam, only allow auto-start if no active session or session is expired
+    if is_rtsp:
+        should_auto_start = True  # RTSP allows multiple viewers
+        should_show_camera = True  # Always allow RTSP viewers
+    else:
+        should_auto_start = active and (detection_session_owner is None or is_expired)
+        should_show_camera = not active or detection_session_owner is None or is_expired
+
     return {
-        "detection_active": get_independent_detection_active(),
+        "detection_active": active,
+        "session_owner": detection_session_owner if active else None,
+        "session_elapsed_seconds": elapsed if active else 0,
+        "session_expired": is_expired,
         "welcome_screens_connected": len(welcome_screens),
         "admin_clients_connected": len(detection_active),
         "detection_session_id": detection_session_id,
-        "should_auto_start": get_independent_detection_active(),  # Frontend should auto-start if backend is active
+        "should_auto_start": should_auto_start,
+        "should_show_camera": should_show_camera,
+        "camera_source": camera_source,
+        "is_rtsp": is_rtsp,
         "timestamp": get_current_datetime_other_format()
     }
 
@@ -2621,6 +3042,19 @@ async def cleanup_faiss_database():
             "error": str(e)
         }
 
+@app.post("/api/test/sse-trigger")
+async def trigger_sse_test():
+    """Simple test endpoint to trigger SSE recognition updates"""
+    # Simulate recognition data update using new multi-person system
+    update_recognized_person("SSE Test User", "TEST123")
+
+    return {
+        "success": True,
+        "message": "SSE recognition signal triggered",
+        "test_user": "SSE Test User",
+        "timestamp": time.time()
+    }
+
 @app.post("/api/test/trigger-recognition")
 async def trigger_test_recognition():
     """Test endpoint to manually trigger a recognition event"""
@@ -2646,11 +3080,18 @@ async def trigger_test_recognition():
     # Broadcast to all welcome screens using consolidated function
     await broadcast_recognition_to_welcome_screens("Test User", test_recognition_data, "TEST")
 
+    # Also trigger SSE clients for testing
+    global last_detected_name, last_recognition_time
+    last_detected_name = "Test User"
+    last_recognition_time = time.time()
+    signal_recognition_change()
+
     return {
         "success": True,
-        "message": f"Test recognition sent to {len(welcome_screens)} welcome screens",
+        "message": f"Test recognition sent to {len(welcome_screens)} welcome screens and SSE clients",
         "welcome_screens": list(welcome_screens.keys()),
-        "test_data": test_recognition_data
+        "test_data": test_recognition_data,
+        "sse_triggered": True
     }
 
 @app.get("/api/rtsp/stream-with-overlay")
@@ -2925,6 +3366,8 @@ async def process_webcam_with_overlay(output_queue, stream_id):
                         print(f"🔄 No faces detected - resetting recognition state (was: {last_detected_name})")
                         last_detected_name = ""
                         last_recognition_time = 0.0
+                        # Signal SSE clients of recognition change
+                        signal_recognition_change()
 
                 # Send detection results to any connected Socket.IO clients for UI updates only if independent detection is active
                 if detection_results_cache and get_independent_detection_active():
