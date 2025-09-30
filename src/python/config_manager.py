@@ -129,6 +129,14 @@ class ConfigManager:
         """Get detection active state from config"""
         return self.get('detection.active', False)
 
+    def set_detection_session_timeout(self, timeout: int) -> bool:
+        """Set detection session timeout in seconds"""
+        return self.set('detection.session_timeout', timeout)
+
+    def get_detection_session_timeout(self) -> int:
+        """Get detection session timeout in seconds (default: 3600)"""
+        return self.get('detection.session_timeout', 3600)
+
     def get_mediapipe_config(self) -> Dict[str, Any]:
         """Get face detection configuration (MediaPipe-compatible)"""
         return self.config.get('mediapipe', {})
@@ -181,7 +189,8 @@ class ConfigManager:
                 'unlimited_faces': False
             },
             'detection': {
-                'active': False
+                'active': False,
+                'session_timeout': 3600  # Default 1 hour timeout for abandoned sessions
             },
             'system': {
                 'database_path': 'system/Attendance.db',

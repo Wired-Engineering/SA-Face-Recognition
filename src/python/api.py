@@ -43,14 +43,12 @@ def verify_credentials(credentials: HTTPBasicCredentials = Depends(security)):
         else:
             raise HTTPException(
                 status_code=401,
-                detail="Invalid authentication credentials",
-                headers={"WWW-Authenticate": "Basic"},
+                detail="Invalid authentication credentials"
             )
     except Exception:
         raise HTTPException(
             status_code=401,
-            detail="Invalid authentication credentials",
-            headers={"WWW-Authenticate": "Basic"},
+            detail="Invalid authentication credentials"
         )
 
 # Authentication dependency
@@ -141,8 +139,7 @@ async def authenticate_requests(request: Request, call_next):
         from fastapi.responses import JSONResponse
         return JSONResponse(
             status_code=401,
-            content={"detail": "Authentication required"},
-            headers={"WWW-Authenticate": "Basic"}
+            content={"detail": "Authentication required"}
         )
 
     # Decode and verify credentials
@@ -156,15 +153,13 @@ async def authenticate_requests(request: Request, call_next):
             from fastapi.responses import JSONResponse
             return JSONResponse(
                 status_code=401,
-                content={"detail": "Invalid authentication credentials"},
-                headers={"WWW-Authenticate": "Basic"}
+                content={"detail": "Invalid authentication credentials"}
             )
     except Exception:
         from fastapi.responses import JSONResponse
         return JSONResponse(
             status_code=401,
-            content={"detail": "Invalid authentication credentials"},
-            headers={"WWW-Authenticate": "Basic"}
+            content={"detail": "Invalid authentication credentials"}
         )
 
     # Continue to endpoint
@@ -197,7 +192,6 @@ webcam_streams: Dict[str, bool] = {}  # Track active webcam streams
 detection_session_id = None  # Track the current detection session
 detection_session_owner = None  # Track who started the detection session
 detection_session_start_time = None  # Track when detection started
-DETECTION_SESSION_TIMEOUT = 3600  # 1 hour timeout for abandoned sessions
 
 def get_independent_detection_active():
     """Get detection state from persistent config"""
@@ -224,7 +218,7 @@ def is_detection_session_expired():
         return False
 
     elapsed = time.time() - detection_session_start_time
-    return elapsed > DETECTION_SESSION_TIMEOUT
+    return elapsed > config_manager.get_detection_session_timeout()
 
 def can_control_detection(sid: str):
     """Check if a client can control detection (start/stop)"""
@@ -462,9 +456,13 @@ async def connect(sid, environ):
 
 @sio.event
 async def disconnect(sid):
-    global detection_session_id
+    global detection_session_id, detection_session_owner, detection_session_start_time
 
     print(f"🔌 Client disconnected: {sid}")
+
+    # Check if the disconnecting client is the session owner
+    was_owner = (detection_session_owner == sid)
+
     # Cleanup detection state for this client
     if sid in detection_active:
         del detection_active[sid]
@@ -472,14 +470,42 @@ async def disconnect(sid):
     if sid in welcome_screens:
         del welcome_screens[sid]
 
-    # Detection state is controlled by persistent config and explicit admin actions only
-    # Client disconnections should NOT automatically stop detection
-    print(f"🔄 Client disconnected - detection state remains unchanged (controlled by admin only)")
+    # If the disconnecting client was the session owner, clear ownership
+    # This allows other clients to immediately take control
+    if was_owner:
+        print(f"👤 Session owner {sid} disconnected - clearing session ownership")
+        detection_session_owner = None
+        detection_session_start_time = None
+
+        # Notify all remaining clients that detection is now available
+        await sio.emit('detection_status', {
+            'active': get_independent_detection_active(),
+            'available': True,
+            'session_owner': None,
+            'message': 'Previous session owner disconnected - detection control is now available'
+        })
+    else:
+        # Detection state is controlled by persistent config and explicit admin actions only
+        # Client disconnections should NOT automatically stop detection
+        print(f"🔄 Client disconnected - detection state remains unchanged (controlled by admin only)")
 
 @sio.event
 async def start_detection(sid, data):
     """Start face detection for a client"""
     global detection_session_id
+
+    # Track if this is a takeover (for logging/notification purposes)
+    is_takeover = False
+    takeover_reason = ""
+
+    # Check if there's an existing owner that will be replaced
+    if detection_session_owner and detection_session_owner != sid:
+        if is_detection_session_expired():
+            is_takeover = True
+            takeover_reason = "session expired"
+        elif detection_session_owner not in detection_active:
+            is_takeover = True
+            takeover_reason = "previous owner disconnected"
 
     # Check if this client can control detection
     if not can_control_detection(sid):
@@ -492,6 +518,9 @@ async def start_detection(sid, data):
             'elapsed_time': int(elapsed)
         }, to=sid)
         return
+
+    if is_takeover:
+        print(f"🔄 Session takeover by {sid} - reason: {takeover_reason}")
 
     print(f"🔍 Starting face detection for client {sid}")
     detection_active[sid] = True
