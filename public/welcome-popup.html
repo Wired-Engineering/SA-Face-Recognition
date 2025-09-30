@@ -113,10 +113,12 @@
 
         #circleCanvas {
             position: absolute;
-            top: 0;
+            top: 25%;             /* 👈 ADJUST TOP OFFSET % HERE (pushes canvas down) */
             left: 0;
-            width: 100%;
-            height: 100%;
+            width: 100%;          /* 👈 ADJUST WIDTH % HERE */
+            height: 75%;          /* 👈 ADJUST HEIGHT % HERE (80% = removed top 20%) */
+            max-width: 100%;      /* 👈 ADJUST MAX WIDTH % HERE */
+            max-height: 75%;      /* 👈 ADJUST MAX HEIGHT % HERE */
             z-index: 1;
         }
 
@@ -587,9 +589,11 @@
             }
 
             setupCanvas() {
-                // Set canvas size to window size
-                this.canvas.width = window.innerWidth;
-                this.canvas.height = window.innerHeight;
+                // Set canvas size to its actual rendered size (respects CSS constraints)
+                const rect = this.canvas.getBoundingClientRect();
+                this.canvas.width = rect.width;
+                this.canvas.height = rect.height;
+                console.log(`📐 Canvas sized to: ${rect.width}x${rect.height}px`);
             }
 
             setupPhysics() {
