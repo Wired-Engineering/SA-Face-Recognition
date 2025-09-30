@@ -115,14 +115,14 @@ class CSVProcessor:
             logger.error(f"Error parsing CSV: {str(e)}")
             return [], f"Error parsing CSV: {str(e)}"
 
-    def crop_face_from_image(self, image_data: bytes) -> Optional[bytes]:
+    def crop_face_from_image(self, image_data: bytes) -> Tuple[Optional[bytes], bool, str]:
         """
         Detect and crop the face from an image using ML models.
-        Returns cropped face image data or original if no face detected.
+        Returns (image_data, face_detected, error_message)
         """
         try:
             if not self.face_recognizer:
-                return image_data
+                return image_data, True, ""  # Assume success if no recognizer
 
             # Convert bytes to PIL Image
             image = Image.open(BytesIO(image_data))
@@ -157,14 +157,15 @@ class CSVProcessor:
 
                 # Convert back to bytes
                 _, buffer = cv2.imencode('.jpg', cropped_face)
-                return buffer.tobytes()
+                return buffer.tobytes(), True, ""
 
-            # Return original if no face detected
-            return image_data
+            # No face detected
+            return None, False, "No face detected in image"
 
         except Exception as e:
-            logger.warning(f"Error cropping face: {str(e)}")
-            return image_data
+            error_msg = f"Error cropping face: {str(e)}"
+            logger.warning(error_msg)
+            return None, False, error_msg
 
     async def download_image(self, url: str) -> Tuple[bytes, str]:
         """
@@ -200,7 +201,10 @@ class CSVProcessor:
 
                 # Crop face if face recognizer is available
                 if self.face_recognizer:
-                    image_data = self.crop_face_from_image(image_data)
+                    cropped_image, face_detected, error = self.crop_face_from_image(image_data)
+                    if not face_detected:
+                        return None, error
+                    image_data = cropped_image
 
                 return image_data, ""
 

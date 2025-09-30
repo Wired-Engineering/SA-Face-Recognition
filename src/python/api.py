@@ -453,6 +453,39 @@ def signal_recognition_change():
     global recognition_data_changed
     recognition_data_changed = True
 
+def generate_thumbnail(person_id: str, size: int = 150) -> bool:
+    """
+    Generate thumbnail for a person's image.
+    Returns True if successful, False otherwise.
+    """
+    try:
+        image_path = f'images/{person_id}.png'
+        if not os.path.exists(image_path):
+            return False
+
+        # Create thumbnails directory if it doesn't exist
+        os.makedirs('images/thumbnails', exist_ok=True)
+
+        thumbnail_path = f'images/thumbnails/{person_id}_{size}.jpg'
+
+        # Generate thumbnail
+        image = Image.open(image_path)
+        image.thumbnail((size, size), Image.Resampling.LANCZOS)
+
+        # Convert RGBA to RGB if needed (for JPEG)
+        if image.mode == 'RGBA':
+            background = Image.new('RGB', image.size, (255, 255, 255))
+            background.paste(image, mask=image.split()[3] if len(image.split()) == 4 else None)
+            image = background
+
+        # Save as JPEG with good quality
+        image.save(thumbnail_path, 'JPEG', quality=85, optimize=True)
+        return True
+
+    except Exception as e:
+        print(f"Error generating thumbnail for {person_id}: {e}")
+        return False
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 
@@ -1824,6 +1857,9 @@ async def register_person(request: personRegistration, admin_id: str = Depends(g
         image_path = f'images/{person_id}.png'
         cv2.imwrite(image_path, cropped_face)
 
+        # Generate thumbnail for faster loading in UI
+        generate_thumbnail(person_id)
+
         # Efficiently add person to FAISS database without rebuilding
         success = face_recognizer.add_photo_to_database(person_id, image_path)
 
@@ -1980,7 +2016,6 @@ async def process_csv_with_progress_streaming(csv_content: str, face_recognizer)
                 image_path = f'images/{person_id}.png'
                 cv2.imwrite(image_path, image_cv)
 
-
                 # Insert person to database
                 db_result = db.insert_into_person(
                     person_id,
@@ -2020,6 +2055,12 @@ async def process_csv_with_progress_streaming(csv_content: str, face_recognizer)
         # Recreate features dictionary if any successful registrations
         if successful_registrations:
             face_recognizer.create_features()
+
+        # Generate thumbnails for all successfully registered people
+        if successful_registrations:
+            yield f"event: progress\ndata: {json.dumps({'stage': 'thumbnails', 'message': 'Generating thumbnails...'})}\n\n"
+            for registration in successful_registrations:
+                generate_thumbnail(registration['person_id'])
 
         # Send final results
         final_data = {
@@ -2159,7 +2200,6 @@ async def upload_csv_bulk_registration(file: UploadFile = File(...), admin_id: s
                 image_path = f'images/{person_id}.png'
                 cv2.imwrite(image_path, image_cv)
 
-
                 # Insert person to database
                 db_result = db.insert_into_person(
                     person_id,
@@ -2199,6 +2239,11 @@ async def upload_csv_bulk_registration(file: UploadFile = File(...), admin_id: s
         # Recreate features dictionary if any successful registrations
         if successful_registrations:
             face_recognizer.create_features()
+
+        # Generate thumbnails for all successfully registered people
+        if successful_registrations:
+            for registration in successful_registrations:
+                generate_thumbnail(registration['person_id'])
 
         return {
             'success': True,
@@ -2334,6 +2379,16 @@ async def delete_person(person_id: str, admin_id: str = Depends(get_current_admi
                         except Exception as e:
                             print(f"Error deleting photo {filename}: {e}")
 
+            # Delete thumbnail if it exists
+            if os.path.exists('images/thumbnails'):
+                for filename in os.listdir('images/thumbnails'):
+                    if filename.startswith(f'{person_id}_'):
+                        thumbnail_path = os.path.join('images/thumbnails', filename)
+                        try:
+                            os.remove(thumbnail_path)
+                        except Exception as e:
+                            print(f"Error deleting thumbnail {filename}: {e}")
+
             # Efficiently remove from FAISS database without full rebuild
             try:
                 faiss_removed = face_recognizer.remove_person(person_id)
@@ -2391,6 +2446,16 @@ async def delete_all_people(admin_id: str = Depends(get_current_admin)):
                                 deleted_photos.append(filename)
                             except Exception as e:
                                 print(f"Error deleting photo {filename}: {e}")
+
+                # Delete thumbnails for this person
+                if os.path.exists('images/thumbnails'):
+                    for filename in os.listdir('images/thumbnails'):
+                        if filename.startswith(f'{person_id}_'):
+                            thumbnail_path = os.path.join('images/thumbnails', filename)
+                            try:
+                                os.remove(thumbnail_path)
+                            except Exception as e:
+                                print(f"Error deleting thumbnail {filename}: {e}")
             else:
                 failed_deletions.append(person_id)
 
@@ -2429,26 +2494,42 @@ async def delete_all_people(admin_id: str = Depends(get_current_admin)):
 
 @app.get("/api/people/{person_id}/image")
 async def get_person_image(person_id: str):
-    """Get a person's reference image (public for browser img tags)"""
+    """Get a person's thumbnail image - optimized for list views"""
     try:
         image_path = f'images/{person_id}.png'
-        if os.path.exists(image_path):
-            # Get file modification time for cache busting
-            file_mtime = os.path.getmtime(image_path)
-            etag = f'"{person_id}-{int(file_mtime)}"'
-
-            return FileResponse(
-                image_path,
-                media_type="image/png",
-                headers={
-                    "Cache-Control": "no-cache, must-revalidate",
-                    "Access-Control-Allow-Origin": "*",
-                    "ETag": etag,
-                    "Last-Modified": time.strftime('%a, %d %b %Y %H:%M:%S GMT', time.gmtime(file_mtime))
-                }
-            )
-        else:
+        if not os.path.exists(image_path):
             raise HTTPException(status_code=404, detail="Person image not found")
+
+        # Fixed thumbnail size for consistency
+        size = 150
+        thumbnail_path = f'images/thumbnails/{person_id}_{size}.jpg'
+        file_mtime = os.path.getmtime(image_path)
+
+        # Generate thumbnail only if it doesn't exist or is outdated
+        # (for backward compatibility with users registered before thumbnail generation was added)
+        if not os.path.exists(thumbnail_path):
+            generate_thumbnail(person_id, size)
+        else:
+            # Check if thumbnail is outdated
+            thumb_mtime = os.path.getmtime(thumbnail_path)
+            if thumb_mtime < file_mtime:
+                generate_thumbnail(person_id, size)
+
+        # Return thumbnail with proper headers
+        etag = f'"{person_id}-{size}-{int(file_mtime)}"'
+
+        return FileResponse(
+            thumbnail_path,
+            media_type="image/jpeg",
+            headers={
+                "Cache-Control": "public, max-age=3600",  # Cache for 1 hour
+                "Access-Control-Allow-Origin": "*",
+                "ETag": etag,
+                "Last-Modified": time.strftime('%a, %d %b %Y %H:%M:%S GMT', time.gmtime(file_mtime))
+            }
+        )
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
