@@ -42,7 +42,7 @@ import {
   IconMoodSmile,
   IconInfoCircle,
   IconRocket,
-  IconBadge,
+  IconSearch,
 } from '@tabler/icons-react';
 import apiService, { webcamUtils } from '../services/api';
 import welcomePopupService, { testWelcomePopup, closeWelcomePopup, isWelcomePopupOpen } from '../services/welcomePopup';
@@ -75,6 +75,7 @@ export function SettingsPage({ onSaveSettings }) {
   const [people, setPeople] = useState([]);
   const [peopleLoading, setPeopleLoading] = useState(false);
   const [uploadingPhotos, setUploadingPhotos] = useState({});
+  const [searchQuery, setSearchQuery] = useState('');
 
   // Face detection settings state
   const [detectionSettings, setDetectionSettings] = useState({
@@ -1383,7 +1384,14 @@ export function SettingsPage({ onSaveSettings }) {
                 <Flex justify="space-between" align="center">
                   <Title order={4}>
                     <IconUsersGroup size={20} style={{ marginRight: '8px', verticalAlign: 'text-bottom' }} />
-                    Registered People ({people.length})
+                    Registered People ({searchQuery.trim() ? `${people.filter((person) => {
+                      const query = searchQuery.toLowerCase();
+                      return (
+                        person.name?.toLowerCase().includes(query) ||
+                        person.title?.toLowerCase().includes(query) ||
+                        person.cvent_registration_number?.toLowerCase().includes(query)
+                      );
+                    }).length} of ${people.length}` : people.length})
                   </Title>
                   <Button
                     leftSection={<IconRefresh size={16} />}
@@ -1406,6 +1414,20 @@ export function SettingsPage({ onSaveSettings }) {
                   </Button>
                 </Flex>
 
+                <TextInput
+                  placeholder="Search by name, title, or registration number..."
+                  value={searchQuery}
+                  onChange={(event) => setSearchQuery(event.currentTarget.value)}
+                  leftSection={<IconSearch size={16} />}
+                  styles={{
+                    input: {
+                      '&:focus': {
+                        borderColor: '#228be6'
+                      }
+                    }
+                  }}
+                />
+
                 <ScrollArea h={400} style={{ position: 'relative' }}>
                   <LoadingOverlay visible={peopleLoading} overlayProps={{ blur: 2 }} />
 
@@ -1413,127 +1435,147 @@ export function SettingsPage({ onSaveSettings }) {
                     <Text c="dimmed" ta="center" py="xl">
                       No people registered yet
                     </Text>
-                  ) : (
-                    <Stack gap="xs">
-                      {people.map((person) => (
-                        <Card key={person.id} withBorder p="md">
-                          <Group justify="space-between" align="center">
-                            <Group>
-                              {person.has_image ? (
-                                <Image
-                                  src={`${person.image_path}`}
-                                  alt={`${person.name} reference photo`}
-                                  w={60}
-                                  h={60}
-                                  radius="md"
-                                  style={{ objectFit: 'cover' }}
-                                  fallbackSrc="data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' width='60' height='60' viewBox='0 0 24 24' fill='%23868e96'%3e%3cpath d='M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z'/%3e%3c/svg%3e"
-                                />
-                              ) : (
-                                <Box
-                                  w={60}
-                                  h={60}
-                                  style={{
-                                    backgroundColor: '#f8f9fa',
-                                    borderRadius: '6px',
-                                    display: 'flex',
-                                    alignItems: 'center',
-                                    justifyContent: 'center',
-                                    border: '1px solid #dee2e6'
-                                  }}
-                                >
-                                  <IconUser size={30} color="#868e96" />
-                                </Box>
-                              )}
+                  ) : (() => {
+                    const filteredPeople = people.filter((person) => {
+                      if (!searchQuery.trim()) return true;
+                      const query = searchQuery.toLowerCase();
+                      return (
+                        person.name?.toLowerCase().includes(query) ||
+                        person.title?.toLowerCase().includes(query) ||
+                        person.cvent_registration_number?.toLowerCase().includes(query)
+                      );
+                    });
 
-                              <Stack gap={0}>
-                                <Text fw={500} size="sm">
-                                  {person.name}
-                                </Text>
-                                <Text size="xs" c="dimmed">
-                                  ID: {person.id}
-                                </Text>
-                                <Text size="xs" c="dimmed">
-                                  Cvent Registration Number: {person.cvent_registration_number}
-                                </Text>
-                                {person.title && (
-                                  <Text size="xs" c="blue.6">
-                                    {person.title}
-                                  </Text>
+                    if (filteredPeople.length === 0) {
+                      return (
+                        <Text c="dimmed" ta="center" py="xl">
+                          No results found for "{searchQuery}"
+                        </Text>
+                      );
+                    }
+
+                    return (
+                      <Stack gap="xs">
+                        {filteredPeople.map((person) => (
+                          <Card key={person.id} withBorder p="md">
+                            <Group justify="space-between" align="center">
+                              <Group>
+                                {person.has_image ? (
+                                  <Image
+                                    src={`${person.image_path}`}
+                                    alt={`${person.name} reference photo`}
+                                    w={60}
+                                    h={60}
+                                    radius="md"
+                                    style={{ objectFit: 'cover' }}
+                                    fallbackSrc="data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' width='60' height='60' viewBox='0 0 24 24' fill='%23868e96'%3e%3cpath d='M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z'/%3e%3c/svg%3e"
+                                  />
+                                ) : (
+                                  <Box
+                                    w={60}
+                                    h={60}
+                                    style={{
+                                      backgroundColor: '#f8f9fa',
+                                      borderRadius: '6px',
+                                      display: 'flex',
+                                      alignItems: 'center',
+                                      justifyContent: 'center',
+                                      border: '1px solid #dee2e6'
+                                    }}
+                                  >
+                                    <IconUser size={30} color="#868e96" />
+                                  </Box>
                                 )}
 
-                                {/* Photo Information */}
-                                <Group gap={4} mt={4}>
-                                  <Badge
-                                    size="xs"
-                                    variant="dark"
-                                    color={person.total_photos > 1 ? "green" : "blue"}
-                                    leftSection={<IconPhoto size={10} />}
-                                  >
-                                    {person.total_photos} photo{person.total_photos !== 1 ? 's' : ''} {person.additional_photos_count > 0 && (
+                                <Stack gap={0}>
+                                  <Text fw={500} size="sm">
+                                    {person.name}
+                                  </Text>
+                                  <Text size="xs" c="dimmed">
+                                    ID: {person.id}
+                                  </Text>
+                                  <Text size="xs" c="dimmed">
+                                    Cvent Registration Number: {person.cvent_registration_number}
+                                  </Text>
+                                  {person.title && (
+                                    <Text size="xs" c="blue.6">
+                                      {person.title}
+                                    </Text>
+                                  )}
+
+                                  {/* Photo Information */}
+                                  <Group gap={4} mt={4}>
                                     <Badge
                                       size="xs"
                                       variant="dark"
-                                      color="orange"
+                                      color={person.total_photos > 1 ? "green" : "blue"}
+                                      leftSection={<IconPhoto size={10} />}
                                     >
-                                      +{person.additional_photos_count} additional
+                                      {person.total_photos} photo{person.total_photos !== 1 ? 's' : ''} {person.additional_photos_count > 0 && (
+                                      <Badge
+                                        size="xs"
+                                        variant="dark"
+                                        color="orange"
+                                      >
+                                        +{person.additional_photos_count} additional
+                                      </Badge>
+                                    )}
                                     </Badge>
-                                  )}
-                                  </Badge>
 
-                                  
-                                </Group>
+
+                                  </Group>
+                                </Stack>
+                              </Group>
+
+                              <Stack gap="xs">
+                                {/* Add Photo Upload */}
+                                <FileInput
+                                  placeholder="Add photo"
+                                  accept="image/*"
+                                  size="xs"
+                                  leftSection={<IconUpload size={12} />}
+                                  onChange={(file) => handleUploadAdditionalPhoto(person.id, person.name, file)}
+                                  disabled={uploadingPhotos[person.id]}
+                                  styles={{
+                                    input: {
+                                      fontSize: '11px',
+                                      height: '28px',
+                                      backgroundColor: 'rgba(0, 36, 61, 0.05)',
+                                      border: '1px solid rgba(0, 36, 61, 0.2)',
+                                      '&:hover': {
+                                        backgroundColor: 'rgba(0, 36, 61, 0.1)',
+                                      },
+                                    },
+                                  }}
+                                />
+
+                                <Button
+                                  leftSection={<IconTrash size={14} />}
+                                  onClick={() => handleDeletePerson(person.id, person.name)}
+                                  color="red"
+                                  variant="filled"
+                                  size="xs"
+                                  styles={{
+                                    root: {
+                                      backgroundColor: '#fa5252',
+                                      color: 'white',
+                                      fontSize: '12px',
+                                      fontWeight: 500,
+                                      '&:hover': {
+                                        backgroundColor: '#e03131'
+                                      }
+                                    }
+                                  }}
+                                >
+                                  Delete
+                                </Button>
                               </Stack>
                             </Group>
-
-                            <Stack gap="xs">
-                              {/* Add Photo Upload */}
-                              <FileInput
-                                placeholder="Add photo"
-                                accept="image/*"
-                                size="xs"
-                                leftSection={<IconUpload size={12} />}
-                                onChange={(file) => handleUploadAdditionalPhoto(person.id, person.name, file)}
-                                disabled={uploadingPhotos[person.id]}
-                                styles={{
-                                  input: {
-                                    fontSize: '11px',
-                                    height: '28px',
-                                    backgroundColor: 'rgba(0, 36, 61, 0.05)',
-                                    border: '1px solid rgba(0, 36, 61, 0.2)',
-                                    '&:hover': {
-                                      backgroundColor: 'rgba(0, 36, 61, 0.1)',
-                                    },
-                                  },
-                                }}
-                              />
-
-                              <Button
-                                leftSection={<IconTrash size={14} />}
-                                onClick={() => handleDeletePerson(person.id, person.name)}
-                                color="red"
-                                variant="filled"
-                                size="xs"
-                                styles={{
-                                  root: {
-                                    backgroundColor: '#fa5252',
-                                    color: 'white',
-                                    fontSize: '12px',
-                                    fontWeight: 500,
-                                    '&:hover': {
-                                      backgroundColor: '#e03131'
-                                    }
-                                  }
-                                }}
-                              >
-                                Delete
-                              </Button>
-                            </Stack>
-                          </Group>
-                        </Card>
-                      ))}
-                    </Stack>
-                  )}
+                          </Card>
+                        ))}
+                      </Stack>
+                    );
+                  })()}
                 </ScrollArea>
               </Stack>
             </Card>

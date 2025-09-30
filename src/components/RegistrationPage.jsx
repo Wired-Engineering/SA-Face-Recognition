@@ -562,7 +562,7 @@ export function RegistrationPage({ onRegister }) {
                         color="orange"
                         leftSection={<IconUserOff size={14} />}
                       >
-                        {csvResults.skipped_no_image} Skipped (No Image URL)
+                        {csvResults.skipped_no_image} Skipped
                       </Badge>
                     )}
                   </Group>

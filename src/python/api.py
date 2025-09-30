@@ -29,7 +29,7 @@ from DatabaseManager import MySqlite3Manager
 from utils import get_current_datetime_other_format
 from SCRFD_Face_recognizer import SCRFDFaceRecognizer as FaceRecognizer
 from config_manager import config_manager
-from services.csv_processor import process_csv
+# Removed unused process_csv import - now using CSVProcessor directly
 
 # Basic Authentication
 security = HTTPBasic()
@@ -1541,48 +1541,128 @@ async def get_people(admin_id: str = Depends(get_current_admin)):
     """Get all registered people with complete information"""
     try:
         person_ids = db.get_all_person_ids()
+        print(f"📊 Total person IDs from database: {len(person_ids)}")
         people = []
+        skipped_count = 0
 
-        for person_id in person_ids:
+        for idx, person_id in enumerate(person_ids):
             person_name = db.get_person_name(person_id)
             person_title = db.get_person_title(person_id)
             person_registration = db.get_person_registration(person_id)
-            if person_name:
-                # Check if reference image exists
-                image_path = f'images/{person_id}.png'
-                has_image = os.path.exists(image_path)
 
-                # Add timestamp for cache busting
-                image_url = None
-                if has_image:
-                    file_mtime = int(os.path.getmtime(image_path))
-                    image_url = f'/api/people/{person_id}/image?t={file_mtime}'
+            # Debug: Log first few people regardless of name
+            if idx < 5:
+                print(f"🔍 Person {idx}: ID={person_id[:8]}..., Name='{person_name}', Title='{person_title}', Reg='{person_registration}'")
 
-                # Count total photos for this person
-                photo_files = []
-                additional_photos = []
-                if os.path.exists('images'):
-                    for filename in os.listdir('images'):
-                        if filename.startswith(f'{person_id}.png') or filename.startswith(f'{person_id}%'):
-                            photo_files.append(filename)
-                            if filename != f'{person_id}.png':
-                                additional_photos.append(filename)
+            # Skip people with missing names and log it
+            if not person_name:
+                skipped_count += 1
+                if skipped_count <= 5:  # Only log first 5 to avoid spam
+                    print(f"⚠️ Skipping person {person_id[:8]}... - Name='{person_name}' (type: {type(person_name)}), Reg='{person_registration}'")
+                continue
 
-                people.append({
-                    'id': person_id,
-                    'name': person_name,
-                    'title': person_title or '',
-                    'has_image': has_image,
-                    'cvent_registration_number': person_registration,
-                    'image_path': image_url,
-                    'total_photos': len(photo_files),
-                    'additional_photos_count': len(additional_photos)
-                })
+            # Check if reference image exists
+            image_path = f'images/{person_id}.png'
+            has_image = os.path.exists(image_path)
+
+            # Add timestamp for cache busting
+            image_url = None
+            if has_image:
+                file_mtime = int(os.path.getmtime(image_path))
+                image_url = f'/api/people/{person_id}/image?t={file_mtime}'
+
+            # Count total photos for this person
+            photo_files = []
+            additional_photos = []
+            if os.path.exists('images'):
+                for filename in os.listdir('images'):
+                    if filename.startswith(f'{person_id}.png') or filename.startswith(f'{person_id}%'):
+                        photo_files.append(filename)
+                        if filename != f'{person_id}.png':
+                            additional_photos.append(filename)
+
+            people.append({
+                'id': person_id,
+                'name': person_name,
+                'title': person_title or '',
+                'has_image': has_image,
+                'cvent_registration_number': person_registration,
+                'image_path': image_url,
+                'total_photos': len(photo_files),
+                'additional_photos_count': len(additional_photos)
+            })
+
+        if skipped_count > 0:
+            print(f"⚠️ Total people skipped due to missing names: {skipped_count}")
+        else:
+            print(f"✅ No people skipped - all have names")
+
+        # Count how many people have images
+        people_with_images = sum(1 for p in people if p['has_image'])
+        print(f"📤 Returning {len(people)} people to frontend (out of {len(person_ids)} in DB)")
+        print(f"📸 People with images: {people_with_images}/{len(people)}")
+
+        # Check FAISS database count
+        try:
+            faiss_count = face_recognizer.face_database.index.ntotal if hasattr(face_recognizer, 'face_database') else 'N/A'
+            print(f"🔍 FAISS database contains: {faiss_count} face embeddings")
+            if people_with_images != faiss_count:
+                print(f"⚠️ MISMATCH: {people_with_images} people with images but {faiss_count} in FAISS (difference: {people_with_images - faiss_count if isinstance(faiss_count, int) else '?'})")
+
+                # Find which people are missing from FAISS
+                print(f"🔎 Checking which people are missing from FAISS...")
+                print(f"🔑 person_id_to_name mapping has {len(face_recognizer.person_id_to_name)} entries")
+                if len(face_recognizer.person_id_to_name) > 0:
+                    # Show first few keys in the mapping
+                    sample_keys = list(face_recognizer.person_id_to_name.keys())[:5]
+                    print(f"   Sample keys in mapping: {[k[:8] + '...' if len(k) > 8 else k for k in sample_keys]}")
+
+                    # Check if any mapping person_ids exist in the current database
+                    # Note: mapping values are person_ids, keys are photo_ids
+                    db_person_ids_set = set(person_ids)
+                    mapping_person_ids = set(face_recognizer.person_id_to_name.values())
+                    matching_ids = mapping_person_ids.intersection(db_person_ids_set)
+                    print(f"   🔍 {len(matching_ids)}/{len(mapping_person_ids)} FAISS people found in current database")
+
+                    if len(matching_ids) == 0:
+                        print(f"   ⚠️ NONE of the FAISS people exist in the database!")
+                        print(f"   💡 This means FAISS was built from a different/old set of people")
+                        print(f"   💡 Solution: Rebuild FAISS database with current people")
+                    elif len(matching_ids) < len(mapping_person_ids):
+                        print(f"   ⚠️ {len(mapping_person_ids) - len(matching_ids)} FAISS people not found in database (orphaned faces)")
+                else:
+                    print(f"   ⚠️ person_id_to_name mapping is EMPTY!")
+
+                missing_people = []
+                for person in people:
+                    if person['has_image']:
+                        person_id = person['id']
+                        # Check if this person_id is in the FAISS mapping
+                        # Note: mapping keys are photo_ids like "person_id%1", so we need to check values
+                        if person_id not in face_recognizer.person_id_to_name.values():
+                            missing_people.append({
+                                'id': person_id,
+                                'name': person['name'],
+                                'registration': person['cvent_registration_number']
+                            })
+
+                if missing_people:
+                    print(f"❌ Found {len(missing_people)} people missing from FAISS:")
+                    for idx, mp in enumerate(missing_people[:10]):  # Show first 10
+                        print(f"   {idx+1}. {mp['name']} (ID: {mp['id'][:8]}..., Reg: {mp['registration']})")
+                    if len(missing_people) > 10:
+                        print(f"   ... and {len(missing_people) - 10} more")
+                else:
+                    print(f"⚠️ Could not identify missing people - person_id_to_name mapping might not match images")
+        except Exception as e:
+            print(f"⚠️ Could not check FAISS count: {e}")
 
         return {
             'success': True,
             'people': people,
-            'total': len(people)
+            'total': len(people),
+            'total_in_db': len(person_ids),
+            'skipped': skipped_count
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -1910,105 +1990,64 @@ async def process_csv_with_progress_streaming(csv_content: str, face_recognizer)
             yield f"event: error\ndata: {json.dumps({'error': error})}\n\n"
             return
 
-        yield f"event: progress\ndata: {json.dumps({'stage': 'downloading', 'message': f'Downloading images for {len(rows)} users...'})}\n\n"
+        yield f"event: progress\ndata: {json.dumps({'stage': 'processing', 'message': f'Processing {len(rows)} users...'})}\n\n"
 
-        # Process each row
-        processed_rows = []
-        total_rows = len(rows)
-
-        for idx, row in enumerate(rows, 1):
-            # Send progress for each user
-            progress_data = {
-                "stage": "downloading",
-                "message": f"Downloading image for {row['full_name']}...",
-                "total": total_rows,
-                "current": idx,
-                "percentage": int((idx / total_rows) * 50)  # First 50% for downloads
-            }
-            yield f"event: progress\ndata: {json.dumps(progress_data)}\n\n"
-
-            row_result = {
-                "row_number": row["row_number"],
-                "full_name": row["full_name"],
-                "title": row["title"],
-                "registration_number": row["registration_number"],
-                "image_downloaded": False,
-                "image_data": None,
-                "error": None
-            }
-
-            # Check if registration ID already exists
-            if db.check_registration_exists(row["registration_number"]):
-                row_result["error"] = f'Registration ID "{row["registration_number"]}" already exists in database'
-                processed_rows.append(row_result)
-                continue
-
-            # Download image if URL provided
-            if row["image_url"]:
-                image_data, error = await processor.download_image(row["image_url"])
-                if error:
-                    row_result["error"] = error
-                else:
-                    row_result["image_downloaded"] = True
-                    row_result["image_data"] = image_data
-
-            processed_rows.append(row_result)
-
-        # Now process registrations
-        yield f"event: progress\ndata: {json.dumps({'stage': 'registering', 'message': 'Starting user registrations...'})}\n\n"
-
+        # Process each person completely in one pass
         successful_registrations = []
         failed_registrations = []
         skipped_no_image = []
+        total_rows = len(rows)
 
-        for idx, row in enumerate(processed_rows, 1):
-            # Send registration progress
-            progress_data = {
-                "stage": "registering",
-                "message": f"Registering {row['full_name']}...",
-                "total": len(processed_rows),
-                "current": idx,
-                "percentage": 50 + int((idx / len(processed_rows)) * 50)  # Second 50% for registration
-            }
-            yield f"event: progress\ndata: {json.dumps(progress_data)}\n\n"
-
+        for idx, row in enumerate(rows, 1):
             try:
-                # Skip users with errors (including duplicate registration IDs)
-                if row['error']:
+                # Send progress for each user
+                progress_data = {
+                    "stage": "processing",
+                    "message": f"Processing {row['full_name']}...",
+                    "total": total_rows,
+                    "current": idx,
+                    "percentage": int((idx / total_rows) * 100)
+                }
+                yield f"event: progress\ndata: {json.dumps(progress_data)}\n\n"
+
+                # Check if registration ID already exists
+                if db.check_registration_exists(row["registration_number"]):
                     failed_registrations.append({
                         'row_number': row['row_number'],
                         'name': row['full_name'],
                         'title': row['title'],
                         'registration_number': row['registration_number'],
-                        'error': row['error']
+                        'error': f'Registration ID "{row["registration_number"]}" already exists in database'
                     })
                     continue
 
-                # Skip users without image data
-                if not row['image_data']:
+                # Download image if URL provided
+                if not row["image_url"]:
                     skipped_no_image.append({
                         'row_number': row['row_number'],
                         'name': row['full_name'],
                         'title': row['title'],
                         'registration_number': row['registration_number'],
-                        'error': 'No image URL provided or image download failed'
+                        'error': 'No image URL provided'
+                    })
+                    continue
+
+                image_data, error = await processor.download_image(row["image_url"])
+                if error:
+                    failed_registrations.append({
+                        'row_number': row['row_number'],
+                        'name': row['full_name'],
+                        'title': row['title'],
+                        'registration_number': row['registration_number'],
+                        'error': error
                     })
                     continue
 
                 # Generate unique ID for person
                 person_id = str(uuid.uuid4())
 
-                # Convert bytes to base64 if needed
-                if isinstance(row['image_data'], bytes):
-                    image_data_b64 = base64.b64encode(row['image_data']).decode('utf-8')
-                else:
-                    image_data_b64 = row['image_data']
-
-                # Decode image
-                image_bytes = base64.b64decode(image_data_b64) if isinstance(image_data_b64, str) else row['image_data']
-                image = Image.open(BytesIO(image_bytes))
-
-                # Convert to OpenCV format
+                # Convert bytes to image
+                image = Image.open(BytesIO(image_data))
                 image_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
 
                 # Save processed image (already cropped and optimized by CSV processor)
@@ -2025,6 +2064,9 @@ async def process_csv_with_progress_streaming(csv_content: str, face_recognizer)
                 )
 
                 if 'already exist' in db_result:
+                    # Clean up image file
+                    if os.path.exists(image_path):
+                        os.remove(image_path)
                     failed_registrations.append({
                         'row_number': row['row_number'],
                         'name': row['full_name'],
@@ -2033,6 +2075,25 @@ async def process_csv_with_progress_streaming(csv_content: str, face_recognizer)
                         'error': 'Person already exists'
                     })
                     continue
+
+                # Add to FAISS database incrementally
+                faiss_success = face_recognizer.add_photo_to_database(person_id, image_path)
+                if not faiss_success:
+                    # FAISS add failed - rollback database and file
+                    db.delete_data_from_person(person_id)
+                    if os.path.exists(image_path):
+                        os.remove(image_path)
+                    failed_registrations.append({
+                        'row_number': row['row_number'],
+                        'name': row['full_name'],
+                        'title': row['title'],
+                        'registration_number': row['registration_number'],
+                        'error': 'Failed to add face to recognition database (no face detected or poor quality)'
+                    })
+                    continue
+
+                # Generate thumbnail immediately
+                generate_thumbnail(person_id)
 
                 successful_registrations.append({
                     'row_number': row['row_number'],
@@ -2051,16 +2112,6 @@ async def process_csv_with_progress_streaming(csv_content: str, face_recognizer)
                     'registration_number': row.get('registration_number', ''),
                     'error': str(e)
                 })
-
-        # Recreate features dictionary if any successful registrations
-        if successful_registrations:
-            face_recognizer.create_features()
-
-        # Generate thumbnails for all successfully registered people
-        if successful_registrations:
-            yield f"event: progress\ndata: {json.dumps({'stage': 'thumbnails', 'message': 'Generating thumbnails...'})}\n\n"
-            for registration in successful_registrations:
-                generate_thumbnail(registration['person_id'])
 
         # Send final results
         final_data = {
@@ -2138,61 +2189,63 @@ async def upload_csv_bulk_registration(file: UploadFile = File(...), admin_id: s
         content = await file.read()
         csv_content = content.decode('utf-8')
 
-        # Process CSV with face recognizer for automatic face cropping
-        result = await process_csv(csv_content, face_recognizer, db)
+        # Initialize CSV processor
+        from services.csv_processor import CSVProcessor
+        processor = CSVProcessor(face_recognizer, db)
 
-        if not result['success']:
+        # Parse CSV
+        rows, error = processor.parse_csv_content(csv_content)
+        if error:
             return {
                 'success': False,
-                'error': result.get('error', 'Failed to process CSV'),
-                'required_columns': result.get('required_columns', [])
+                'error': error
             }
 
-        # Process each row and register people
+        # Process each person completely in one pass
         successful_registrations = []
         failed_registrations = []
         skipped_no_image = []
 
-        total_to_process = len(result['processed_rows'])
-
-        for idx, row in enumerate(result['processed_rows'], 1):
+        for row in rows:
             try:
-                # Skip users with errors (including duplicate registration IDs)
-                if row['error']:
+                # Check if registration ID already exists
+                if db.check_registration_exists(row["registration_number"]):
                     failed_registrations.append({
                         'row_number': row['row_number'],
                         'name': row['full_name'],
                         'title': row['title'],
                         'registration_number': row['registration_number'],
-                        'error': row['error']
+                        'error': f'Registration ID "{row["registration_number"]}" already exists in database'
                     })
                     continue
 
-                # Skip users without image data
-                if not row['image_data']:
+                # Download image if URL provided
+                if not row["image_url"]:
                     skipped_no_image.append({
                         'row_number': row['row_number'],
                         'name': row['full_name'],
                         'title': row['title'],
                         'registration_number': row['registration_number'],
-                        'error': 'No image URL provided or image download failed'
+                        'error': 'No image URL provided'
+                    })
+                    continue
+
+                image_data, error = await processor.download_image(row["image_url"])
+                if error:
+                    failed_registrations.append({
+                        'row_number': row['row_number'],
+                        'name': row['full_name'],
+                        'title': row['title'],
+                        'registration_number': row['registration_number'],
+                        'error': error
                     })
                     continue
 
                 # Generate unique ID for person
                 person_id = str(uuid.uuid4())
 
-                # Convert bytes to base64 if needed
-                if isinstance(row['image_data'], bytes):
-                    image_data_b64 = base64.b64encode(row['image_data']).decode('utf-8')
-                else:
-                    image_data_b64 = row['image_data']
-
-                # Decode image
-                image_bytes = base64.b64decode(image_data_b64) if isinstance(image_data_b64, str) else row['image_data']
-                image = Image.open(BytesIO(image_bytes))
-
-                # Convert to OpenCV format
+                # Convert bytes to image
+                image = Image.open(BytesIO(image_data))
                 image_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
 
                 # Save processed image (already cropped and optimized by CSV processor)
@@ -2209,6 +2262,9 @@ async def upload_csv_bulk_registration(file: UploadFile = File(...), admin_id: s
                 )
 
                 if 'already exist' in db_result:
+                    # Clean up image file
+                    if os.path.exists(image_path):
+                        os.remove(image_path)
                     failed_registrations.append({
                         'row_number': row['row_number'],
                         'name': row['full_name'],
@@ -2217,6 +2273,25 @@ async def upload_csv_bulk_registration(file: UploadFile = File(...), admin_id: s
                         'error': 'Person already exists'
                     })
                     continue
+
+                # Add to FAISS database incrementally
+                faiss_success = face_recognizer.add_photo_to_database(person_id, image_path)
+                if not faiss_success:
+                    # FAISS add failed - rollback database and file
+                    db.delete_data_from_person(person_id)
+                    if os.path.exists(image_path):
+                        os.remove(image_path)
+                    failed_registrations.append({
+                        'row_number': row['row_number'],
+                        'name': row['full_name'],
+                        'title': row['title'],
+                        'registration_number': row['registration_number'],
+                        'error': 'Failed to add face to recognition database (no face detected or poor quality)'
+                    })
+                    continue
+
+                # Generate thumbnail immediately
+                generate_thumbnail(person_id)
 
                 successful_registrations.append({
                     'row_number': row['row_number'],
@@ -2236,18 +2311,12 @@ async def upload_csv_bulk_registration(file: UploadFile = File(...), admin_id: s
                     'error': str(e)
                 })
 
-        # Recreate features dictionary if any successful registrations
-        if successful_registrations:
-            face_recognizer.create_features()
-
-        # Generate thumbnails for all successfully registered people
-        if successful_registrations:
-            for registration in successful_registrations:
-                generate_thumbnail(registration['person_id'])
+        # Close the aiohttp session
+        await processor.close()
 
         return {
             'success': True,
-            'total_rows': result['total_rows'],
+            'total_rows': len(rows),
             'successful_registrations': len(successful_registrations),
             'failed_registrations': len(failed_registrations),
             'skipped_no_image': len(skipped_no_image),
@@ -2459,20 +2528,27 @@ async def delete_all_people(admin_id: str = Depends(get_current_admin)):
             else:
                 failed_deletions.append(person_id)
 
-        # Batch remove from FAISS database (more efficient than individual removals)
+        # Completely reset FAISS database (more reliable than trying to remove by ID)
         if deleted_count > 0:
-            # Remove from FAISS database
-            successful_deletions = [pid for pid in person_ids if pid not in failed_deletions]
-            removed_count = face_recognizer.face_database.remove_faces(successful_deletions)
+            print("🔄 Resetting FAISS database after deleting all people...")
+
+            # Create a fresh, empty FAISS database
+            from database.face_db import FaceDatabase
+            from pathlib import Path
+            face_recognizer.face_database = FaceDatabase(
+                embedding_size=512,
+                db_path=str(Path("system/faiss_database")),
+                max_workers=4
+            )
 
             # Clear person mapping
             face_recognizer.person_id_to_name.clear()
 
-            # Save updated (possibly empty) database
+            # Save the empty database to cache
             face_recognizer.face_database.save()
             face_recognizer._save_person_mapping()
 
-            print(f"✅ Removed {removed_count} face embeddings from FAISS database")
+            print(f"✅ FAISS database completely reset (empty)")
 
         if len(failed_deletions) == 0:
             return {
