@@ -1,0 +1,14 @@
+fastapi
+uvicorn
+opencv-python-headless
+pandas
+PyYAML
+pydantic
+numpy
+pillow
+python-socketio
+python-multipart
+scikit-image
+onnx
+aiohttp
+sse-starlette

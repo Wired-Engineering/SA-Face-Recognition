@@ -1,16 +1,8 @@
-fastapi
-uvicorn
-opencv-python-headless
-pandas
-PyYAML
-pydantic
-numpy
-pillow
-python-socketio
-python-multipart
-faiss-cpu
-scikit-image
-onnx
-onnxruntime
-aiohttp
-sse-starlette
+# Default requirements file for local development (CPU)
+# For production builds, use device-specific requirements files:
+#   - requirements-cpu.txt
+#   - requirements-cuda.txt
+#   - requirements-openvino.txt
+#   - requirements-rocm.txt
+
+-r requirements-cpu.txt

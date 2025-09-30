@@ -9,7 +9,7 @@
 
 services:
   face-recognition:
-    image: ghcr.io/wired-engineering/sa-face-recognition:latest
+    image: ghcr.io/wired-engineering/sa-face-recognition:latest-rocm
     container_name: sa-face-recognition-amd
     ports:
       - "8443:443"
@@ -17,14 +17,14 @@ services:
       - system_data:/app/src/python/system
       - images_data:/app/src/python/images
       - weights_data:/app/src/python/weights
-    # AMD GPU/iGPU Hardware Acceleration Support
     devices:
-      - /dev/dri:/dev/dri                    # AMD GPU DRI devices (required)
-      - /dev/kfd:/dev/kfd                    # AMD GPU Kernel Fusion Driver (optional for iGPU)
+      - /dev/dri
+      - /dev/kfd
     group_add:
-      - video                                # Required for GPU access
-      - render                               # Required for AMD GPU rendering
-    # GPU acceleration auto-detected from device passthrough
+      - video
+      - render
+    security_opt:
+      - seccomp:unconfined
     restart: unless-stopped
 
 volumes:

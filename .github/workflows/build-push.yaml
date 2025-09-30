@@ -13,6 +13,24 @@ jobs:
       actions: read
       packages: write
       id-token: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        device:
+          - name: cpu
+            suffix: ""
+            platforms: linux/amd64,linux/arm64/v8
+          - name: cuda
+            suffix: "-cuda"
+            platforms: linux/amd64
+          - name: openvino
+            suffix: "-openvino"
+            platforms: linux/amd64
+          - name: rocm
+            suffix: "-rocm"
+            platforms: linux/amd64
+
     steps:
       - name: Check out
         uses: actions/checkout@v5
@@ -43,24 +61,26 @@ jobs:
       - name: Check if image exists
         id: version-check
         run: |
-          if docker manifest inspect ${{ env.REGISTRY }}/${{ steps.lowercase.outputs.IMAGE_NAME }}:${{ steps.version.outputs.VERSION }} >/dev/null 2>&1; then
-            echo "Image ${{ steps.version.outputs.VERSION }} already exists"
+          if docker manifest inspect ${{ env.REGISTRY }}/${{ steps.lowercase.outputs.IMAGE_NAME }}:${{ steps.version.outputs.VERSION }}${{ matrix.device.suffix }} >/dev/null 2>&1; then
+            echo "Image ${{ steps.version.outputs.VERSION }}${{ matrix.device.suffix }} already exists"
             echo "EXISTS=true" >> $GITHUB_OUTPUT
           else
-            echo "Image ${{ steps.version.outputs.VERSION }} does not exist"
+            echo "Image ${{ steps.version.outputs.VERSION }}${{ matrix.device.suffix }} does not exist"
             echo "EXISTS=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: Build and push Backend image
+      - name: Build and push ${{ matrix.device.name }} image
         if: steps.version-check.outputs.EXISTS == 'false'
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
+          build-args: |
+            DEVICE=${{ matrix.device.name }}
           push: true
-          cache-from: type=gha,scope=backend
-          cache-to: type=gha,mode=max,scope=backend
-          platforms: linux/amd64,linux/arm64/v8
+          cache-from: type=gha,scope=${{ matrix.device.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.device.name }}
+          platforms: ${{ matrix.device.platforms }}
           tags: |
-            ${{ env.REGISTRY }}/${{ steps.lowercase.outputs.IMAGE_NAME }}:latest
-            ${{ env.REGISTRY }}/${{ steps.lowercase.outputs.IMAGE_NAME }}:${{ steps.version.outputs.VERSION }}
+            ${{ env.REGISTRY }}/${{ steps.lowercase.outputs.IMAGE_NAME }}:latest${{ matrix.device.suffix }}
+            ${{ env.REGISTRY }}/${{ steps.lowercase.outputs.IMAGE_NAME }}:${{ steps.version.outputs.VERSION }}${{ matrix.device.suffix }}

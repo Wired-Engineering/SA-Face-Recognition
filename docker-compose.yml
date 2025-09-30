@@ -2,7 +2,7 @@
 
 services:
   face-recognition:
-    image: safacerecognition:latest
+    image: ghcr.io/wired-engineering/sa-face-recognition:latest${IMAGE_SUFFIX:-}
     container_name: sa-face-recognition
     ports:
       - "8443:443"
@@ -12,10 +12,11 @@ services:
       - weights_data:/app/src/python/weights
     restart: unless-stopped
 
-    # GPU acceleration is disabled by default for production stability
-    # To enable GPU acceleration, use one of these specialized configurations:
-    #   Intel GPU:  docker-compose -f docker-compose.intel-gpu.yml up -d
-    #   AMD GPU:    docker-compose -f docker-compose.amd-gpu.yml up -d
+    # GPU acceleration options:
+    # CPU (default):     docker-compose up -d
+    # CUDA:              IMAGE_SUFFIX=-cuda docker-compose up -d
+    # OpenVINO (Intel):  IMAGE_SUFFIX=-openvino docker-compose up -d
+    # ROCM (AMD):        IMAGE_SUFFIX=-rocm docker-compose up -d
 
 volumes:
   system_data:

@@ -9,7 +9,7 @@
 
 services:
   face-recognition:
-    image: ghcr.io/wired-engineering/sa-face-recognition:latest
+    image: ghcr.io/wired-engineering/sa-face-recognition:latest-openvino
     container_name: sa-face-recognition-intel
     ports:
       - "8443:443"
@@ -17,12 +17,11 @@ services:
       - system_data:/app/src/python/system
       - images_data:/app/src/python/images
       - weights_data:/app/src/python/weights
-    # Intel GPU Hardware Acceleration Support
     devices:
-      - /dev/dri:/dev/dri                    # Intel GPU DRI devices
+      - /dev/dri
     group_add:
-      - video                                # Required for Intel GPU access
-    # GPU acceleration auto-detected from device passthrough
+      - video
+      - render
     restart: unless-stopped
 
 volumes:

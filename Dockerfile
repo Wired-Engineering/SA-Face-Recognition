@@ -1,3 +1,6 @@
+# Global ARG for device type selection (must be before any FROM)
+ARG DEVICE=cpu
+
 # Build stage
 FROM node:23-alpine AS build
 
@@ -17,27 +20,161 @@ COPY . .
 RUN rm -rf dist node_modules/.cache .vite
 RUN pnpm build
 
-# # Production stage with Python base
-# FROM python:3.12-alpine
-FROM python:3.12-slim
+# ============================================================================
+# Builder stages - prepare dependencies for each device type
+# ============================================================================
 
-RUN apt-get update && apt-get install -y \
+# Base Ubuntu 24.04 builder with Python 3.12
+FROM ubuntu:24.04 AS builder-base
+
+# Install Python 3.12 (native to Ubuntu 24.04)
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    python3.12 \
+    python3.12-venv \
+    python3-pip \
+    && ln -sf /usr/bin/python3.12 /usr/bin/python3 \
+    && ln -sf /usr/bin/python3 /usr/bin/python \
+    && rm -rf /var/lib/apt/lists/*
+
+# CPU builder - extends base
+FROM builder-base AS builder-cpu
+
+# CUDA builder - extends base
+FROM builder-base AS builder-cuda
+
+# OpenVINO builder - extends base
+FROM builder-base AS builder-openvino
+
+# ROCm builder - extends base
+FROM builder-base AS builder-rocm
+
+# Select appropriate builder based on DEVICE arg
+FROM builder-${DEVICE} AS builder
+
+ARG DEVICE
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    VIRTUAL_ENV=/opt/venv \
+    PATH="/opt/venv/bin:$PATH"
+
+# Create virtual environment
+RUN python3 -m venv /opt/venv
+
+# Install Python dependencies based on device type
+WORKDIR /tmp
+COPY src/python/requirements-base.txt ./
+COPY src/python/requirements-cpu.txt ./
+COPY src/python/requirements-cuda.txt ./
+COPY src/python/requirements-openvino.txt ./
+COPY src/python/requirements-rocm.txt ./
+
+RUN pip3 install --no-cache-dir --upgrade pip && \
+    pip3 install --no-cache-dir -r requirements-${DEVICE}.txt
+
+# ============================================================================
+# Production stages - minimal runtime images for each device type
+# ============================================================================
+
+# CPU production - Ubuntu 24.04 with Python 3.12
+FROM ubuntu:24.04 AS prod-cpu
+
+# Install Python 3.12 (native to Ubuntu 24.04)
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    python3.12 \
+    python3.12-venv \
+    python3-pip \
+    && ln -sf /usr/bin/python3.12 /usr/bin/python3 \
+    && ln -sf /usr/bin/python3 /usr/bin/python \
+    && rm -rf /var/lib/apt/lists/*
+
+# CUDA production - NVIDIA CUDA runtime (Ubuntu 24.04)
+# Note: cudnn-runtime base already includes libcudnn9-cuda-12
+FROM nvidia/cuda:12.9.1-cudnn-runtime-ubuntu24.04 AS prod-cuda
+
+# Install Python 3.12 (native to Ubuntu 24.04)
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    python3.12 \
+    python3.12-venv \
+    python3-pip \
+    && ln -sf /usr/bin/python3.12 /usr/bin/python3 \
+    && ln -sf /usr/bin/python3 /usr/bin/python \
+    && rm -rf /var/lib/apt/lists/*
+
+# OpenVINO production - Ubuntu 24.04 + Python 3.12 + Intel OpenCL runtime
+FROM ubuntu:24.04 AS prod-openvino
+
+# Install Python 3.12 (native to Ubuntu 24.04)
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    python3.12 \
+    python3.12-venv \
+    python3-pip \
+    && ln -sf /usr/bin/python3.12 /usr/bin/python3 \
+    && ln -sf /usr/bin/python3 /usr/bin/python \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Intel OpenCL runtime
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    ocl-icd-libopencl1 \
+    wget \
+    && wget -nv https://github.com/intel/intel-graphics-compiler/releases/download/igc-1.0.17384.11/intel-igc-core_1.0.17384.11_amd64.deb \
+    && wget -nv https://github.com/intel/intel-graphics-compiler/releases/download/igc-1.0.17384.11/intel-igc-opencl_1.0.17384.11_amd64.deb \
+    && wget -nv https://github.com/intel/compute-runtime/releases/download/24.31.30508.7/intel-opencl-icd_24.31.30508.7_amd64.deb \
+    && wget -nv https://github.com/intel/compute-runtime/releases/download/24.31.30508.7/libigdgmm12_22.4.1_amd64.deb \
+    && dpkg -i *.deb \
+    && rm *.deb \
+    && apt-get remove wget -yqq \
+    && rm -rf /var/lib/apt/lists/*
+
+# ROCm production - ROCm 7.0 dev image
+FROM rocm/dev-ubuntu-24.04:7.0 AS prod-rocm
+
+# Install Python 3.12 (native to Ubuntu 24.04)
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    python3.12 \
+    python3.12-venv \
+    python3-pip \
+    && ln -sf /usr/bin/python3.12 /usr/bin/python3 \
+    && ln -sf /usr/bin/python3 /usr/bin/python \
+    && rm -rf /var/lib/apt/lists/*
+
+# ============================================================================
+# Final production stage - select based on DEVICE arg
+# ============================================================================
+
+FROM prod-${DEVICE} AS prod
+
+ARG DEVICE
+
+# Install common system dependencies
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
     nginx \
     supervisor \
     openssl \
     curl \
-    # Minimal OpenCV dependencies (verified by ldd analysis)
+    # Minimal OpenCV dependencies
     libgl1 \
     libglib2.0-0 \
     libx11-6 \
     && rm -rf /var/lib/apt/lists/*
 
-
 WORKDIR /app
 
-# Copy Python requirements and install
-COPY src/python/requirements.txt ./
-RUN pip3 install --no-cache-dir -r requirements.txt
+# Copy virtual environment from builder
+COPY --from=builder /opt/venv /opt/venv
+
+# Set environment to use virtual environment
+ENV VIRTUAL_ENV=/opt/venv \
+    PATH="/opt/venv/bin:$PATH" \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
 
 # Copy Python source code
 COPY src/python/ ./src/python/

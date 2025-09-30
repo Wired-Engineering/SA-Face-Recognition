@@ -77,16 +77,46 @@ if [ -f /.dockerenv ] || [ -f /proc/1/cgroup ]; then
 
     # Auto-detect GPU acceleration based on device passthrough
     GPU_DETECTED="false"
-    if [ -d "/dev/dri" ] && [ -n "$(ls -A /dev/dri/ 2>/dev/null)" ]; then
-        echo "✅ GPU devices detected - enabling hardware acceleration automatically"
+    GPU_TYPE=""
+
+    # Check for NVIDIA GPU
+    if command -v nvidia-smi &> /dev/null; then
+        echo "✅ NVIDIA GPU detected (via nvidia-smi)"
         GPU_DETECTED="true"
+        GPU_TYPE="NVIDIA"
         export ENABLE_GPU_ACCELERATION=true
+    elif [ -e "/dev/nvidia0" ] || [ -e "/dev/nvidiactl" ]; then
+        echo "✅ NVIDIA GPU devices detected"
+        GPU_DETECTED="true"
+        GPU_TYPE="NVIDIA"
+        export ENABLE_GPU_ACCELERATION=true
+    # Check for Intel/AMD GPU (DRI devices)
+    elif [ -d "/dev/dri" ] && [ -n "$(ls -A /dev/dri/ 2>/dev/null)" ]; then
+        echo "✅ Intel/AMD GPU devices detected (DRI)"
+        GPU_DETECTED="true"
+        GPU_TYPE="Intel/AMD"
+        export ENABLE_GPU_ACCELERATION=true
+    # Check for AMD ROCm
+    elif [ -e "/dev/kfd" ]; then
+        echo "✅ AMD ROCm device detected"
+        GPU_DETECTED="true"
+        GPU_TYPE="AMD ROCm"
+        export ENABLE_GPU_ACCELERATION=true
+    # Manual override
     elif [ "${ENABLE_GPU_ACCELERATION:-false}" = "true" ]; then
         echo "🚀 GPU acceleration explicitly enabled via environment variable"
         GPU_DETECTED="true"
+        GPU_TYPE="Manual"
     else
         echo "💻 No GPU devices detected - using CPU-only processing (production safe mode)"
-        echo "💡 To enable GPU: pass through devices (--device=/dev/dri:/dev/dri)"
+        echo "💡 To enable GPU acceleration:"
+        echo "   NVIDIA: Use --gpus all or --runtime=nvidia"
+        echo "   Intel:  --device=/dev/dri:/dev/dri --group-add video"
+        echo "   AMD:    --device=/dev/dri:/dev/dri --device=/dev/kfd:/dev/kfd --group-add video --group-add render"
+    fi
+
+    if [ "$GPU_DETECTED" = "true" ]; then
+        echo "🎮 GPU Type: $GPU_TYPE"
     fi
 
     if [ "$GPU_DETECTED" = "true" ]; then

@@ -1,0 +1,6 @@
+-r requirements-base.txt
+
+# ROCm-accelerated inference
+# Note: onnxruntime is pre-installed in rocm/onnxruntime base image
+# Skip onnxruntime-rocm installation to use the version from the base image
+faiss-cpu==1.12.0

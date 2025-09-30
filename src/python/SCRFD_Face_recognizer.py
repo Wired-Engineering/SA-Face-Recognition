@@ -17,7 +17,6 @@ import time
 import yaml
 import json
 import numpy as np
-import logging
 import threading
 from typing import Optional, Tuple, List, Dict, Any
 from dataclasses import dataclass

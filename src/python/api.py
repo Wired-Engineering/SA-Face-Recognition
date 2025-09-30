@@ -1541,7 +1541,6 @@ async def get_people(admin_id: str = Depends(get_current_admin)):
     """Get all registered people with complete information"""
     try:
         person_ids = db.get_all_person_ids()
-        print(f"📊 Total person IDs from database: {len(person_ids)}")
         people = []
         skipped_count = 0
 
@@ -1550,15 +1549,9 @@ async def get_people(admin_id: str = Depends(get_current_admin)):
             person_title = db.get_person_title(person_id)
             person_registration = db.get_person_registration(person_id)
 
-            # Debug: Log first few people regardless of name
-            if idx < 5:
-                print(f"🔍 Person {idx}: ID={person_id[:8]}..., Name='{person_name}', Title='{person_title}', Reg='{person_registration}'")
-
-            # Skip people with missing names and log it
+            # Skip people with missing names
             if not person_name:
                 skipped_count += 1
-                if skipped_count <= 5:  # Only log first 5 to avoid spam
-                    print(f"⚠️ Skipping person {person_id[:8]}... - Name='{person_name}' (type: {type(person_name)}), Reg='{person_registration}'")
                 continue
 
             # Check if reference image exists
@@ -1591,71 +1584,6 @@ async def get_people(admin_id: str = Depends(get_current_admin)):
                 'total_photos': len(photo_files),
                 'additional_photos_count': len(additional_photos)
             })
-
-        if skipped_count > 0:
-            print(f"⚠️ Total people skipped due to missing names: {skipped_count}")
-        else:
-            print(f"✅ No people skipped - all have names")
-
-        # Count how many people have images
-        people_with_images = sum(1 for p in people if p['has_image'])
-        print(f"📤 Returning {len(people)} people to frontend (out of {len(person_ids)} in DB)")
-        print(f"📸 People with images: {people_with_images}/{len(people)}")
-
-        # Check FAISS database count
-        try:
-            faiss_count = face_recognizer.face_database.index.ntotal if hasattr(face_recognizer, 'face_database') else 'N/A'
-            print(f"🔍 FAISS database contains: {faiss_count} face embeddings")
-            if people_with_images != faiss_count:
-                print(f"⚠️ MISMATCH: {people_with_images} people with images but {faiss_count} in FAISS (difference: {people_with_images - faiss_count if isinstance(faiss_count, int) else '?'})")
-
-                # Find which people are missing from FAISS
-                print(f"🔎 Checking which people are missing from FAISS...")
-                print(f"🔑 person_id_to_name mapping has {len(face_recognizer.person_id_to_name)} entries")
-                if len(face_recognizer.person_id_to_name) > 0:
-                    # Show first few keys in the mapping
-                    sample_keys = list(face_recognizer.person_id_to_name.keys())[:5]
-                    print(f"   Sample keys in mapping: {[k[:8] + '...' if len(k) > 8 else k for k in sample_keys]}")
-
-                    # Check if any mapping person_ids exist in the current database
-                    # Note: mapping values are person_ids, keys are photo_ids
-                    db_person_ids_set = set(person_ids)
-                    mapping_person_ids = set(face_recognizer.person_id_to_name.values())
-                    matching_ids = mapping_person_ids.intersection(db_person_ids_set)
-                    print(f"   🔍 {len(matching_ids)}/{len(mapping_person_ids)} FAISS people found in current database")
-
-                    if len(matching_ids) == 0:
-                        print(f"   ⚠️ NONE of the FAISS people exist in the database!")
-                        print(f"   💡 This means FAISS was built from a different/old set of people")
-                        print(f"   💡 Solution: Rebuild FAISS database with current people")
-                    elif len(matching_ids) < len(mapping_person_ids):
-                        print(f"   ⚠️ {len(mapping_person_ids) - len(matching_ids)} FAISS people not found in database (orphaned faces)")
-                else:
-                    print(f"   ⚠️ person_id_to_name mapping is EMPTY!")
-
-                missing_people = []
-                for person in people:
-                    if person['has_image']:
-                        person_id = person['id']
-                        # Check if this person_id is in the FAISS mapping
-                        # Note: mapping keys are photo_ids like "person_id%1", so we need to check values
-                        if person_id not in face_recognizer.person_id_to_name.values():
-                            missing_people.append({
-                                'id': person_id,
-                                'name': person['name'],
-                                'registration': person['cvent_registration_number']
-                            })
-
-                if missing_people:
-                    print(f"❌ Found {len(missing_people)} people missing from FAISS:")
-                    for idx, mp in enumerate(missing_people[:10]):  # Show first 10
-                        print(f"   {idx+1}. {mp['name']} (ID: {mp['id'][:8]}..., Reg: {mp['registration']})")
-                    if len(missing_people) > 10:
-                        print(f"   ... and {len(missing_people) - 10} more")
-                else:
-                    print(f"⚠️ Could not identify missing people - person_id_to_name mapping might not match images")
-        except Exception as e:
-            print(f"⚠️ Could not check FAISS count: {e}")
 
         return {
             'success': True,

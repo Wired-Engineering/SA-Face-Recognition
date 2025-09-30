@@ -1,0 +1,32 @@
+# NVIDIA GPU-enabled docker-compose configuration
+# Usage: docker-compose -f docker-compose.cuda-gpu.yml up -d
+#
+# Prerequisites:
+#   - NVIDIA GPU
+#   - NVIDIA Container Toolkit installed: https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html
+#   - Verify with: nvidia-smi
+---
+
+services:
+  face-recognition:
+    image: ghcr.io/wired-engineering/sa-face-recognition:latest-cuda
+    container_name: sa-face-recognition-cuda
+    ports:
+      - "8443:443"
+    volumes:
+      - system_data:/app/src/python/system
+      - images_data:/app/src/python/images
+      - weights_data:/app/src/python/weights
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+
+volumes:
+  system_data:
+  images_data:
+  weights_data:
