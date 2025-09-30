@@ -72,10 +72,19 @@ class ArcFace:
 
             print(f"📋 ArcFace selected provider order: {providers}")
 
-            self.session = InferenceSession(
-                self.model_path,
-                providers=providers
-            )
+            # Try providers with fallback to CPU-only if any fail
+            try:
+                self.session = InferenceSession(
+                    self.model_path,
+                    providers=providers
+                )
+            except Exception as provider_error:
+                logger.warning(f"Failed to initialize with preferred providers, falling back to CPU: {provider_error}")
+                print(f"⚠️ Provider initialization failed, using CPU only")
+                self.session = InferenceSession(
+                    self.model_path,
+                    providers=["CPUExecutionProvider"]
+                )
 
             input_config = self.session.get_inputs()[0]
             self.input_name = input_config.name

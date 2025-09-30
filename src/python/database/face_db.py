@@ -211,8 +211,28 @@ class FaceDatabase:
                 return removed_count
 
             # Reconstruct embeddings from the current index
-            all_embeddings = faiss.vector_to_array(self.index.reconstruct_n(0, self.index.ntotal))
-            all_embeddings = all_embeddings.reshape(self.index.ntotal, self.embedding_size)
+            try:
+                # Verify index is valid before attempting reconstruction
+                if not hasattr(self.index, 'reconstruct_n'):
+                    raise AttributeError(f"Index type {type(self.index).__name__} does not support reconstruction")
+
+                # Use reconstruct_n directly - it returns a numpy array for IndexFlat
+                all_embeddings = np.zeros((self.index.ntotal, self.embedding_size), dtype=np.float32)
+                for i in range(self.index.ntotal):
+                    all_embeddings[i] = self.index.reconstruct(i)
+            except Exception as e:
+                logging.error(f"Failed to reconstruct embeddings: {type(e).__name__}: {str(e)}. Creating new index without removed entries.")
+                # If reconstruction fails, we need to rebuild the index from scratch
+                # Since we can't reconstruct, create a fresh index with remaining metadata only
+                kept_metadata = [self.metadata[i] for i in indices_to_keep]
+
+                # Create a completely new index (old one is corrupted/incompatible)
+                self.index = faiss.IndexFlatIP(self.embedding_size)
+                self.metadata = kept_metadata
+
+                logging.warning(f"Index reset: removed {removed_count} faces by creating new empty index. "
+                               f"Database needs to be rebuilt from source images. Remaining metadata: {len(self.metadata)}")
+                return removed_count
 
             # Keep only the embeddings we want
             kept_embeddings = all_embeddings[indices_to_keep]

@@ -100,11 +100,15 @@ class SCRFDFaceRecognizer:
         print("🚀 Initializing SCRFD+ArcFace+FAISS system...")
         self._initialize_models()
 
-        # Initialize FAISS database
+        # Initialize FAISS database and load from cache if available
         self._initialize_database()
 
-        # Load existing face database (migrate from existing images)
-        self.create_features()
+        # Load cached database or rebuild from images if cache doesn't exist
+        if not self._load_cached_database():
+            print("🔄 No valid cache found, building database from images...")
+            self.create_features()
+        else:
+            print("✅ Loaded face database from cache")
 
         print("✅ SCRFD+ArcFace+FAISS system initialized successfully")
 
@@ -213,6 +217,32 @@ class SCRFDFaceRecognizer:
 
         except Exception as e:
             raise RuntimeError(f"Failed to initialize FAISS database: {e}")
+
+    def _load_cached_database(self) -> bool:
+        """
+        Load cached FAISS database from disk if available.
+        Returns True if successfully loaded, False if cache doesn't exist or is invalid.
+        """
+        try:
+            # Check if cache files exist
+            cache_exists = self.face_database.load()
+            if not cache_exists:
+                return False
+
+            # Load person mapping
+            self._load_person_mapping()
+
+            # Verify cache integrity - check if we have face data
+            if self.face_database.index.ntotal == 0:
+                print("⚠️ Cached database is empty, will rebuild")
+                return False
+
+            print(f"✅ Loaded {self.face_database.index.ntotal} faces from cache")
+            return True
+
+        except Exception as e:
+            print(f"⚠️ Failed to load cached database: {e}, will rebuild")
+            return False
 
     def detect_faces(self, image: np.ndarray) -> List[FaceDetection]:
         """
@@ -852,8 +882,14 @@ class SCRFDFaceRecognizer:
 
         print(f"✅ Database updated: {processed_count} faces processed, {failed_count} failed")
 
-        # FAISS index is ready to use immediately after adding embeddings
+        # Save FAISS database and person mapping to cache
         if processed_count > 0:
+            try:
+                self.face_database.save()
+                self._save_person_mapping()
+                print("✅ FAISS database saved to cache for faster startup")
+            except Exception as e:
+                print(f"⚠️ Failed to save database cache: {e}")
             print("✅ FAISS index ready for fast similarity search")
 
     def remove_person(self, person_id: str) -> bool:
@@ -900,10 +936,98 @@ class SCRFDFaceRecognizer:
 
         print(f"🗑️ Removed {removed_files} image file(s) and {removed_mappings} mapping(s) for person {person_id}")
 
-        # Rebuild the database - now the person won't be re-added
-        self.create_features()
+        # Efficiently remove from FAISS database without rebuilding
+        needs_rebuild = False
+        try:
+            removed_count = self.face_database.remove_faces([person_id])
+            print(f"✅ Removed {removed_count} face embedding(s) from FAISS database")
+
+            # Check if database is now inconsistent (empty index but has metadata, or vice versa)
+            index_count = self.face_database.index.ntotal if hasattr(self.face_database, 'index') else 0
+            metadata_count = len(self.face_database.metadata)
+
+            if index_count == 0 and metadata_count > 0:
+                # Index was cleared due to failed reconstruction, but metadata remains
+                print(f"⚠️ Database inconsistency detected: index is empty but {metadata_count} metadata entries remain")
+                needs_rebuild = True
+            elif index_count != metadata_count:
+                # Index and metadata counts don't match
+                print(f"⚠️ Database inconsistency detected: {index_count} embeddings vs {metadata_count} metadata entries")
+                needs_rebuild = True
+
+        except Exception as e:
+            print(f"⚠️ Error removing from FAISS database: {e}")
+            needs_rebuild = True
+
+        # Rebuild database if needed
+        if needs_rebuild:
+            print("🔄 Database inconsistency detected, triggering full rebuild from image files...")
+            try:
+                self._rebuild_features_internal()
+                print("✅ Database successfully rebuilt")
+            except Exception as e:
+                print(f"❌ Failed to rebuild database: {e}")
+                return False
+
+        # Save updated database and mapping to cache
+        try:
+            self.face_database.save()
+            self._save_person_mapping()
+            print("✅ Updated FAISS cache saved")
+        except Exception as e:
+            print(f"⚠️ Failed to save cache after removal: {e}")
 
         return True
+
+    def add_photo_to_database(self, person_id: str, image_path: str) -> bool:
+        """
+        Add a single photo to FAISS database without rebuilding everything.
+
+        Args:
+            person_id: ID of the person
+            image_path: Path to the image file
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            print(f"➕ Adding photo to FAISS database: {image_path}")
+
+            # Load and process image
+            image = cv2.imread(str(image_path))
+            if image is None:
+                print(f"⚠️ Could not load image: {image_path}")
+                return False
+
+            # Extract face features using registration settings for saved images
+            features, detections = self.recognize_face_for_registration(image, str(image_path))
+
+            if len(features) > 0 and len(detections) > 0:
+                # Use the best quality face detection
+                best_idx = max(range(len(detections)), key=lambda i: detections[i].quality_score)
+                feature = features[best_idx]
+
+                # Generate photo identifier from filename
+                image_file = Path(image_path)
+                photo_id = f"{person_id}%{image_file.stem.split('%')[1] if '%' in image_file.stem else '1'}"
+
+                # Add to FAISS database
+                self.face_database.add_face(feature, photo_id)
+                self.person_id_to_name[photo_id] = person_id
+
+                # Save updated database and mapping
+                self.face_database.save()
+                self._save_person_mapping()
+
+                print(f"✅ Added photo to FAISS database: {photo_id}")
+                return True
+            else:
+                print(f"⚠️ No face detected in {image_path}")
+                return False
+
+        except Exception as e:
+            print(f"⚠️ Error adding photo to database: {e}")
+            return False
 
     def cleanup_orphaned_faces(self) -> Dict[str, Any]:
         """

@@ -168,9 +168,8 @@ export function SettingsPage({ onSaveSettings }) {
           setFontFamily(displaySettings.font_family || 'Inter');
           setFontSize(displaySettings.font_size || 'medium');
 
-          // If there's a background image on the server, show the actual image URL
+          // If there's a background image on the server, show the image URL
           if (displaySettings.has_background_image) {
-            // Get the actual image URL from the API
             const imageUrl = apiService.getBackgroundImage();
             setBackgroundImagePreview(imageUrl);
           }
@@ -210,8 +209,7 @@ export function SettingsPage({ onSaveSettings }) {
       setDetectionLoading(true);
 
       // Load current settings
-      const response = await fetch('/api/mediapipe/settings');
-      const data = await response.json();
+      const data = await apiService.getMediaPipeSettings();
 
       if (data.success) {
         setDetectionSettings(data.settings);
@@ -219,8 +217,7 @@ export function SettingsPage({ onSaveSettings }) {
       }
 
       // Load presets
-      const presetsResponse = await fetch('/api/mediapipe/presets');
-      const presetsData = await presetsResponse.json();
+      const presetsData = await apiService.getMediaPipePresets();
 
       if (presetsData.success) {
         setDetectionPresets(presetsData.presets);
@@ -239,13 +236,7 @@ export function SettingsPage({ onSaveSettings }) {
       setError('');
       setSuccess('');
 
-      const response = await fetch('/api/mediapipe/settings', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(newSettings)
-      });
-
-      const data = await response.json();
+      const data = await apiService.updateMediaPipeSettings(newSettings);
 
       if (data.success) {
         setDetectionSettings(prev => ({ ...prev, ...newSettings }));
@@ -275,13 +266,7 @@ export function SettingsPage({ onSaveSettings }) {
       setError('');
       setSuccess('');
 
-      const response = await fetch('/api/mediapipe/apply-preset', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ preset: presetName })
-      });
-
-      const data = await response.json();
+      const data = await apiService.applyMediaPipePreset(presetName);
 
       if (data.success) {
         setSuccess(`Applied preset: ${detectionPresets[presetName]?.name || presetName}`);
@@ -311,17 +296,7 @@ export function SettingsPage({ onSaveSettings }) {
       setSuccess('');
 
       // Use common camera resolutions for optimization
-      const response = await fetch('/api/mediapipe/optimize-resolution', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          width: 1280,
-          height: 720,
-          target_fps: 30
-        })
-      });
-
-      const data = await response.json();
+      const data = await apiService.optimizeMediaPipeResolution(1280, 720, 30);
 
       if (data.success) {
         setSuccess('Resolution optimization applied!');

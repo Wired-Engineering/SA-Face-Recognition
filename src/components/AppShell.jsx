@@ -19,6 +19,7 @@ import { LoginPage } from './LoginPage';
 import { RegistrationPage } from './RegistrationPage';
 import { SettingsPage } from './SettingsPage';
 import { DetectionPage } from './DetectionPage';
+import apiService from '../services/api';
 
 export function MainAppShell() {
   const theme = useMantineTheme();
@@ -154,10 +155,14 @@ export function MainAppShell() {
                   variant="subtle"
                   color="white"
                   onClick={() => {
+                    // Clear all authentication and stored data
+                    apiService.logout();
+                    localStorage.clear(); // Clear ALL localStorage
+
+                    // Reset UI state
                     setLoggedUser('');
                     setIsAuthenticated(false);
                     setActiveView('login');
-                    saveAuthState(false, '', 'login');
                   }}
                   styles={{
                     root: {

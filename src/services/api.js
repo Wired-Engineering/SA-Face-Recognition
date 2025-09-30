@@ -436,6 +436,68 @@ class ApiService {
     const cacheBuster = Date.now();
     return `/api/display/background-image?t=${cacheBuster}`;
   }
+
+  async fetchImageWithAuth(imageUrl) {
+    /**
+     * Fetch an image with authentication headers and return as data URL
+     * This is needed because <img> tags don't send Authorization headers
+     */
+    try {
+      const url = imageUrl.startsWith('http') ? imageUrl : `${this.baseURL}${imageUrl}`;
+      const authHeaders = this.getAuthHeader();
+
+      const response = await fetch(url, {
+        method: 'GET',
+        headers: {
+          ...authHeaders,
+        },
+      });
+
+      if (!response.ok) {
+        throw new Error(`Failed to fetch image: ${response.status}`);
+      }
+
+      const blob = await response.blob();
+      return URL.createObjectURL(blob);
+    } catch (error) {
+      console.error('Error fetching image with auth:', error);
+      return null;
+    }
+  }
+
+  // MediaPipe/Face Detection settings
+  async getMediaPipeSettings() {
+    return this.request('/api/mediapipe/settings');
+  }
+
+  async getMediaPipePresets() {
+    return this.request('/api/mediapipe/presets');
+  }
+
+  async updateMediaPipeSettings(settings) {
+    return this.request('/api/mediapipe/settings', {
+      method: 'POST',
+      body: JSON.stringify(settings),
+    });
+  }
+
+  async applyMediaPipePreset(presetName) {
+    return this.request('/api/mediapipe/apply-preset', {
+      method: 'POST',
+      body: JSON.stringify({ preset: presetName }),
+    });
+  }
+
+  async optimizeMediaPipeResolution(width, height, targetFps) {
+    return this.request('/api/mediapipe/optimize-resolution', {
+      method: 'POST',
+      body: JSON.stringify({
+        width,
+        height,
+        target_fps: targetFps,
+      }),
+    });
+  }
 }
 
 // Helper functions for image processing

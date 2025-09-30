@@ -59,10 +59,23 @@ def get_current_admin(admin_id: str = Depends(verify_credentials)):
 PUBLIC_ENDPOINTS = {
     "/api/auth/login",
     "/api/system/health",
+    "/api/display/settings",  # Welcome popup needs this
     "/api/docs",
     "/api/openapi.json",
     "/api/redoc"
 }
+
+# Public path patterns (for image serving - require auth to get list, but images themselves are public)
+# This allows browser <img> tags to load images without auth headers
+PUBLIC_IMAGE_PATTERNS = [
+    "/api/display/background-image",  # Background image
+]
+
+def is_image_endpoint(path: str) -> bool:
+    """Check if path is a person image endpoint (e.g., /api/people/{uuid}/image)"""
+    import re
+    # Match /api/people/{uuid}/image with optional query params
+    return bool(re.match(r'^/api/people/[a-f0-9\-]+/image(\?.*)?$', path))
 
 # Lifespan manager for startup and shutdown
 @asynccontextmanager
@@ -128,14 +141,34 @@ async def authenticate_requests(request: Request, call_next):
     """Global authentication middleware - protect all endpoints except public ones"""
     path = request.url.path
 
+    # Skip authentication for OPTIONS requests (CORS preflight)
+    if request.method == "OPTIONS":
+        response = await call_next(request)
+        return response
+
     # Skip authentication for public endpoints
     if path in PUBLIC_ENDPOINTS or path.startswith("/api/docs") or path.startswith("/static"):
         response = await call_next(request)
         return response
 
+    # Skip authentication for image endpoints (browser <img> tags don't send auth headers)
+    if is_image_endpoint(path) or any(path.startswith(pattern) for pattern in PUBLIC_IMAGE_PATTERNS):
+        response = await call_next(request)
+        return response
+
     # Check for basic auth header
     auth_header = request.headers.get("authorization")
-    if not auth_header or not auth_header.startswith("Basic "):
+    if not auth_header:
+        # Note: In React dev mode (Strict Mode), effects run twice - this may cause duplicate requests
+        print(f"⚠️  No auth header for {path} (may be React Strict Mode double-mount)")
+        from fastapi.responses import JSONResponse
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "Authentication required"}
+        )
+
+    if not auth_header.startswith("Basic "):
+        print(f"❌ Auth failed for {path}: Invalid authorization header format: {auth_header[:20]}...")
         from fastapi.responses import JSONResponse
         return JSONResponse(
             status_code=401,
@@ -150,12 +183,14 @@ async def authenticate_requests(request: Request, call_next):
 
         result = db.authenticate_admin(username, password)
         if result != 'Login Success':
+            print(f"❌ Auth failed for {path}: Invalid credentials for user '{username}' (password length: {len(password)})")
             from fastapi.responses import JSONResponse
             return JSONResponse(
                 status_code=401,
                 content={"detail": "Invalid authentication credentials"}
             )
-    except Exception:
+    except Exception as e:
+        print(f"❌ Auth failed for {path}: Exception during auth - {type(e).__name__}: {str(e)}")
         from fastapi.responses import JSONResponse
         return JSONResponse(
             status_code=401,
@@ -1789,8 +1824,20 @@ async def register_person(request: personRegistration, admin_id: str = Depends(g
         image_path = f'images/{person_id}.png'
         cv2.imwrite(image_path, cropped_face)
 
-        # Recreate features dictionary with new person
-        face_recognizer.create_features()
+        # Efficiently add person to FAISS database without rebuilding
+        success = face_recognizer.add_photo_to_database(person_id, image_path)
+
+        if not success:
+            # Clean up on failure
+            try:
+                os.remove(image_path)
+                db.delete_data_from_person(person_id)
+            except:
+                pass
+            return {
+                'success': False,
+                'message': 'Failed to add person to recognition database'
+            }
 
         return {
             'success': True,
@@ -2241,8 +2288,19 @@ async def add_additional_photo(person_id: str, request: AdditionalPhotoUpload, a
         image_path = f'images/{image_filename}'
         cv2.imwrite(image_path, image_cv)
 
-        # Recreate features dictionary to include new photo
-        face_recognizer.create_features()
+        # Efficiently add photo to FAISS database without rebuilding
+        success = face_recognizer.add_photo_to_database(person_id, image_path)
+
+        if not success:
+            # Clean up the saved image if FAISS add failed
+            try:
+                os.remove(image_path)
+            except:
+                pass
+            return {
+                'success': False,
+                'message': 'Failed to add photo to recognition database'
+            }
 
         return {
             'success': True,
@@ -2277,13 +2335,21 @@ async def delete_person(person_id: str, admin_id: str = Depends(get_current_admi
                             print(f"Error deleting photo {filename}: {e}")
 
             # Efficiently remove from FAISS database without full rebuild
-            faiss_removed = face_recognizer.remove_person(person_id)
+            try:
+                faiss_removed = face_recognizer.remove_person(person_id)
+                faiss_message = ' and removed from recognition database'
+            except Exception as e:
+                print(f"⚠️ Error in remove_person: {e}")
+                import traceback
+                traceback.print_exc()
+                # Don't fail the whole deletion if FAISS removal fails
+                faiss_removed = False
+                faiss_message = ' (warning: FAISS removal had issues, but person deleted)'
 
             message = f'Person deleted successfully'
             if deleted_photos:
                 message += f' (removed {len(deleted_photos)} photos)'
-            if faiss_removed:
-                message += ' and removed from recognition database'
+            message += faiss_message  # Always add FAISS status (success or warning)
 
             return {
                 'success': True,
@@ -2295,6 +2361,9 @@ async def delete_person(person_id: str, admin_id: str = Depends(get_current_admi
                 'message': 'Failed to delete person from database'
             }
     except Exception as e:
+        print(f"❌ Delete person error: {e}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.delete("/api/people")
@@ -2327,13 +2396,18 @@ async def delete_all_people(admin_id: str = Depends(get_current_admin)):
 
         # Batch remove from FAISS database (more efficient than individual removals)
         if deleted_count > 0:
-            if deleted_count == len(person_ids):
-                # If all people deleted, just rebuild empty database
-                face_recognizer.create_features()
-            else:
-                # Remove specific people from FAISS
-                successful_deletions = [pid for pid in person_ids if pid not in failed_deletions]
-                face_recognizer.face_database.remove_faces(successful_deletions)
+            # Remove from FAISS database
+            successful_deletions = [pid for pid in person_ids if pid not in failed_deletions]
+            removed_count = face_recognizer.face_database.remove_faces(successful_deletions)
+
+            # Clear person mapping
+            face_recognizer.person_id_to_name.clear()
+
+            # Save updated (possibly empty) database
+            face_recognizer.face_database.save()
+            face_recognizer._save_person_mapping()
+
+            print(f"✅ Removed {removed_count} face embeddings from FAISS database")
 
         if len(failed_deletions) == 0:
             return {
@@ -2354,8 +2428,8 @@ async def delete_all_people(admin_id: str = Depends(get_current_admin)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/people/{person_id}/image")
-async def get_person_image(person_id: str, admin_id: str = Depends(get_current_admin)):
-    """Get a person's reference image"""
+async def get_person_image(person_id: str):
+    """Get a person's reference image (public for browser img tags)"""
     try:
         image_path = f'images/{person_id}.png'
         if os.path.exists(image_path):
@@ -2826,8 +2900,8 @@ async def test_camera(request: CameraSettings, admin_id: str = Depends(get_curre
 
 # Display settings endpoints
 @app.get("/api/display/settings")
-async def get_display_settings(admin_id: str = Depends(get_current_admin)):
-    """Get current display settings"""
+async def get_display_settings():
+    """Get current display settings (public for welcome popup)"""
     try:
         display_config = config_manager.get_display_config()
         return {
