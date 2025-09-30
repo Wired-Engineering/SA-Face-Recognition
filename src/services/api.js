@@ -29,8 +29,10 @@ class ApiService {
 
   // Create basic auth header
   getAuthHeader() {
-    if (!this.credentials) return {};
-    const encoded = btoa(`${this.credentials.adminId}:${this.credentials.password}`);
+    // Always get fresh credentials from localStorage to avoid stale data
+    const credentials = this.getStoredCredentials();
+    if (!credentials) return {};
+    const encoded = btoa(`${credentials.adminId}:${credentials.password}`);
     return { 'Authorization': `Basic ${encoded}` };
   }
 
@@ -173,11 +175,16 @@ class ApiService {
       ? 'http://localhost:8000/api/people/upload-csv-stream'
       : `${this.baseURL}/api/people/upload-csv-stream`;
 
+    // Get auth headers for streaming request
+    const authHeaders = this.getAuthHeader();
 
     // We need to use fetch to handle file upload with streaming response
     fetch(streamURL, {
       method: 'POST',
       body: formData,
+      headers: {
+        ...authHeaders,
+      },
     })
     .then(response => {
       if (!response.ok) {
@@ -391,11 +398,18 @@ class ApiService {
 
     // Bypass the request method to avoid any header issues
     const url = `${this.baseURL}/api/display/upload-background`;
+
+    // Get auth headers
+    const authHeaders = this.getAuthHeader();
+
     try {
       const response = await fetch(url, {
         method: 'POST',
         body: formData,
-        // No headers - let browser set Content-Type with boundary
+        headers: {
+          ...authHeaders,
+          // Don't set Content-Type - let browser set it with boundary
+        },
       });
 
       if (!response.ok) {

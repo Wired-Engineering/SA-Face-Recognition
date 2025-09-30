@@ -1443,7 +1443,7 @@ async def login(request: LoginRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/auth/change-password")
-async def change_admin_password(request: AdminPasswordChange):
+async def change_admin_password(request: AdminPasswordChange, admin_id: str = Depends(get_current_admin)):
     """Change admin password"""
     try:
         result = db.change_admin_id_password(
@@ -1469,7 +1469,7 @@ async def change_admin_password(request: AdminPasswordChange):
 
 # person management endpoints
 @app.get("/api/people")
-async def get_people():
+async def get_people(admin_id: str = Depends(get_current_admin)):
     """Get all registered people with complete information"""
     try:
         person_ids = db.get_all_person_ids()
@@ -1713,7 +1713,7 @@ async def get_test_cycle_stream():
     )
 
 @app.post("/api/people/register")
-async def register_person(request: personRegistration):
+async def register_person(request: personRegistration, admin_id: str = Depends(get_current_admin)):
     """Register a new person with auto-generated UUID"""
     try:
         # Check if registration ID already exists
@@ -1994,7 +1994,7 @@ async def process_csv_with_progress_streaming(csv_content: str, face_recognizer)
         await session.close()
 
 @app.post("/api/people/upload-csv-stream")
-async def upload_csv_bulk_registration_stream(file: UploadFile = File(...)):
+async def upload_csv_bulk_registration_stream(file: UploadFile = File(...), admin_id: str = Depends(get_current_admin)):
     """Process CSV file for bulk person registration with progress streaming"""
 
     # Validate file is CSV
@@ -2028,7 +2028,7 @@ async def upload_csv_bulk_registration_stream(file: UploadFile = File(...)):
     return EventSourceResponse(generate_progress())
 
 @app.get("/api/test-stream")
-async def test_stream():
+async def test_stream(admin_id: str = Depends(get_current_admin)):
     """Simple test streaming endpoint"""
     async def test_generator():
         yield f"event: test\ndata: {json.dumps({'message': 'Hello from stream!'})}\n\n"
@@ -2036,7 +2036,7 @@ async def test_stream():
     return EventSourceResponse(test_generator())
 
 @app.post("/api/people/upload-csv")
-async def upload_csv_bulk_registration(file: UploadFile = File(...)):
+async def upload_csv_bulk_registration(file: UploadFile = File(...), admin_id: str = Depends(get_current_admin)):
     """Process CSV file for bulk person registration"""
     try:
         # Validate file is CSV
@@ -2173,7 +2173,7 @@ async def upload_csv_bulk_registration(file: UploadFile = File(...)):
         }
 
 @app.get("/api/people/csv-requirements")
-async def get_csv_requirements():
+async def get_csv_requirements(admin_id: str = Depends(get_current_admin)):
     """Get the required CSV column headers for bulk upload"""
     return {
         'success': True,
@@ -2193,7 +2193,7 @@ async def get_csv_requirements():
     }
 
 @app.post("/api/people/{person_id}/add-photo")
-async def add_additional_photo(person_id: str, request: AdditionalPhotoUpload):
+async def add_additional_photo(person_id: str, request: AdditionalPhotoUpload, admin_id: str = Depends(get_current_admin)):
     """Add an additional photo template for an existing person"""
     try:
         # Verify person exists
@@ -2258,7 +2258,7 @@ async def add_additional_photo(person_id: str, request: AdditionalPhotoUpload):
         }
 
 @app.delete("/api/people/{person_id}")
-async def delete_person(person_id: str):
+async def delete_person(person_id: str, admin_id: str = Depends(get_current_admin)):
     """Delete a person and all their photos"""
     try:
         # Delete from database first
@@ -2298,7 +2298,7 @@ async def delete_person(person_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.delete("/api/people")
-async def delete_all_people():
+async def delete_all_people(admin_id: str = Depends(get_current_admin)):
     """Delete all people from the database"""
     try:
         person_ids = db.get_all_person_ids()
@@ -2354,7 +2354,7 @@ async def delete_all_people():
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/people/{person_id}/image")
-async def get_person_image(person_id: str):
+async def get_person_image(person_id: str, admin_id: str = Depends(get_current_admin)):
     """Get a person's reference image"""
     try:
         image_path = f'images/{person_id}.png'
@@ -2380,7 +2380,7 @@ async def get_person_image(person_id: str):
 
 # Face recognition endpoints
 @app.post("/api/recognition/detect")
-async def detect_faces(request: FaceDetectionRequest):
+async def detect_faces(request: FaceDetectionRequest, admin_id: str = Depends(get_current_admin)):
     """Detect and recognize faces in an image"""
     try:
         # Decode base64 image
@@ -2474,7 +2474,7 @@ async def detect_faces(request: FaceDetectionRequest):
 
 # Camera management endpoints
 @app.get("/api/camera/settings")
-async def get_camera_settings():
+async def get_camera_settings(admin_id: str = Depends(get_current_admin)):
     """Get current camera settings"""
     # Config updated to use webcam source
     try:
@@ -2489,7 +2489,7 @@ async def get_camera_settings():
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/camera/settings")
-async def update_camera_settings(request: CameraSettings):
+async def update_camera_settings(request: CameraSettings, admin_id: str = Depends(get_current_admin)):
     """Update camera settings"""
     try:
         # Update config file
@@ -2520,7 +2520,7 @@ async def update_camera_settings(request: CameraSettings):
 
 # Face detection configuration endpoints (MediaPipe-compatible API)
 @app.get("/api/mediapipe/settings")
-async def get_mediapipe_settings():
+async def get_mediapipe_settings(admin_id: str = Depends(get_current_admin)):
     """Get current face detection settings"""
     try:
         mediapipe_config = config_manager.get_mediapipe_config()
@@ -2543,7 +2543,7 @@ async def get_mediapipe_settings():
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/mediapipe/settings")
-async def update_mediapipe_settings(request: DetectionSettings):
+async def update_mediapipe_settings(request: DetectionSettings, admin_id: str = Depends(get_current_admin)):
     """Update MediaPipe settings"""
     try:
         # Update config file
@@ -2580,7 +2580,7 @@ async def update_mediapipe_settings(request: DetectionSettings):
 
 
 @app.get("/api/mediapipe/presets")
-async def get_mediapipe_presets():
+async def get_mediapipe_presets(admin_id: str = Depends(get_current_admin)):
     """Get predefined MediaPipe configuration presets"""
     try:
         presets = {
@@ -2618,11 +2618,11 @@ async def get_mediapipe_presets():
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/mediapipe/apply-preset")
-async def apply_mediapipe_preset(request: dict):
+async def apply_mediapipe_preset(request: dict, admin_id: str = Depends(get_current_admin)):
     """Apply a predefined MediaPipe configuration preset"""
     try:
         preset_name = request.get('preset')
-        presets_response = await get_mediapipe_presets()
+        presets_response = await get_mediapipe_presets(admin_id=admin_id)
         presets = presets_response['presets']
 
         if preset_name not in presets:
@@ -2668,7 +2668,7 @@ async def apply_mediapipe_preset(request: dict):
 
 
 @app.get("/api/recognition/settings")
-async def get_recognition_settings():
+async def get_recognition_settings(admin_id: str = Depends(get_current_admin)):
     """Get current recognition threshold settings"""
     try:
         return {
@@ -2683,7 +2683,7 @@ async def get_recognition_settings():
 
 
 @app.post("/api/recognition/settings")
-async def update_recognition_settings(settings: RecognitionSettings):
+async def update_recognition_settings(settings: RecognitionSettings, admin_id: str = Depends(get_current_admin)):
     """Update recognition threshold settings for better accuracy"""
     try:
         updated = False
@@ -2716,7 +2716,7 @@ async def update_recognition_settings(settings: RecognitionSettings):
 
 
 @app.get("/api/camera/devices")
-async def get_camera_devices():
+async def get_camera_devices(admin_id: str = Depends(get_current_admin)):
     """Camera devices should be enumerated by the browser, not the backend.
     This endpoint returns empty to respect browser camera permissions."""
     try:
@@ -2735,7 +2735,7 @@ async def get_camera_devices():
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/camera/test")
-async def test_camera(request: CameraSettings):
+async def test_camera(request: CameraSettings, admin_id: str = Depends(get_current_admin)):
     """Test camera connection"""
     try:
         print(f"🔍 Testing camera - source: {request.source}, rtsp_url: {request.rtsp_url}")
@@ -2826,7 +2826,7 @@ async def test_camera(request: CameraSettings):
 
 # Display settings endpoints
 @app.get("/api/display/settings")
-async def get_display_settings():
+async def get_display_settings(admin_id: str = Depends(get_current_admin)):
     """Get current display settings"""
     try:
         display_config = config_manager.get_display_config()
@@ -2846,7 +2846,7 @@ async def get_display_settings():
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/display/settings")
-async def update_display_settings(request: DisplaySettings):
+async def update_display_settings(request: DisplaySettings, admin_id: str = Depends(get_current_admin)):
     """Update display settings"""
     try:
         success = config_manager.set_display_config(
@@ -2891,7 +2891,7 @@ async def update_display_settings(request: DisplaySettings):
 
 # Background image endpoints
 @app.post("/api/display/upload-background")
-async def upload_background_image(file: UploadFile = File(...)):
+async def upload_background_image(file: UploadFile = File(...), admin_id: str = Depends(get_current_admin)):
     """Upload a background image for the welcome screen"""
     try:
         print(f"🔍 Received upload request - file: {file}")
@@ -2969,7 +2969,7 @@ async def upload_background_image(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.delete("/api/display/delete-background")
-async def delete_background_image():
+async def delete_background_image(admin_id: str = Depends(get_current_admin)):
     """Delete the current background image"""
     try:
         # Delete background images
@@ -3031,10 +3031,10 @@ async def get_background_image():
 
 # System endpoints
 @app.get("/api/system/status")
-async def get_system_status():
+async def get_system_status(admin_id: str = Depends(get_current_admin)):
     """Get enhanced system status with MediaPipe performance metrics"""
     try:
-        people = await get_people()
+        people = await get_people(admin_id=admin_id)
         performance_stats = face_recognizer.get_performance_stats()
 
         return {
@@ -3072,7 +3072,7 @@ async def health_check():
     return {"status": "healthy", "timestamp": get_current_datetime_other_format()}
 
 @app.get("/api/system/detection-status")
-async def get_detection_status():
+async def get_detection_status(admin_id: str = Depends(get_current_admin)):
     """Get current detection status with session information"""
     active = get_independent_detection_active()
     elapsed = 0
@@ -3112,7 +3112,7 @@ async def get_detection_status():
     }
 
 @app.post("/api/system/invalidate-cache")
-async def invalidate_face_cache():
+async def invalidate_face_cache(admin_id: str = Depends(get_current_admin)):
     """Invalidate face encoding cache and rebuild from images"""
     try:
         # Invalidate cache
@@ -3136,7 +3136,7 @@ async def invalidate_face_cache():
         }
 
 @app.post("/api/system/cleanup-faiss")
-async def cleanup_faiss_database():
+async def cleanup_faiss_database(admin_id: str = Depends(get_current_admin)):
     """
     Clean up orphaned entries in FAISS database.
     Removes entries for people who were deleted before FAISS synchronization was implemented.
@@ -3162,7 +3162,7 @@ async def cleanup_faiss_database():
         }
 
 @app.post("/api/test/sse-trigger")
-async def trigger_sse_test():
+async def trigger_sse_test(admin_id: str = Depends(get_current_admin)):
     """Simple test endpoint to trigger SSE recognition updates"""
     # Simulate recognition data update using new multi-person system
     update_recognized_person("SSE Test User", "TEST123")
@@ -3175,7 +3175,7 @@ async def trigger_sse_test():
     }
 
 @app.post("/api/test/trigger-recognition")
-async def trigger_test_recognition():
+async def trigger_test_recognition(admin_id: str = Depends(get_current_admin)):
     """Test endpoint to manually trigger a recognition event"""
     print(f"🧪 Manual recognition test triggered")
     print(f"📺 Connected welcome screens: {list(welcome_screens.keys())}")
@@ -3533,7 +3533,7 @@ async def process_webcam_with_overlay(output_queue, stream_id):
             pass
 
 @app.get("/api/webcam/test")
-async def test_webcam():
+async def test_webcam(admin_id: str = Depends(get_current_admin)):
     """Test webcam connection without streaming"""
     camera_config = config_manager.get_camera_config()
 
@@ -3595,7 +3595,7 @@ async def test_webcam():
         return {"success": False, "error": f"Webcam test failed: {str(e)}"}
 
 @app.get("/api/rtsp/test")
-async def test_rtsp():
+async def test_rtsp(admin_id: str = Depends(get_current_admin)):
     """Test RTSP connection without streaming"""
     camera_config = config_manager.get_camera_config()
 
@@ -3632,7 +3632,7 @@ async def test_rtsp():
         return {"success": False, "error": f"RTSP test failed: {str(e)}"}
 
 @app.post("/api/webcam/stop")
-async def stop_webcam_streams():
+async def stop_webcam_streams(admin_id: str = Depends(get_current_admin)):
     """Stop webcam streams - admin has full control regardless of welcome screen connections"""
     webcam_stream_count = len(webcam_streams)
 
@@ -3650,7 +3650,7 @@ async def stop_webcam_streams():
     }
 
 @app.post("/api/rtsp/stop")
-async def stop_rtsp_streams():
+async def stop_rtsp_streams(admin_id: str = Depends(get_current_admin)):
     """Stop RTSP streams - admin has full control regardless of welcome screen connections"""
     rtsp_stream_count = len(rtsp_streams)
     ffmpeg_stream_count = len(ffmpeg_streams)
