@@ -257,6 +257,12 @@ def is_detection_session_expired():
     if not detection_session_start_time:
         return False
 
+    # RTSP streams are backend-managed and should never timeout
+    # since they're not tied to a specific user session
+    camera_config = config_manager.get_camera_config()
+    if camera_config.get('source') == 'rtsp':
+        return False
+
     elapsed = time.time() - detection_session_start_time
     return elapsed > config_manager.get_detection_session_timeout()
 
