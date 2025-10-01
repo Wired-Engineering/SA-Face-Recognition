@@ -1104,9 +1104,84 @@ class SCRFDFaceRecognizer:
             print(f"⚠️ Error adding photo to database: {e}")
             return False
 
-    def add_photos_to_database_batch(self, persons: List[Tuple[str, str]]) -> Dict[str, Any]:
+    def add_pre_cropped_photo_to_database(self, person_id: str, image_path: str) -> bool:
         """
-        Add multiple photos to FAISS database in batch mode - optimized for bulk upload.
+        Add a single PRE-CROPPED photo to FAISS database.
+        Optimized for images that have already been cropped and validated.
+
+        This method skips quality checks and multi-face validation since those were already
+        performed during the cropping phase. It only runs minimal detection to get landmarks
+        for proper face alignment before embedding extraction.
+
+        Args:
+            person_id: ID of the person
+            image_path: Path to the pre-cropped image file
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            print(f"➕ Adding pre-cropped photo to FAISS database: {image_path}")
+
+            # Load and process image
+            image = cv2.imread(str(image_path))
+            if image is None:
+                print(f"⚠️ Could not load image: {image_path}")
+                return False
+
+            # Run minimal SCRFD detection with registration-specific sensitivity
+            # Temporarily adjust detector confidence for registration
+            original_conf = self.detector.conf_thres
+            self.detector.conf_thres = self.registration_detection_confidence
+
+            try:
+                # Since image is pre-cropped, we just need landmarks for alignment (no quality checks)
+                det, kpss = self.detector.detect(image, max_num=1)
+
+                if len(det) == 0 or kpss is None or len(kpss) == 0:
+                    print(f"⚠️ Could not extract landmarks from pre-cropped face: {image_path}")
+                    return False
+
+                # Get landmarks from first (and should be only) detection
+                landmarks = kpss[0]
+            finally:
+                # Restore original confidence threshold
+                self.detector.conf_thres = original_conf
+
+            # Extract embedding using landmarks
+            embedding = self.recognizer.get_embedding(
+                image,
+                landmarks,
+                normalized=True
+            )
+
+            # Generate photo identifier from filename
+            image_file = Path(image_path)
+            photo_id = f"{person_id}%{image_file.stem.split('%')[1] if '%' in image_file.stem else '1'}"
+
+            # Add to FAISS database
+            self.face_database.add_face(embedding, photo_id)
+            self.person_id_to_name[photo_id] = person_id
+
+            # Save updated database and mapping
+            self.face_database.save()
+            self._save_person_mapping()
+
+            print(f"✅ Added pre-cropped photo to FAISS database: {photo_id}")
+            return True
+
+        except Exception as e:
+            print(f"⚠️ Error adding pre-cropped photo to database: {e}")
+            return False
+
+    def add_pre_cropped_photos_to_database_batch(self, persons: List[Tuple[str, str]]) -> Dict[str, Any]:
+        """
+        Add multiple PRE-CROPPED photos to FAISS database in batch mode.
+        Optimized for images that have already been cropped and validated (e.g., from CSV bulk upload).
+
+        This method skips quality checks and multi-face validation since those were already
+        performed during the cropping phase. It only runs minimal detection to get landmarks
+        for proper face alignment before embedding extraction.
 
         Args:
             persons: List of (person_id, image_path) tuples
@@ -1115,7 +1190,7 @@ class SCRFDFaceRecognizer:
             Dictionary with success status and results per person
         """
         try:
-            print(f"🔄 Starting batch registration for {len(persons)} people...")
+            print(f"🔄 Starting batch registration for {len(persons)} pre-cropped images...")
             start_time = time.time()
 
             results = {
@@ -1127,7 +1202,7 @@ class SCRFDFaceRecognizer:
             }
 
             # Phase 1: Load all images
-            print("📂 Loading images...")
+            print("📂 Loading pre-cropped images...")
             images_data = []
             for person_id, image_path in persons:
                 image = cv2.imread(str(image_path))
@@ -1144,50 +1219,64 @@ class SCRFDFaceRecognizer:
             if not images_data:
                 return results
 
-            # Phase 2: Batch face detection (parallel processing for speed)
-            print(f"🎯 Detecting faces in {len(images_data)} images (parallel mode)...")
+            # Phase 2: Minimal face detection to get landmarks only (parallel processing)
+            print(f"🎯 Extracting landmarks from {len(images_data)} pre-cropped faces (parallel mode)...")
             all_detections = []
 
-            # Helper function for parallel processing
-            def detect_single_image(data):
-                person_id, image_path, image = data
-                _, detections = self.recognize_face_for_registration(image, str(image_path))
-                return (person_id, image_path, image, detections)
+            # Temporarily adjust detector confidence for registration
+            original_conf = self.detector.conf_thres
+            self.detector.conf_thres = self.registration_detection_confidence
 
-            # Process images in parallel using ThreadPoolExecutor
-            # Use min of CPU count or image count for optimal thread pool size
-            max_workers = min(os.cpu_count() or 4, len(images_data))
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                # Submit all detection tasks
-                futures = [executor.submit(detect_single_image, data) for data in images_data]
-
-                # Collect results as they complete
-                for future in as_completed(futures):
+            try:
+                # Helper function for parallel landmark extraction
+                def extract_landmarks_minimal(data):
+                    person_id, image_path, image = data
                     try:
-                        result = future.result()
-                        all_detections.append(result)
-                    except Exception as e:
-                        print(f"⚠️ Detection failed for image: {e}")
+                        # Run minimal SCRFD detection with registration-specific sensitivity
+                        # Since image is pre-cropped, we just need landmarks for alignment (no quality checks)
+                        det, kpss = self.detector.detect(image, max_num=1)
 
-            # Phase 3: Filter valid detections and prepare for batch embedding
-            print("🔍 Filtering valid face detections...")
+                        if len(det) == 0 or kpss is None or len(kpss) == 0:
+                            return (person_id, image_path, image, None)
+
+                        # Get landmarks from first (and should be only) detection
+                        landmarks = kpss[0]
+                        return (person_id, image_path, image, landmarks)
+                    except Exception as e:
+                        print(f"⚠️ Landmark extraction failed for {image_path}: {e}")
+                        return (person_id, image_path, image, None)
+
+                # Process images in parallel using ThreadPoolExecutor
+                max_workers = min(os.cpu_count() or 4, len(images_data))
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    futures = [executor.submit(extract_landmarks_minimal, data) for data in images_data]
+
+                    for future in as_completed(futures):
+                        try:
+                            result = future.result()
+                            all_detections.append(result)
+                        except Exception as e:
+                            print(f"⚠️ Landmark extraction task failed: {e}")
+            finally:
+                # Restore original confidence threshold
+                self.detector.conf_thres = original_conf
+
+            # Phase 3: Filter valid landmarks and prepare for batch embedding
+            print("🔍 Filtering valid landmark extractions...")
             valid_for_batch = []
-            for person_id, image_path, image, detections in all_detections:
-                if len(detections) > 0:
-                    # Get best quality face
-                    best_idx = max(range(len(detections)), key=lambda i: detections[i].quality_score)
-                    best_detection = detections[best_idx]
-                    valid_for_batch.append((person_id, image_path, image, best_detection))
+            for person_id, image_path, image, landmarks in all_detections:
+                if landmarks is not None:
+                    valid_for_batch.append((person_id, image_path, image, landmarks))
                 else:
                     results['failed'].append({
                         'person_id': person_id,
                         'image_path': image_path,
-                        'error': 'No face detected'
+                        'error': 'Could not extract landmarks from pre-cropped face'
                     })
                     results['fail_count'] += 1
 
             if not valid_for_batch:
-                print("⚠️ No valid faces detected in any image")
+                print("⚠️ No valid landmarks extracted from any pre-cropped image")
                 return results
 
             # Phase 4: Batch embedding extraction (parallel processing)
@@ -1196,11 +1285,11 @@ class SCRFDFaceRecognizer:
 
             # Helper function for parallel embedding extraction
             def extract_single_embedding(data):
-                person_id, image_path, image, detection = data
+                person_id, image_path, image, landmarks = data
                 try:
                     embedding = self.recognizer.get_embedding(
                         image,
-                        detection.landmarks,
+                        landmarks,
                         normalized=True
                     )
                     return (person_id, image_path, embedding, True, None)

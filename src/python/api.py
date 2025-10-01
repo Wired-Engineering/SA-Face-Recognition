@@ -1891,8 +1891,8 @@ async def register_person(request: personRegistration, admin_id: str = Depends(g
         # Generate thumbnail for faster loading in UI
         generate_thumbnail(person_id)
 
-        # Efficiently add person to FAISS database without rebuilding
-        success = face_recognizer.add_photo_to_database(person_id, image_path)
+        # Efficiently add pre-cropped photo to FAISS database (skips redundant face detection)
+        success = face_recognizer.add_pre_cropped_photo_to_database(person_id, image_path)
 
         if not success:
             # Clean up on failure
@@ -2001,11 +2001,14 @@ async def add_additional_photo(person_id: str, request: AdditionalPhotoUpload, a
         image_bytes = base64.b64decode(image_data)
         image = Image.open(BytesIO(image_bytes))
 
+        # Fix EXIF orientation (handles sideways/rotated images from phones)
+        image = ImageOps.exif_transpose(image)
+
         # Convert to OpenCV format
         image_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
 
-        # Use the face recognizer to detect faces
-        _, faces = face_recognizer.recognize_face(image_cv, f"{person_id}_temp.png")
+        # Use registration-specific face recognizer with higher sensitivity
+        _, faces = face_recognizer.recognize_face_for_registration(image_cv, f"{person_id}_temp.png")
 
         if faces is None or len(faces) == 0:
             return {
@@ -2018,6 +2021,24 @@ async def add_additional_photo(person_id: str, request: AdditionalPhotoUpload, a
                 'success': False,
                 'message': 'Multiple faces detected. Please use an image with only one face.'
             }
+
+        # Crop face with padding (same as initial registration)
+        face = faces[0]
+        x, y, w, h = face.bbox
+
+        # Add padding around the face (20% on each side, same as initial registration)
+        padding = 0.2
+        x_pad = int(w * padding)
+        y_pad = int(h * padding)
+
+        # Calculate new boundaries with padding
+        x1 = max(0, x - x_pad)
+        y1 = max(0, y - y_pad)
+        x2 = min(image_cv.shape[1], x + w + x_pad)
+        y2 = min(image_cv.shape[0], y + h + y_pad)
+
+        # Crop the face with padding
+        cropped_face = image_cv[y1:y2, x1:x2]
 
         # Normalize existing photos to %N format if needed
         os.makedirs('images', exist_ok=True)
@@ -2044,13 +2065,13 @@ async def add_additional_photo(person_id: str, request: AdditionalPhotoUpload, a
         else:
             next_number = 1
 
-        # Save additional photo with proper numbering
+        # Save cropped face image with proper numbering (consistent with initial registration)
         image_filename = f'{person_id}%{next_number}.png'
         image_path = f'images/{image_filename}'
-        cv2.imwrite(image_path, image_cv)
+        cv2.imwrite(image_path, cropped_face)
 
-        # Efficiently add photo to FAISS database without rebuilding
-        success = face_recognizer.add_photo_to_database(person_id, image_path)
+        # Efficiently add pre-cropped photo to FAISS database (skips redundant face detection)
+        success = face_recognizer.add_pre_cropped_photo_to_database(person_id, image_path)
 
         if not success:
             # Clean up the saved image if FAISS add failed

@@ -470,7 +470,7 @@ async def process_csv_with_progress_streaming(
                         'error': str(e)
                     })
 
-        # Phase 4: Batch process face embeddings
+        # Phase 4: Batch process face embeddings (optimized for pre-cropped images)
         if persons_for_batch:
             num_photos = len(persons_for_batch)
             progress_msg = {
@@ -480,7 +480,8 @@ async def process_csv_with_progress_streaming(
             }
             yield f"event: progress\ndata: {json.dumps(progress_msg)}\n\n"
 
-            batch_results = face_recognizer.add_photos_to_database_batch(persons_for_batch)
+            # Use optimized method for pre-cropped images (skips redundant face detection)
+            batch_results = face_recognizer.add_pre_cropped_photos_to_database_batch(persons_for_batch)
 
             # Process batch results
             for success_item in batch_results['successful']:
