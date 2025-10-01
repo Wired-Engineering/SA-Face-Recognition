@@ -35,13 +35,13 @@ def get_provider_options() -> Tuple[List[Tuple[str, Dict]], List[str]]:
         cuda_options = {
             'device_id': 0,
             'arena_extend_strategy': 'kNextPowerOfTwo',  # Memory allocation strategy
-            'gpu_mem_limit': 2 * 1024 * 1024 * 1024,  # 2GB limit
+            # 'gpu_mem_limit': 2 * 1024 * 1024 * 1024,  # Removed - no GPU memory limit
             'cudnn_conv_algo_search': 'EXHAUSTIVE',  # Best convolution algorithm
             'do_copy_in_default_stream': True,
         }
         providers_with_options.append(('CUDAExecutionProvider', cuda_options))
         provider_names.append('CUDAExecutionProvider')
-        logger.info("✓ CUDA GPU acceleration enabled")
+        logger.info("✓ CUDA GPU acceleration enabled (no memory limit)")
 
     # ROCm (AMD GPU)
     if "ROCMExecutionProvider" in available_providers:

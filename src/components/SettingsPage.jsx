@@ -818,17 +818,8 @@ export function SettingsPage({ onSaveSettings }) {
       const result = await apiService.getPersonPhotos(person.id);
 
       if (result.success) {
-        // Fetch images with authentication and convert to blob URLs
-        const photosWithBlobUrls = await Promise.all(
-          (result.photos || []).map(async (photo) => {
-            const blobUrl = await apiService.fetchImageWithAuth(photo.url);
-            return {
-              ...photo,
-              blobUrl: blobUrl || photo.url
-            };
-          })
-        );
-        setPersonPhotos(prev => ({ ...prev, [person.id]: photosWithBlobUrls }));
+        // Photos are now public, use URLs directly
+        setPersonPhotos(prev => ({ ...prev, [person.id]: result.photos || [] }));
       } else {
         setError(result.message || 'Failed to load photos');
       }
@@ -853,19 +844,10 @@ export function SettingsPage({ onSaveSettings }) {
       if (result.success) {
         setSuccess('Photo deleted successfully and FAISS database updated!');
 
-        // Refresh the photo gallery with blob URLs
+        // Refresh the photo gallery
         const updatedResult = await apiService.getPersonPhotos(personId);
         if (updatedResult.success) {
-          const photosWithBlobUrls = await Promise.all(
-            (updatedResult.photos || []).map(async (photo) => {
-              const blobUrl = await apiService.fetchImageWithAuth(photo.url);
-              return {
-                ...photo,
-                blobUrl: blobUrl || photo.url
-              };
-            })
-          );
-          setPersonPhotos(prev => ({ ...prev, [personId]: photosWithBlobUrls }));
+          setPersonPhotos(prev => ({ ...prev, [personId]: updatedResult.photos || [] }));
         }
 
         // Refresh the people list to update photo count
@@ -1720,7 +1702,7 @@ export function SettingsPage({ onSaveSettings }) {
                                             overflow: 'hidden'
                                           }}>
                                             <Image
-                                              src={photo.blobUrl}
+                                              src={photo.url}
                                               alt={`${person.name} - Photo ${photo.photo_number}`}
                                               style={{
                                                 maxWidth: '100%',

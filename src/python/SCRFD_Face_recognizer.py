@@ -295,7 +295,7 @@ class SCRFDFaceRecognizer:
                     landmarks=kps,  # 5-point landmarks for ArcFace
                     quality_score=quality_score,
                     face_area=face_area,
-                    is_frontal=quality_score > self.face_quality_threshold
+                    is_frontal=quality_score >= self.face_quality_threshold  # Use >= for consistency across platforms
                 )
 
                 faces.append(face_detection)
@@ -747,7 +747,7 @@ class SCRFDFaceRecognizer:
                         landmarks=kps,
                         quality_score=quality_score,
                         face_area=face_area,
-                        is_frontal=quality_score > self.registration_quality_threshold
+                        is_frontal=quality_score >= self.registration_quality_threshold  # Use >= for consistency across platforms
                     )
 
                     faces.append(face_detection)

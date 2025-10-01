@@ -151,17 +151,6 @@ class ApiService {
     });
   }
 
-  async uploadCSV(file) {
-    const formData = new FormData();
-    formData.append('file', file);
-
-    return this.request('/api/people/upload-csv', {
-      method: 'POST',
-      body: formData,
-      headers: {}, // Empty headers to let browser set Content-Type with boundary
-    });
-  }
-
   uploadCSVStream(file, onProgress, onComplete, onError) {
     // Note: EventSource cannot handle POST requests with file uploads
     // We need to use a different approach: upload file first, then stream progress

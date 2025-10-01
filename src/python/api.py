@@ -21,6 +21,7 @@ from contextlib import asynccontextmanager
 import queue
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import quote, unquote
 
 # SocketIO imports
 import socketio
@@ -29,7 +30,7 @@ from DatabaseManager import MySqlite3Manager
 from utils import get_current_datetime_other_format
 from SCRFD_Face_recognizer import SCRFDFaceRecognizer as FaceRecognizer
 from config_manager import config_manager
-# Removed unused process_csv import - now using CSVProcessor directly
+from services.csv_processor import process_csv_with_progress_streaming
 
 # Basic Authentication
 security = HTTPBasic()
@@ -72,10 +73,14 @@ PUBLIC_IMAGE_PATTERNS = [
 ]
 
 def is_image_endpoint(path: str) -> bool:
-    """Check if path is a person image endpoint (e.g., /api/people/{uuid}/image)"""
+    """Check if path is a person image/photo endpoint"""
     import re
     # Match /api/people/{uuid}/image with optional query params
-    return bool(re.match(r'^/api/people/[a-f0-9\-]+/image(\?.*)?$', path))
+    # Match /api/people/{uuid}/photo/{filename} with optional query params
+    return bool(
+        re.match(r'^/api/people/[a-f0-9\-]+/image(\?.*)?$', path) or
+        re.match(r'^/api/people/[a-f0-9\-]+/photo/[^/]+(\?.*)?$', path)
+    )
 
 # Lifespan manager for startup and shutdown
 @asynccontextmanager
@@ -1612,7 +1617,10 @@ async def get_people(admin_id: str = Depends(get_current_admin)):
 
 @app.get("/api/people/currently-recognized")
 async def get_currently_recognized_stream():
-    """SSE stream of currently recognized person information for third-party integration"""
+    """
+    PUBLIC ENDPOINT - SSE stream of currently recognized people
+    Used by: Signature Aviation Drink App
+    """
 
     def get_current_recognition_data():
         """Helper function to get current recognition status for all people"""
@@ -1913,288 +1921,6 @@ async def register_person(request: personRegistration, admin_id: str = Depends(g
             'message': f'Registration failed: {str(e)}'
         }
 
-async def process_csv_with_progress_streaming(csv_content: str, face_recognizer):
-    """Process CSV with progress callbacks - no async context managers"""
-    import aiohttp
-    import json
-    from services.csv_processor import CSVProcessor
-
-    # Create session and processor outside of any context manager
-    session = aiohttp.ClientSession()
-    processor = CSVProcessor(face_recognizer, db, external_session=True)
-    processor.session = session
-
-    try:
-        # Parse CSV
-        yield f"event: progress\ndata: {json.dumps({'stage': 'parsing', 'message': 'Parsing CSV file...'})}\n\n"
-
-        rows, error = processor.parse_csv_content(csv_content)
-        if error:
-            yield f"event: error\ndata: {json.dumps({'error': error})}\n\n"
-            return
-
-        yield f"event: progress\ndata: {json.dumps({'stage': 'processing', 'message': f'Processing {len(rows)} users...'})}\n\n"
-
-        # Phase 1: Pre-filter and prepare for concurrent download
-        successful_registrations = []
-        failed_registrations = []
-        skipped_no_image = []
-        persons_for_batch = []
-        person_metadata = {}
-        total_rows = len(rows)
-
-        # Pre-filter rows
-        rows_to_download = []
-        for row in rows:
-            # Check if registration ID already exists
-            if db.check_registration_exists(row["registration_number"]):
-                failed_registrations.append({
-                    'row_number': row['row_number'],
-                    'name': row['full_name'],
-                    'title': row['title'],
-                    'registration_number': row['registration_number'],
-                    'error': f'Registration ID "{row["registration_number"]}" already exists in database'
-                })
-                continue
-
-            # Check if image URL provided
-            if not row["image_url"]:
-                skipped_no_image.append({
-                    'row_number': row['row_number'],
-                    'name': row['full_name'],
-                    'title': row['title'],
-                    'registration_number': row['registration_number'],
-                    'error': 'No image URL provided'
-                })
-                continue
-
-            rows_to_download.append(row)
-
-        # Phase 2: Download all images concurrently (supports multiple photos per person!)
-        if rows_to_download:
-            # Count total images
-            total_images = sum(len(row.get("image_urls", [row["image_url"]])) for row in rows_to_download)
-            num_people = len(rows_to_download)
-            progress_msg = {
-                'stage': 'downloading',
-                'message': f'Downloading {total_images} images for {num_people} people...',
-                'percentage': 25
-            }
-            yield f"event: progress\ndata: {json.dumps(progress_msg)}\n\n"
-
-            # Create download tasks for ALL images (including multiple per person)
-            download_coroutines = []
-            task_metadata = []
-
-            for row in rows_to_download:
-                image_urls = row.get("image_urls", [row["image_url"]])
-                for photo_num, image_url in enumerate(image_urls, start=1):
-                    download_coroutines.append(processor.download_image(image_url))
-                    task_metadata.append((row['registration_number'], row['row_number'], row['full_name'], row['title'], photo_num))
-
-            # Execute all downloads with progress tracking
-            # Start all tasks and keep reference
-            all_tasks = [asyncio.create_task(coro) for coro in download_coroutines]
-            pending = set(all_tasks)
-
-            # Monitor progress while tasks are running
-            completed_count = 0
-            last_progress_update = 0
-
-            while pending:
-                # Wait for at least one task to complete
-                done, pending = await asyncio.wait(
-                    pending,
-                    return_when=asyncio.FIRST_COMPLETED
-                )
-
-                completed_count += len(done)
-
-                # Update progress every 10% or at completion
-                progress_percent = int((completed_count / total_images) * 100)
-                if progress_percent >= last_progress_update + 10 or completed_count == total_images:
-                    last_progress_update = progress_percent
-                    progress_msg = {
-                        'stage': 'downloading',
-                        'message': f'Downloaded {completed_count}/{total_images} images ({progress_percent}%)...',
-                        'percentage': 25 + int(progress_percent * 0.25)  # Map 0-100% to 25-50%
-                    }
-                    yield f"event: progress\ndata: {json.dumps(progress_msg)}\n\n"
-
-            # All tasks are done, collect results in original order
-            download_results = []
-            for task in all_tasks:
-                try:
-                    download_results.append(task.result())
-                except Exception as e:
-                    download_results.append(e)
-
-            # Phase 3: Process downloaded images (group by person)
-            person_photos = {}  # registration_number -> list of (photo_num, image_data)
-            person_info = {}    # registration_number -> (row_number, full_name, title)
-
-            # Process results in original order
-            for (reg_num, row_num, full_name, title, photo_num), download_result in zip(task_metadata, download_results):
-                # Store person info
-                if reg_num not in person_info:
-                    person_info[reg_num] = (row_num, full_name, title)
-                    person_photos[reg_num] = []
-
-                # Handle download result
-                if isinstance(download_result, Exception):
-                    print(f"⚠️ Photo {photo_num} download failed for {full_name}: {download_result}")
-                    continue
-
-                image_data, error = download_result
-                if error:
-                    print(f"⚠️ Photo {photo_num} error for {full_name}: {error}")
-                    continue
-
-                person_photos[reg_num].append((photo_num, image_data))
-
-            # Process each person with their photos
-            for reg_num, photos in person_photos.items():
-                row_num, full_name, title = person_info[reg_num]
-
-                if not photos:
-                    failed_registrations.append({
-                        'row_number': row_num,
-                        'name': full_name,
-                        'title': title,
-                        'registration_number': reg_num,
-                        'error': 'All image downloads failed'
-                    })
-                    continue
-
-                person_id = None
-                photo_paths = []
-
-                try:
-                    # Generate unique ID
-                    person_id = str(uuid.uuid4())
-
-                    # Insert person to database
-                    db_result = db.insert_into_person(person_id, full_name, title, reg_num)
-
-                    if 'already exist' in db_result:
-                        failed_registrations.append({
-                            'row_number': row_num,
-                            'name': full_name,
-                            'title': title,
-                            'registration_number': reg_num,
-                            'error': 'Person already exists'
-                        })
-                        continue
-
-                    # Save all photos for this person
-                    os.makedirs('images', exist_ok=True)
-                    photo_paths = []
-
-                    for photo_num, image_data in photos:
-                        image = Image.open(BytesIO(image_data))
-                        image_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
-
-                        # Save with photo number for ensemble
-                        image_path = f'images/{person_id}%{photo_num}.png'
-                        cv2.imwrite(image_path, image_cv)
-                        photo_paths.append(image_path)
-
-                    # Add all photos to batch queue
-                    for image_path in photo_paths:
-                        persons_for_batch.append((person_id, image_path))
-
-                    # Store metadata once per person
-                    if person_id not in person_metadata:
-                        person_metadata[person_id] = {
-                            'row_number': row_num,
-                            'name': full_name,
-                            'title': title,
-                            'registration_number': reg_num,
-                            'photo_count': len(photo_paths)
-                        }
-
-                except Exception as e:
-                    if person_id:
-                        db.delete_data_from_person(person_id)
-                        for path in photo_paths:
-                            if os.path.exists(path):
-                                os.remove(path)
-
-                    failed_registrations.append({
-                        'row_number': row_num,
-                        'name': full_name,
-                        'title': title,
-                        'registration_number': reg_num,
-                        'error': str(e)
-                    })
-
-        # Phase 2: Batch process face embeddings
-        if persons_for_batch:
-            num_photos = len(persons_for_batch)
-            progress_msg = {
-                'stage': 'face_processing',
-                'message': f'Processing faces for {num_photos} photos...',
-                'percentage': 75
-            }
-            yield f"event: progress\ndata: {json.dumps(progress_msg)}\n\n"
-
-            batch_results = face_recognizer.add_photos_to_database_batch(persons_for_batch)
-
-            # Process batch results
-            for success_item in batch_results['successful']:
-                person_id = success_item['person_id']
-                metadata = person_metadata[person_id]
-
-                # Generate thumbnail
-                generate_thumbnail(person_id)
-
-                successful_registrations.append({
-                    'row_number': metadata['row_number'],
-                    'person_id': person_id,
-                    'name': metadata['name'],
-                    'title': metadata['title'],
-                    'registration_number': metadata['registration_number'],
-                    'has_image': True
-                })
-
-            # Handle batch failures
-            for fail_item in batch_results['failed']:
-                person_id = fail_item['person_id']
-                metadata = person_metadata[person_id]
-                image_path = fail_item['image_path']
-
-                # Rollback
-                db.delete_data_from_person(person_id)
-                if os.path.exists(image_path):
-                    os.remove(image_path)
-
-                failed_registrations.append({
-                    'row_number': metadata['row_number'],
-                    'name': metadata['name'],
-                    'title': metadata['title'],
-                    'registration_number': metadata['registration_number'],
-                    'error': fail_item.get('error', 'Failed to add face to recognition database')
-                })
-
-        # Send final results
-        final_data = {
-            'success': True,
-            'total_rows': len(rows),
-            'successful_registrations': len(successful_registrations),
-            'failed_registrations': len(failed_registrations),
-            'skipped_no_image': len(skipped_no_image),
-            'details': {
-                'successful': successful_registrations,
-                'failed': failed_registrations,
-                'skipped': skipped_no_image
-            }
-        }
-        yield f"event: complete\ndata: {json.dumps(final_data)}\n\n"
-
-    finally:
-        # Always close session
-        await session.close()
-
 @app.post("/api/people/upload-csv-stream")
 async def upload_csv_bulk_registration_stream(file: UploadFile = File(...), admin_id: str = Depends(get_current_admin)):
     """Process CSV file for bulk person registration with progress streaming"""
@@ -2218,7 +1944,12 @@ async def upload_csv_bulk_registration_stream(file: UploadFile = File(...), admi
     async def generate_progress():
         try:
             # Process CSV with progress streaming
-            async for event in process_csv_with_progress_streaming(csv_content, face_recognizer):
+            async for event in process_csv_with_progress_streaming(
+                csv_content,
+                face_recognizer,
+                db,
+                generate_thumbnail
+            ):
                 yield event
 
         except Exception as e:
@@ -2228,274 +1959,6 @@ async def upload_csv_bulk_registration_stream(file: UploadFile = File(...), admi
             yield f"event: error\ndata: {json.dumps({'error': f'Failed to process CSV: {str(e)}'})}\n\n"
 
     return EventSourceResponse(generate_progress())
-
-@app.get("/api/test-stream")
-async def test_stream(admin_id: str = Depends(get_current_admin)):
-    """Simple test streaming endpoint"""
-    async def test_generator():
-        yield f"event: test\ndata: {json.dumps({'message': 'Hello from stream!'})}\n\n"
-
-    return EventSourceResponse(test_generator())
-
-@app.post("/api/people/upload-csv")
-async def upload_csv_bulk_registration(file: UploadFile = File(...), admin_id: str = Depends(get_current_admin)):
-    """Process CSV file for bulk person registration"""
-    try:
-        # Validate file is CSV
-        if not file.filename.endswith('.csv'):
-            return {
-                'success': False,
-                'error': 'File must be a CSV file'
-            }
-
-        # Read CSV content
-        content = await file.read()
-        csv_content = content.decode('utf-8')
-
-        # Initialize CSV processor
-        from services.csv_processor import CSVProcessor
-        processor = CSVProcessor(face_recognizer, db)
-
-        # Parse CSV
-        rows, error = processor.parse_csv_content(csv_content)
-        if error:
-            return {
-                'success': False,
-                'error': error
-            }
-
-        # Phase 1: Filter valid rows and prepare for concurrent download
-        successful_registrations = []
-        failed_registrations = []
-        skipped_no_image = []
-        persons_for_batch = []
-        person_metadata = {}
-
-        # Pre-filter rows (check duplicates and missing URLs)
-        rows_to_download = []
-        for row in rows:
-            # Check if registration ID already exists
-            if db.check_registration_exists(row["registration_number"]):
-                failed_registrations.append({
-                    'row_number': row['row_number'],
-                    'name': row['full_name'],
-                    'title': row['title'],
-                    'registration_number': row['registration_number'],
-                    'error': f'Registration ID "{row["registration_number"]}" already exists in database'
-                })
-                continue
-
-            # Check if image URL provided
-            if not row["image_url"]:
-                skipped_no_image.append({
-                    'row_number': row['row_number'],
-                    'name': row['full_name'],
-                    'title': row['title'],
-                    'registration_number': row['registration_number'],
-                    'error': 'No image URL provided'
-                })
-                continue
-
-            rows_to_download.append(row)
-
-        # Phase 2: Download all images concurrently (supports multiple photos per person!)
-        if rows_to_download:
-            # Count total images (including multiple photos per person)
-            total_images = sum(len(row.get("image_urls", [row["image_url"]])) for row in rows_to_download)
-            print(f"🚀 Downloading {total_images} images for {len(rows_to_download)} people concurrently...")
-
-            # Create download tasks for ALL images (including multiple per person)
-            download_tasks = []
-            task_metadata = []  # Track which person and photo number each task belongs to
-
-            for row in rows_to_download:
-                image_urls = row.get("image_urls", [row["image_url"]])
-                for photo_num, image_url in enumerate(image_urls, start=1):
-                    download_tasks.append(processor.download_image(image_url))
-                    # Store only hashable data (not the dict itself!)
-                    task_metadata.append((
-                        row['registration_number'],
-                        row['row_number'],
-                        row['full_name'],
-                        row['title'],
-                        photo_num
-                    ))
-
-            # Execute all downloads simultaneously
-            download_results = await asyncio.gather(*download_tasks, return_exceptions=True)
-
-            # Phase 3: Process downloaded images and save to disk (supports multiple photos!)
-            # Group results by person
-            person_photos = {}  # registration_number -> list of (photo_num, image_data)
-            person_info = {}    # registration_number -> (person_id, row_number, full_name, title)
-
-            for (reg_num, row_num, full_name, title, photo_num), download_result in zip(task_metadata, download_results):
-                # Generate or retrieve person_id
-                if reg_num not in person_info:
-                    person_id = str(uuid.uuid4())
-                    person_info[reg_num] = (person_id, row_num, full_name, title)
-                    person_photos[reg_num] = []
-                else:
-                    person_id = person_info[reg_num][0]
-
-                # Handle download result
-                if isinstance(download_result, Exception):
-                    print(f"⚠️ Photo {photo_num} download failed for {full_name}: {download_result}")
-                    continue
-
-                image_data, error = download_result
-                if error:
-                    print(f"⚠️ Photo {photo_num} error for {full_name}: {error}")
-                    continue
-
-                # Store successful download
-                person_photos[reg_num].append((photo_num, image_data))
-
-            # Process each person with their photos
-            for reg_num, photos in person_photos.items():
-                person_id, row_num, full_name, title = person_info[reg_num]
-
-                if not photos:
-                    # No successful downloads for this person
-                    failed_registrations.append({
-                        'row_number': row_num,
-                        'name': full_name,
-                        'title': title,
-                        'registration_number': reg_num,
-                        'error': 'All image downloads failed'
-                    })
-                    continue
-
-                photo_paths = []
-
-                try:
-                    # Insert person to database first
-                    db_result = db.insert_into_person(
-                        person_id,
-                        full_name,
-                        title,
-                        reg_num
-                    )
-
-                    if 'already exist' in db_result:
-                        failed_registrations.append({
-                            'row_number': row_num,
-                            'name': full_name,
-                            'title': title,
-                            'registration_number': reg_num,
-                            'error': 'Person already exists'
-                        })
-                        continue
-
-                    # Save all photos for this person
-                    os.makedirs('images', exist_ok=True)
-                    photo_paths = []
-
-                    for photo_num, image_data in photos:
-                        # Convert bytes to image
-                        image = Image.open(BytesIO(image_data))
-                        image_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
-
-                        # Save with photo number for ensemble voting
-                        image_path = f'images/{person_id}%{photo_num}.png'
-                        cv2.imwrite(image_path, image_cv)
-                        photo_paths.append(image_path)
-
-                    # Add all photos to batch processing queue
-                    for image_path in photo_paths:
-                        persons_for_batch.append((person_id, image_path))
-
-                    # Store metadata once per person
-                    if person_id not in person_metadata:
-                        person_metadata[person_id] = {
-                            'row_number': row_num,
-                            'name': full_name,
-                            'title': title,
-                            'registration_number': reg_num,
-                            'photo_count': len(photo_paths)
-                        }
-
-                    print(f"✅ Prepared {len(photo_paths)} photo(s) for {full_name} (ensemble voting)")
-
-                except Exception as e:
-                    # Rollback on error
-                    if person_id:
-                        db.delete_data_from_person(person_id)
-                        for image_path in photo_paths:
-                            if os.path.exists(image_path):
-                                os.remove(image_path)
-
-                    failed_registrations.append({
-                        'row_number': row_num,
-                        'name': full_name,
-                        'title': title,
-                        'registration_number': reg_num,
-                        'error': f'Exception during processing: {str(e)}'
-                    })
-
-        # Phase 4: Batch process all face embeddings and add to FAISS
-        if persons_for_batch:
-            unique_people = len(set(pid for pid, _ in persons_for_batch))
-            print(f"🚀 Starting batch face registration for {len(persons_for_batch)} photos from {unique_people} people...")
-            batch_results = face_recognizer.add_photos_to_database_batch(persons_for_batch)
-
-            # Process batch results
-            for success_item in batch_results['successful']:
-                person_id = success_item['person_id']
-                metadata = person_metadata[person_id]
-
-                # Generate thumbnail
-                generate_thumbnail(person_id)
-
-                successful_registrations.append({
-                    'row_number': metadata['row_number'],
-                    'person_id': person_id,
-                    'name': metadata['name'],
-                    'title': metadata['title'],
-                    'registration_number': metadata['registration_number'],
-                    'has_image': True
-                })
-
-            # Handle batch failures - rollback DB and clean up files
-            for fail_item in batch_results['failed']:
-                person_id = fail_item['person_id']
-                metadata = person_metadata[person_id]
-                image_path = fail_item['image_path']
-
-                # Rollback: remove from database and delete image file
-                db.delete_data_from_person(person_id)
-                if os.path.exists(image_path):
-                    os.remove(image_path)
-
-                failed_registrations.append({
-                    'row_number': metadata['row_number'],
-                    'name': metadata['name'],
-                    'title': metadata['title'],
-                    'registration_number': metadata['registration_number'],
-                    'error': fail_item.get('error', 'Failed to add face to recognition database')
-                })
-
-        # Close the aiohttp session
-        await processor.close()
-
-        return {
-            'success': True,
-            'total_rows': len(rows),
-            'successful_registrations': len(successful_registrations),
-            'failed_registrations': len(failed_registrations),
-            'skipped_no_image': len(skipped_no_image),
-            'details': {
-                'successful': successful_registrations,
-                'failed': failed_registrations,
-                'skipped': skipped_no_image
-            }
-        }
-
-    except Exception as e:
-        return {
-            'success': False,
-            'error': f'Failed to process CSV: {str(e)}'
-        }
 
 @app.get("/api/people/csv-requirements")
 async def get_csv_requirements(admin_id: str = Depends(get_current_admin)):
@@ -2645,7 +2108,7 @@ async def get_person_photos(person_id: str, admin_id: str = Depends(get_current_
 
                         photos.append({
                             'filename': filename,
-                            'url': f'/api/people/{person_id}/photo/{filename}?t={file_mtime}',
+                            'url': f'/api/people/{person_id}/photo/{quote(filename)}?t={file_mtime}',
                             'photo_number': photo_number,
                             'is_primary': filename == f'{person_id}.png' or filename == f'{person_id}%1.png'
                         })
@@ -2664,19 +2127,27 @@ async def get_person_photos(person_id: str, admin_id: str = Depends(get_current_
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/api/people/{person_id}/photo/{filename}")
-async def get_person_photo_file(person_id: str, filename: str, admin_id: str = Depends(get_current_admin)):
-    """Serve a specific photo file for a person"""
+@app.get("/api/people/{person_id}/photo/{filename:path}")
+async def get_person_photo_file(person_id: str, filename: str):
+    """
+    Serve a specific photo file for a person
+    PUBLIC ENDPOINT - No authentication required (secured by obscurity - requires knowing person_id + filename)
+    Used by: Settings page photo carousel, Welcome screen
+    """
     try:
+        # FastAPI may double-decode in some proxy setups, so ensure we have the right filename
+        # Handle both encoded and decoded versions
+        decoded_filename = unquote(filename) if '%' in filename and not filename.startswith(f'{person_id}%') else filename
+
         # Security: Verify the filename belongs to this person
-        if not (filename.startswith(f'{person_id}.png') or filename.startswith(f'{person_id}%')):
+        if not (decoded_filename.startswith(f'{person_id}.png') or decoded_filename.startswith(f'{person_id}%')):
             raise HTTPException(status_code=403, detail="Unauthorized access to photo")
 
         # Security: Prevent directory traversal
-        if '..' in filename or '/' in filename:
+        if '..' in decoded_filename or '/' in decoded_filename:
             raise HTTPException(status_code=403, detail="Invalid filename")
 
-        photo_path = f'images/{filename}'
+        photo_path = f'images/{decoded_filename}'
         if not os.path.exists(photo_path):
             raise HTTPException(status_code=404, detail="Photo not found")
 
@@ -2923,7 +2394,11 @@ async def delete_all_people(admin_id: str = Depends(get_current_admin)):
 
 @app.get("/api/people/{person_id}/image")
 async def get_person_image(person_id: str):
-    """Get a person's thumbnail image - optimized for list views"""
+    """
+    Get a person's thumbnail image - optimized for list views
+    PUBLIC ENDPOINT - No authentication required (secured by obscurity)
+    Used by: Settings page person list
+    """
     try:
         # Support both single-photo and multi-photo formats
         image_path = f'images/{person_id}.png'
@@ -3414,7 +2889,11 @@ async def test_camera(request: CameraSettings, admin_id: str = Depends(get_curre
 # Display settings endpoints
 @app.get("/api/display/settings")
 async def get_display_settings():
-    """Get current display settings (public for welcome popup)"""
+    """
+    Get current display settings
+    PUBLIC ENDPOINT - No authentication required
+    Used by: Welcome screen popup for styling
+    """
     try:
         display_config = config_manager.get_display_config()
         return {
@@ -3589,7 +3068,11 @@ async def delete_background_image(admin_id: str = Depends(get_current_admin)):
 
 @app.get("/api/display/background-image")
 async def get_background_image():
-    """Get the current background image if it exists"""
+    """
+    Get the current background image if it exists
+    PUBLIC ENDPOINT - No authentication required
+    Used by: Welcome screen popup background
+    """
     try:
         backgrounds_dir = os.path.join("images", "backgrounds")
         if os.path.exists(backgrounds_dir):
@@ -3655,7 +3138,11 @@ async def get_system_status(admin_id: str = Depends(get_current_admin)):
 
 @app.get("/api/system/health")
 async def health_check():
-    """Health check endpoint"""
+    """
+    Health check endpoint
+    PUBLIC ENDPOINT - No authentication required
+    Used by: Load balancers, monitoring systems
+    """
     return {"status": "healthy", "timestamp": get_current_datetime_other_format()}
 
 @app.get("/api/system/detection-status")
@@ -3747,58 +3234,6 @@ async def cleanup_faiss_database(admin_id: str = Depends(get_current_admin)):
             "message": f"Failed to clean up FAISS database: {str(e)}",
             "error": str(e)
         }
-
-@app.post("/api/test/sse-trigger")
-async def trigger_sse_test(admin_id: str = Depends(get_current_admin)):
-    """Simple test endpoint to trigger SSE recognition updates"""
-    # Simulate recognition data update using new multi-person system
-    update_recognized_person("SSE Test User", "TEST123")
-
-    return {
-        "success": True,
-        "message": "SSE recognition signal triggered",
-        "test_user": "SSE Test User",
-        "timestamp": time.time()
-    }
-
-@app.post("/api/test/trigger-recognition")
-async def trigger_test_recognition(admin_id: str = Depends(get_current_admin)):
-    """Test endpoint to manually trigger a recognition event"""
-    print(f"🧪 Manual recognition test triggered")
-    print(f"📺 Connected welcome screens: {list(welcome_screens.keys())}")
-
-    if not welcome_screens:
-        return {
-            "success": False,
-            "message": "No welcome screens connected"
-        }
-
-    # Create test recognition data using consolidated function
-    test_best_match = {
-        'person_id': 'TEST_ID',
-        'person_name': 'Test User',
-        'person_title': 'Test Title',
-        'confidence': 0.95
-    }
-
-    test_recognition_data = create_recognition_data(test_best_match, time.time())
-
-    # Broadcast to all welcome screens using consolidated function
-    await broadcast_recognition_to_welcome_screens("Test User", test_recognition_data, "TEST")
-
-    # Also trigger SSE clients for testing
-    global last_detected_name, last_recognition_time
-    last_detected_name = "Test User"
-    last_recognition_time = time.time()
-    signal_recognition_change()
-
-    return {
-        "success": True,
-        "message": f"Test recognition sent to {len(welcome_screens)} welcome screens and SSE clients",
-        "welcome_screens": list(welcome_screens.keys()),
-        "test_data": test_recognition_data,
-        "sse_triggered": True
-    }
 
 @app.get("/api/rtsp/stream-with-overlay")
 async def rtsp_stream_with_overlay(request: Request):
