@@ -181,12 +181,22 @@ class ConfigManager:
                 'font_family': 'Inter',
                 'font_size': 'medium'
             },
+            'recognition': {
+                'use_gpu': True,
+                'batch_size': 8
+            },
             'mediapipe': {
                 'detection_confidence': 0.5,
                 'tracking_confidence': 0.7,  # Higher for video tracking
                 'max_faces': 20,
                 'refine_landmarks': True,
                 'unlimited_faces': False
+            },
+            'registration': {
+                'detection_confidence': 0.15,
+                'quality_threshold': 0.15,
+                'min_face_size': 30,
+                'enable_enhancement': True
             },
             'detection': {
                 'active': False,
