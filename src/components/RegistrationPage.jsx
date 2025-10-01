@@ -59,6 +59,7 @@ export function RegistrationPage({ onRegister }) {
   const [uploadMessage, setUploadMessage] = useState('');
 
   const videoRef = useRef(null);
+  const additionalPhotosRef = useRef(null);
 
   // Fetch camera settings and CSV requirements on component mount
   useEffect(() => {
@@ -302,6 +303,11 @@ export function RegistrationPage({ onRegister }) {
           registration: personRegistration,
           photo: imageData,
         });
+
+        // Scroll to additional photos section after a short delay
+        setTimeout(() => {
+          additionalPhotosRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }, 300);
       } else {
         setError(result.message || 'Registration failed');
       }
@@ -853,6 +859,7 @@ export function RegistrationPage({ onRegister }) {
         {/* Additional Photos Section - Only show after successful registration */}
         {registeredPersonId && (
           <Paper
+            ref={additionalPhotosRef}
             shadow="md"
             p="xl"
             radius="md"

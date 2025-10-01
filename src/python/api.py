@@ -2804,7 +2804,8 @@ async def delete_person(person_id: str, admin_id: str = Depends(get_current_admi
         deleted_thumbnails = 0
         if os.path.exists('images/thumbnails'):
             for filename in os.listdir('images/thumbnails'):
-                if filename.startswith(f'{person_id}_'):
+                # Match thumbnail files like {person_id}_150.jpg
+                if filename.startswith(f'{person_id}_') and filename.endswith('.jpg'):
                     thumbnail_path = os.path.join('images/thumbnails', filename)
                     try:
                         os.remove(thumbnail_path)
@@ -2857,23 +2858,26 @@ async def delete_all_people(admin_id: str = Depends(get_current_admin)):
                 # Delete all photo files for this person
                 if os.path.exists('images'):
                     for filename in os.listdir('images'):
-                        if filename.startswith(f'{person_id}.png') or filename.startswith(f'{person_id}%'):
+                        # Match both single-photo ({person_id}.png) and multi-photo ({person_id}%1.png, etc.)
+                        if (filename == f'{person_id}.png' or
+                            (filename.startswith(f'{person_id}%') and filename.endswith('.png'))):
                             file_path = os.path.join('images', filename)
                             try:
                                 os.remove(file_path)
                                 deleted_photos.append(filename)
                             except Exception as e:
-                                print(f"Error deleting photo {filename}: {e}")
+                                print(f"⚠️ Error deleting photo {filename}: {e}")
 
                 # Delete thumbnails for this person
                 if os.path.exists('images/thumbnails'):
                     for filename in os.listdir('images/thumbnails'):
-                        if filename.startswith(f'{person_id}_'):
+                        # Match thumbnail files like {person_id}_150.jpg
+                        if filename.startswith(f'{person_id}_') and filename.endswith('.jpg'):
                             thumbnail_path = os.path.join('images/thumbnails', filename)
                             try:
                                 os.remove(thumbnail_path)
                             except Exception as e:
-                                print(f"Error deleting thumbnail {filename}: {e}")
+                                print(f"⚠️ Error deleting thumbnail {filename}: {e}")
             else:
                 failed_deletions.append(person_id)
 

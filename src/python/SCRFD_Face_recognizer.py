@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from queue import Queue
 from enum import Enum
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 class DatabaseOperation(Enum):
     """Types of database operations that can be queued"""
@@ -1143,13 +1144,30 @@ class SCRFDFaceRecognizer:
             if not images_data:
                 return results
 
-            # Phase 2: Batch face detection
-            print(f"🎯 Detecting faces in {len(images_data)} images...")
+            # Phase 2: Batch face detection (parallel processing for speed)
+            print(f"🎯 Detecting faces in {len(images_data)} images (parallel mode)...")
             all_detections = []
-            for person_id, image_path, image in images_data:
-                # Use registration-specific detection for each image
+
+            # Helper function for parallel processing
+            def detect_single_image(data):
+                person_id, image_path, image = data
                 _, detections = self.recognize_face_for_registration(image, str(image_path))
-                all_detections.append((person_id, image_path, image, detections))
+                return (person_id, image_path, image, detections)
+
+            # Process images in parallel using ThreadPoolExecutor
+            # Use min of CPU count or image count for optimal thread pool size
+            max_workers = min(os.cpu_count() or 4, len(images_data))
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                # Submit all detection tasks
+                futures = [executor.submit(detect_single_image, data) for data in images_data]
+
+                # Collect results as they complete
+                for future in as_completed(futures):
+                    try:
+                        result = future.result()
+                        all_detections.append(result)
+                    except Exception as e:
+                        print(f"⚠️ Detection failed for image: {e}")
 
             # Phase 3: Filter valid detections and prepare for batch embedding
             print("🔍 Filtering valid face detections...")
@@ -1172,50 +1190,42 @@ class SCRFDFaceRecognizer:
                 print("⚠️ No valid faces detected in any image")
                 return results
 
-            # Phase 4: Batch embedding extraction (leveraging our new batch processing!)
+            # Phase 4: Batch embedding extraction (parallel processing)
             print(f"🧠 Extracting embeddings in batch mode for {len(valid_for_batch)} faces...")
             embeddings = []
 
-            if len(valid_for_batch) > 1 and self.recognizer.supports_batching:
-                # Use batch processing for efficiency
-                # Group by image to batch process faces from same image
-                # For registration, typically one face per image, so we can batch across images
-                for person_id, image_path, image, detection in valid_for_batch:
+            # Helper function for parallel embedding extraction
+            def extract_single_embedding(data):
+                person_id, image_path, image, detection = data
+                try:
+                    embedding = self.recognizer.get_embedding(
+                        image,
+                        detection.landmarks,
+                        normalized=True
+                    )
+                    return (person_id, image_path, embedding, True, None)
+                except Exception as e:
+                    return (person_id, image_path, None, False, str(e))
+
+            # Process embeddings in parallel
+            max_workers = min(os.cpu_count() or 4, len(valid_for_batch))
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = [executor.submit(extract_single_embedding, data) for data in valid_for_batch]
+
+                for future in as_completed(futures):
                     try:
-                        # Extract embedding for this face
-                        embedding = self.recognizer.get_embedding(
-                            image,
-                            detection.landmarks,
-                            normalized=True
-                        )
-                        embeddings.append((person_id, image_path, embedding, True))
+                        person_id, image_path, embedding, success, error = future.result()
+                        embeddings.append((person_id, image_path, embedding, success))
+
+                        if not success:
+                            results['failed'].append({
+                                'person_id': person_id,
+                                'image_path': image_path,
+                                'error': f'Embedding extraction failed: {error}'
+                            })
+                            results['fail_count'] += 1
                     except Exception as e:
-                        print(f"⚠️ Failed to extract embedding for {person_id}: {e}")
-                        embeddings.append((person_id, image_path, None, False))
-                        results['failed'].append({
-                            'person_id': person_id,
-                            'image_path': image_path,
-                            'error': f'Embedding extraction failed: {str(e)}'
-                        })
-                        results['fail_count'] += 1
-            else:
-                # Sequential fallback
-                for person_id, image_path, image, detection in valid_for_batch:
-                    try:
-                        embedding = self.recognizer.get_embedding(
-                            image,
-                            detection.landmarks,
-                            normalized=True
-                        )
-                        embeddings.append((person_id, image_path, embedding, True))
-                    except Exception as e:
-                        embeddings.append((person_id, image_path, None, False))
-                        results['failed'].append({
-                            'person_id': person_id,
-                            'image_path': image_path,
-                            'error': f'Embedding extraction failed: {str(e)}'
-                        })
-                        results['fail_count'] += 1
+                        print(f"⚠️ Embedding extraction task failed: {e}")
 
             # Phase 5: Batch add to FAISS (no save between adds)
             print(f"💾 Adding {len(embeddings)} embeddings to FAISS database...")

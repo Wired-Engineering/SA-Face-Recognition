@@ -218,7 +218,11 @@ class MySqlite3Manager:
         return str(len(df))
     
     def delete_data_from_person(self, id_):
-        face_deleted=False
+        """
+        Delete person from database.
+        Returns True if database deletion succeeds, regardless of file deletion status.
+        File deletion should be handled by the API endpoint via face_recognizer.remove_person()
+        """
         name=self.get_person_name(id_)
         self.connect()
         command = "DELETE FROM PERSON WHERE Id=? "
@@ -226,17 +230,11 @@ class MySqlite3Manager:
             self.cursor.execute(command, (id_,))
             self.con.commit()
             self.con.close()
-            try:
-                os.remove(f'images/{id_}.png')
-                face_deleted=True
-            except Exception as e:
-                print(e)
-    
-            if face_deleted==True:
-                return True
-            else:
-                return False
-        except:
+            # Database deletion succeeded - return True
+            # (File deletion is handled separately by face_recognizer.remove_person)
+            return True
+        except Exception as e:
+            print(f"⚠️ Failed to delete person {id_} from database: {e}")
             return False 
     def delete_data_from_admin(self, id_):
         self.connect()
