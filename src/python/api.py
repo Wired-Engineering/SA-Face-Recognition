@@ -1091,87 +1091,50 @@ def draw_detection_overlays_on_frame(frame, faces):
 
 
 def configure_hardware_acceleration():
-    """Configure OpenCV to use hardware acceleration when available (CPU-first approach)"""
+    """Configure OpenCV backend based on entrypoint GPU detection"""
     import os
 
-    # Default to CPU-only for production stability
-    # GPU acceleration must be explicitly enabled
+    # Check if GPU acceleration was detected by entrypoint script
     enable_gpu = os.getenv('ENABLE_GPU_ACCELERATION', '').lower() in ('true', '1', 'yes')
 
-    # If GPU acceleration not explicitly enabled, use CPU
     if not enable_gpu:
         print("💻 Using CPU-only processing (default for production stability)")
         print("💡 To enable GPU acceleration: set ENABLE_GPU_ACCELERATION=true")
+        cv2.ocl.setUseOpenCL(False)
         return "cpu"
 
-    # GPU acceleration explicitly requested - proceed with detection
-    print("🚀 GPU acceleration explicitly enabled - detecting hardware...")
+    # Use GPU backend type detected by entrypoint (nvidia, vaapi, etc.)
+    backend_type = os.getenv('GPU_BACKEND_TYPE', 'cpu').lower()
 
-    # Check if running in Docker container
-    is_docker = os.path.exists('/.dockerenv') or os.path.exists('/proc/1/cgroup')
-    if is_docker:
-        print("🐳 Running in Docker container - checking for GPU passthrough...")
+    # Enable OpenCL for OpenCV operations (works with NVIDIA/Intel/AMD)
+    if cv2.ocl.haveOpenCL():
+        cv2.ocl.setUseOpenCL(True)
+        print(f"✅ OpenCL enabled for OpenCV operations (device: {cv2.ocl.Device.getDefault().name()})")
+    else:
+        print("ℹ️ OpenCL not available - OpenCV will use CPU")
 
-    try:
-        # Check for CUDA support
-        if cv2.cuda.getCudaEnabledDeviceCount() > 0:
-            print("🚀 CUDA GPU acceleration available")
-            return "cuda"
-    except:
-        pass
-
-    try:
-        # Check for Intel Quick Sync Video (QSV) / iGPU support
-        backends = cv2.videoio_registry.getBackends()
-        if cv2.CAP_INTEL_MFX in backends:
-            # Verify Intel GPU device accessibility in container
-            intel_devices = ['/dev/dri/renderD128', '/dev/dri/card0']
-            if any(os.path.exists(device) for device in intel_devices):
-                print("🚀 Intel QuickSync Video (QSV) acceleration available with device passthrough")
-                print("📱 Using Intel Media SDK (MFX) backend for hardware acceleration")
-                return "intel_mfx"
-            else:
-                print("⚠️ Intel MFX/QuickSync backend available but no GPU devices found")
-                print("💡 Ensure DRI devices are mapped: --device=/dev/dri:/dev/dri")
-    except:
-        pass
-
-    try:
-        # Check for VAAPI (Video Acceleration API) - Linux hardware acceleration
-        if os.path.exists('/dev/dri'):
-            # Check if we can access DRI devices
-            dri_devices = os.listdir('/dev/dri')
-            if dri_devices:
-                print(f"🚀 VAAPI hardware acceleration available (devices: {dri_devices})")
-                # Try to use FFMPEG with hardware acceleration
-                return "vaapi"
-    except:
-        pass
-
-    try:
-        # Check for DirectShow with hardware acceleration on Windows
-        if cv2.CAP_DSHOW in cv2.videoio_registry.getBackends():
-            print("🚀 DirectShow hardware acceleration available")
-            return "dshow"
-    except:
-        pass
-
-    if is_docker:
-        print("❌ No GPU passthrough detected in Docker container")
-        print("💡 To enable GPU acceleration:")
-        print("   Intel: --device=/dev/dri:/dev/dri --group-add video")
-        print("   AMD:   --device=/dev/dri:/dev/dri --device=/dev/kfd:/dev/kfd --group-add video --group-add render")
-        print("   NVIDIA: --gpus all (requires nvidia-docker)")
-
-    print("ℹ️ Using CPU-only processing (no hardware acceleration detected)")
-    return "cpu"
+    if backend_type == 'nvidia':
+        print("🚀 Using NVIDIA GPU backend (detected by entrypoint)")
+        print("ℹ️ ONNX models: CUDAExecutionProvider")
+        print("ℹ️ OpenCV preprocessing: OpenCL (if available)")
+        return "nvidia"
+    elif backend_type == 'vaapi':
+        print("🚀 Using VAAPI backend for Intel/AMD GPU (detected by entrypoint)")
+        return "vaapi"
+    elif backend_type == 'intel_mfx':
+        print("🚀 Using Intel QuickSync Video (MFX) backend (detected by entrypoint)")
+        return "intel_mfx"
+    else:
+        print(f"⚠️ Unknown GPU backend type: {backend_type}, falling back to CPU")
+        cv2.ocl.setUseOpenCL(False)
+        return "cpu"
 
 
 def create_optimized_capture(rtsp_url, hw_backend="cpu"):
     """Create an optimized VideoCapture with hardware acceleration (Docker-compatible)"""
     cap = None
 
-    if hw_backend == "cuda":
+    if hw_backend in ("cuda", "nvidia"):
         # Try CUDA-accelerated capture
         try:
             cap = cv2.VideoCapture(rtsp_url, cv2.CAP_GSTREAMER)
@@ -3805,11 +3768,13 @@ if __name__ == "__main__":
 
     try:
         # Run the server with SocketIO
+        # Note: reload should be False in production to avoid duplicate initialization
+        reload_enabled = os.getenv('UVICORN_RELOAD', 'false').lower() in ('true', '1', 'yes')
         uvicorn.run(
             "api:socket_app",  # Use the SocketIO app instead of FastAPI app directly
             host="0.0.0.0",
             port=8000,
-            reload=True,
+            reload=reload_enabled,
             log_level="info"
         )
     except KeyboardInterrupt:
