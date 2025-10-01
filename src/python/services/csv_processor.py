@@ -21,6 +21,14 @@ REQUIRED_COLUMNS = [
     "Image_URL"
 ]
 
+# Optional columns for multi-photo support
+OPTIONAL_COLUMNS = [
+    "Image_URL_2",
+    "Image_URL_3",
+    "Image_URL_4",
+    "Image_URL_5"
+]
+
 class CSVProcessor:
     def __init__(self, face_recognizer=None, database=None, external_session=False):
         self.session = None
@@ -99,13 +107,24 @@ class CSVProcessor:
                     logger.warning(f"Row {row_num}: Missing data for {', '.join(missing_data)}, skipping")
                     continue
 
+                # Collect all image URLs (primary + optional additional photos)
+                image_urls = []
+                if cleaned_row.get("Image_URL", "").strip():
+                    image_urls.append(cleaned_row["Image_URL"].strip())
+
+                # Check for additional image URLs (for ensemble voting)
+                for optional_col in OPTIONAL_COLUMNS:
+                    if cleaned_row.get(optional_col, "").strip():
+                        image_urls.append(cleaned_row[optional_col].strip())
+
                 rows.append({
                     "first_name": cleaned_row["First_Name"].strip(),
                     "last_name": cleaned_row["Last_Name"].strip(),
                     "full_name": f"{cleaned_row['First_Name'].strip()} {cleaned_row['Last_Name'].strip()}",
                     "title": cleaned_row["Title"].strip(),
                     "registration_number": cleaned_row["Registration_Confirmation_Number"].strip(),
-                    "image_url": cleaned_row["Image_URL"].strip() if cleaned_row.get("Image_URL") else None,
+                    "image_url": image_urls[0] if image_urls else None,  # Primary image (backward compat)
+                    "image_urls": image_urls,  # All images for multi-photo support
                     "row_number": row_num
                 })
 

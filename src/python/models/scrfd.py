@@ -1,10 +1,13 @@
 import os
 import cv2
 import numpy as np
-import onnxruntime
 
 from face_utils.helpers import distance2bbox, distance2kps
+from models.onnx_utils import create_optimized_session
 from typing import Tuple
+from logging import getLogger
+
+logger = getLogger(__name__)
 
 __all__ = ["SCRFD"]
 
@@ -50,56 +53,34 @@ class SCRFD:
         self._initialize_model(model_path=model_path)
 
     def _initialize_model(self, model_path: str):
-        """Initialize the model from the given path.
+        """Initialize the model from the given path with optimized ONNX session.
 
         Args:
             model_path (str): Path to .onnx model.
         """
         try:
-            # Get available providers and prioritize based on platform
-            available_providers = onnxruntime.get_available_providers()
-            providers = []
+            logger.info(f"Initializing SCRFD model from {model_path}")
+            print(f"🎯 Initializing SCRFD detector...")
 
-            print(f"🔍 Available ONNX providers: {available_providers}")
-
-            # Prioritize providers based on performance (try multiple GPU providers)
-            gpu_providers_found = []
-
-            if "ROCMExecutionProvider" in available_providers:
-                providers.append("ROCMExecutionProvider")
-                gpu_providers_found.append("ROCMExecutionProvider (AMD GPU)")
-
-            if "CUDAExecutionProvider" in available_providers:
-                providers.append("CUDAExecutionProvider")
-                gpu_providers_found.append("CUDAExecutionProvider (NVIDIA GPU)")
-
-            if "OpenVINOExecutionProvider" in available_providers:
-                providers.append("OpenVINOExecutionProvider")
-                gpu_providers_found.append("OpenVINOExecutionProvider (Intel)")
-
-            if "CoreMLExecutionProvider" in available_providers:
-                providers.append("CoreMLExecutionProvider")
-                gpu_providers_found.append("CoreMLExecutionProvider (Apple Silicon)")
-
-            # Always include CPU as fallback
-            providers.append("CPUExecutionProvider")
-
-            if gpu_providers_found:
-                print(f"🚀 GPU acceleration available: {', '.join(gpu_providers_found)}")
-            else:
-                print("💻 Using CPU execution only")
-
-            print(f"📋 Selected provider order: {providers}")
-
-            self.session = onnxruntime.InferenceSession(
+            # Create optimized session with advanced features
+            self.session = create_optimized_session(
                 model_path,
-                providers=providers
+                enable_profiling=False,
+                graph_optimization_level=99,  # Maximum optimization
+                enable_mem_pattern=True,
+                enable_cpu_mem_arena=True
             )
+
             # Get model info
             self.output_names = [x.name for x in self.session.get_outputs()]
             self.input_names = [x.name for x in self.session.get_inputs()]
+
+            logger.info(f"SCRFD initialized with {len(self.output_names)} outputs")
+            print(f"✅ SCRFD detector ready (providers: {self.session.get_providers()[0]})")
+
         except Exception as e:
-            print(f"Failed to load the model: {e}")
+            logger.error(f"Failed to load SCRFD model: {e}", exc_info=True)
+            print(f"❌ Failed to load the model: {e}")
             raise
 
     def forward(self, image, threshold):

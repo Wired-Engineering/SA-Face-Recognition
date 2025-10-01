@@ -456,12 +456,18 @@ def signal_recognition_change():
 def generate_thumbnail(person_id: str, size: int = 150) -> bool:
     """
     Generate thumbnail for a person's image.
+    Supports both single-photo (person_id.png) and multi-photo (person_id%1.png) formats.
     Returns True if successful, False otherwise.
     """
     try:
+        # Try standard format first
         image_path = f'images/{person_id}.png'
+
+        # If not found, try multi-photo format (first photo)
         if not os.path.exists(image_path):
-            return False
+            image_path = f'images/{person_id}%1.png'
+            if not os.path.exists(image_path):
+                return False
 
         # Create thumbnails directory if it doesn't exist
         os.makedirs('images/thumbnails', exist_ok=True)
@@ -1554,8 +1560,11 @@ async def get_people(admin_id: str = Depends(get_current_admin)):
                 skipped_count += 1
                 continue
 
-            # Check if reference image exists
+            # Check if reference image exists (support both single and multi-photo formats)
             image_path = f'images/{person_id}.png'
+            if not os.path.exists(image_path):
+                image_path = f'images/{person_id}%1.png'
+
             has_image = os.path.exists(image_path)
 
             # Add timestamp for cache busting
@@ -1569,9 +1578,15 @@ async def get_people(admin_id: str = Depends(get_current_admin)):
             additional_photos = []
             if os.path.exists('images'):
                 for filename in os.listdir('images'):
+                    # Match both formats: person_id.png (legacy) and person_id%N.png (multi-photo)
                     if filename.startswith(f'{person_id}.png') or filename.startswith(f'{person_id}%'):
+                        # Skip non-image files (like subdirectories)
+                        if not filename.endswith('.png'):
+                            continue
                         photo_files.append(filename)
-                        if filename != f'{person_id}.png':
+                        # Don't count the primary photo as "additional"
+                        # Primary photo is either person_id.png or person_id%1.png
+                        if filename != f'{person_id}.png' and filename != f'{person_id}%1.png':
                             additional_photos.append(filename)
 
             people.append({
@@ -1920,125 +1935,245 @@ async def process_csv_with_progress_streaming(csv_content: str, face_recognizer)
 
         yield f"event: progress\ndata: {json.dumps({'stage': 'processing', 'message': f'Processing {len(rows)} users...'})}\n\n"
 
-        # Process each person completely in one pass
+        # Phase 1: Pre-filter and prepare for concurrent download
         successful_registrations = []
         failed_registrations = []
         skipped_no_image = []
+        persons_for_batch = []
+        person_metadata = {}
         total_rows = len(rows)
 
-        for idx, row in enumerate(rows, 1):
-            try:
-                # Send progress for each user
-                progress_data = {
-                    "stage": "processing",
-                    "message": f"Processing {row['full_name']}...",
-                    "total": total_rows,
-                    "current": idx,
-                    "percentage": int((idx / total_rows) * 100)
-                }
-                yield f"event: progress\ndata: {json.dumps(progress_data)}\n\n"
-
-                # Check if registration ID already exists
-                if db.check_registration_exists(row["registration_number"]):
-                    failed_registrations.append({
-                        'row_number': row['row_number'],
-                        'name': row['full_name'],
-                        'title': row['title'],
-                        'registration_number': row['registration_number'],
-                        'error': f'Registration ID "{row["registration_number"]}" already exists in database'
-                    })
-                    continue
-
-                # Download image if URL provided
-                if not row["image_url"]:
-                    skipped_no_image.append({
-                        'row_number': row['row_number'],
-                        'name': row['full_name'],
-                        'title': row['title'],
-                        'registration_number': row['registration_number'],
-                        'error': 'No image URL provided'
-                    })
-                    continue
-
-                image_data, error = await processor.download_image(row["image_url"])
-                if error:
-                    failed_registrations.append({
-                        'row_number': row['row_number'],
-                        'name': row['full_name'],
-                        'title': row['title'],
-                        'registration_number': row['registration_number'],
-                        'error': error
-                    })
-                    continue
-
-                # Generate unique ID for person
-                person_id = str(uuid.uuid4())
-
-                # Convert bytes to image
-                image = Image.open(BytesIO(image_data))
-                image_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
-
-                # Save processed image (already cropped and optimized by CSV processor)
-                os.makedirs('images', exist_ok=True)
-                image_path = f'images/{person_id}.png'
-                cv2.imwrite(image_path, image_cv)
-
-                # Insert person to database
-                db_result = db.insert_into_person(
-                    person_id,
-                    row['full_name'],
-                    row['title'],
-                    row['registration_number']
-                )
-
-                if 'already exist' in db_result:
-                    # Clean up image file
-                    if os.path.exists(image_path):
-                        os.remove(image_path)
-                    failed_registrations.append({
-                        'row_number': row['row_number'],
-                        'name': row['full_name'],
-                        'title': row['title'],
-                        'registration_number': row['registration_number'],
-                        'error': 'Person already exists'
-                    })
-                    continue
-
-                # Add to FAISS database incrementally
-                faiss_success = face_recognizer.add_photo_to_database(person_id, image_path)
-                if not faiss_success:
-                    # FAISS add failed - rollback database and file
-                    db.delete_data_from_person(person_id)
-                    if os.path.exists(image_path):
-                        os.remove(image_path)
-                    failed_registrations.append({
-                        'row_number': row['row_number'],
-                        'name': row['full_name'],
-                        'title': row['title'],
-                        'registration_number': row['registration_number'],
-                        'error': 'Failed to add face to recognition database (no face detected or poor quality)'
-                    })
-                    continue
-
-                # Generate thumbnail immediately
-                generate_thumbnail(person_id)
-
-                successful_registrations.append({
-                    'row_number': row['row_number'],
-                    'person_id': person_id,
-                    'name': row['full_name'],
-                    'title': row['title'],
-                    'registration_number': row['registration_number'],
-                    'has_image': True
-                })
-
-            except Exception as e:
+        # Pre-filter rows
+        rows_to_download = []
+        for row in rows:
+            # Check if registration ID already exists
+            if db.check_registration_exists(row["registration_number"]):
                 failed_registrations.append({
                     'row_number': row['row_number'],
                     'name': row['full_name'],
-                    'title': row.get('title', ''),
-                    'registration_number': row.get('registration_number', ''),
-                    'error': str(e)
+                    'title': row['title'],
+                    'registration_number': row['registration_number'],
+                    'error': f'Registration ID "{row["registration_number"]}" already exists in database'
+                })
+                continue
+
+            # Check if image URL provided
+            if not row["image_url"]:
+                skipped_no_image.append({
+                    'row_number': row['row_number'],
+                    'name': row['full_name'],
+                    'title': row['title'],
+                    'registration_number': row['registration_number'],
+                    'error': 'No image URL provided'
+                })
+                continue
+
+            rows_to_download.append(row)
+
+        # Phase 2: Download all images concurrently (supports multiple photos per person!)
+        if rows_to_download:
+            # Count total images
+            total_images = sum(len(row.get("image_urls", [row["image_url"]])) for row in rows_to_download)
+            num_people = len(rows_to_download)
+            progress_msg = {
+                'stage': 'downloading',
+                'message': f'Downloading {total_images} images for {num_people} people...',
+                'percentage': 25
+            }
+            yield f"event: progress\ndata: {json.dumps(progress_msg)}\n\n"
+
+            # Create download tasks for ALL images (including multiple per person)
+            download_coroutines = []
+            task_metadata = []
+
+            for row in rows_to_download:
+                image_urls = row.get("image_urls", [row["image_url"]])
+                for photo_num, image_url in enumerate(image_urls, start=1):
+                    download_coroutines.append(processor.download_image(image_url))
+                    task_metadata.append((row['registration_number'], row['row_number'], row['full_name'], row['title'], photo_num))
+
+            # Execute all downloads with progress tracking
+            # Start all tasks and keep reference
+            all_tasks = [asyncio.create_task(coro) for coro in download_coroutines]
+            pending = set(all_tasks)
+
+            # Monitor progress while tasks are running
+            completed_count = 0
+            last_progress_update = 0
+
+            while pending:
+                # Wait for at least one task to complete
+                done, pending = await asyncio.wait(
+                    pending,
+                    return_when=asyncio.FIRST_COMPLETED
+                )
+
+                completed_count += len(done)
+
+                # Update progress every 10% or at completion
+                progress_percent = int((completed_count / total_images) * 100)
+                if progress_percent >= last_progress_update + 10 or completed_count == total_images:
+                    last_progress_update = progress_percent
+                    progress_msg = {
+                        'stage': 'downloading',
+                        'message': f'Downloaded {completed_count}/{total_images} images ({progress_percent}%)...',
+                        'percentage': 25 + int(progress_percent * 0.25)  # Map 0-100% to 25-50%
+                    }
+                    yield f"event: progress\ndata: {json.dumps(progress_msg)}\n\n"
+
+            # All tasks are done, collect results in original order
+            download_results = []
+            for task in all_tasks:
+                try:
+                    download_results.append(task.result())
+                except Exception as e:
+                    download_results.append(e)
+
+            # Phase 3: Process downloaded images (group by person)
+            person_photos = {}  # registration_number -> list of (photo_num, image_data)
+            person_info = {}    # registration_number -> (row_number, full_name, title)
+
+            # Process results in original order
+            for (reg_num, row_num, full_name, title, photo_num), download_result in zip(task_metadata, download_results):
+                # Store person info
+                if reg_num not in person_info:
+                    person_info[reg_num] = (row_num, full_name, title)
+                    person_photos[reg_num] = []
+
+                # Handle download result
+                if isinstance(download_result, Exception):
+                    print(f"⚠️ Photo {photo_num} download failed for {full_name}: {download_result}")
+                    continue
+
+                image_data, error = download_result
+                if error:
+                    print(f"⚠️ Photo {photo_num} error for {full_name}: {error}")
+                    continue
+
+                person_photos[reg_num].append((photo_num, image_data))
+
+            # Process each person with their photos
+            for reg_num, photos in person_photos.items():
+                row_num, full_name, title = person_info[reg_num]
+
+                if not photos:
+                    failed_registrations.append({
+                        'row_number': row_num,
+                        'name': full_name,
+                        'title': title,
+                        'registration_number': reg_num,
+                        'error': 'All image downloads failed'
+                    })
+                    continue
+
+                person_id = None
+                photo_paths = []
+
+                try:
+                    # Generate unique ID
+                    person_id = str(uuid.uuid4())
+
+                    # Insert person to database
+                    db_result = db.insert_into_person(person_id, full_name, title, reg_num)
+
+                    if 'already exist' in db_result:
+                        failed_registrations.append({
+                            'row_number': row_num,
+                            'name': full_name,
+                            'title': title,
+                            'registration_number': reg_num,
+                            'error': 'Person already exists'
+                        })
+                        continue
+
+                    # Save all photos for this person
+                    os.makedirs('images', exist_ok=True)
+                    photo_paths = []
+
+                    for photo_num, image_data in photos:
+                        image = Image.open(BytesIO(image_data))
+                        image_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+
+                        # Save with photo number for ensemble
+                        image_path = f'images/{person_id}%{photo_num}.png'
+                        cv2.imwrite(image_path, image_cv)
+                        photo_paths.append(image_path)
+
+                    # Add all photos to batch queue
+                    for image_path in photo_paths:
+                        persons_for_batch.append((person_id, image_path))
+
+                    # Store metadata once per person
+                    if person_id not in person_metadata:
+                        person_metadata[person_id] = {
+                            'row_number': row_num,
+                            'name': full_name,
+                            'title': title,
+                            'registration_number': reg_num,
+                            'photo_count': len(photo_paths)
+                        }
+
+                except Exception as e:
+                    if person_id:
+                        db.delete_data_from_person(person_id)
+                        for path in photo_paths:
+                            if os.path.exists(path):
+                                os.remove(path)
+
+                    failed_registrations.append({
+                        'row_number': row_num,
+                        'name': full_name,
+                        'title': title,
+                        'registration_number': reg_num,
+                        'error': str(e)
+                    })
+
+        # Phase 2: Batch process face embeddings
+        if persons_for_batch:
+            num_photos = len(persons_for_batch)
+            progress_msg = {
+                'stage': 'face_processing',
+                'message': f'Processing faces for {num_photos} photos...',
+                'percentage': 75
+            }
+            yield f"event: progress\ndata: {json.dumps(progress_msg)}\n\n"
+
+            batch_results = face_recognizer.add_photos_to_database_batch(persons_for_batch)
+
+            # Process batch results
+            for success_item in batch_results['successful']:
+                person_id = success_item['person_id']
+                metadata = person_metadata[person_id]
+
+                # Generate thumbnail
+                generate_thumbnail(person_id)
+
+                successful_registrations.append({
+                    'row_number': metadata['row_number'],
+                    'person_id': person_id,
+                    'name': metadata['name'],
+                    'title': metadata['title'],
+                    'registration_number': metadata['registration_number'],
+                    'has_image': True
+                })
+
+            # Handle batch failures
+            for fail_item in batch_results['failed']:
+                person_id = fail_item['person_id']
+                metadata = person_metadata[person_id]
+                image_path = fail_item['image_path']
+
+                # Rollback
+                db.delete_data_from_person(person_id)
+                if os.path.exists(image_path):
+                    os.remove(image_path)
+
+                failed_registrations.append({
+                    'row_number': metadata['row_number'],
+                    'name': metadata['name'],
+                    'title': metadata['title'],
+                    'registration_number': metadata['registration_number'],
+                    'error': fail_item.get('error', 'Failed to add face to recognition database')
                 })
 
         # Send final results
@@ -2129,114 +2264,215 @@ async def upload_csv_bulk_registration(file: UploadFile = File(...), admin_id: s
                 'error': error
             }
 
-        # Process each person completely in one pass
+        # Phase 1: Filter valid rows and prepare for concurrent download
         successful_registrations = []
         failed_registrations = []
         skipped_no_image = []
+        persons_for_batch = []
+        person_metadata = {}
 
+        # Pre-filter rows (check duplicates and missing URLs)
+        rows_to_download = []
         for row in rows:
-            try:
-                # Check if registration ID already exists
-                if db.check_registration_exists(row["registration_number"]):
-                    failed_registrations.append({
-                        'row_number': row['row_number'],
-                        'name': row['full_name'],
-                        'title': row['title'],
-                        'registration_number': row['registration_number'],
-                        'error': f'Registration ID "{row["registration_number"]}" already exists in database'
-                    })
-                    continue
-
-                # Download image if URL provided
-                if not row["image_url"]:
-                    skipped_no_image.append({
-                        'row_number': row['row_number'],
-                        'name': row['full_name'],
-                        'title': row['title'],
-                        'registration_number': row['registration_number'],
-                        'error': 'No image URL provided'
-                    })
-                    continue
-
-                image_data, error = await processor.download_image(row["image_url"])
-                if error:
-                    failed_registrations.append({
-                        'row_number': row['row_number'],
-                        'name': row['full_name'],
-                        'title': row['title'],
-                        'registration_number': row['registration_number'],
-                        'error': error
-                    })
-                    continue
-
-                # Generate unique ID for person
-                person_id = str(uuid.uuid4())
-
-                # Convert bytes to image
-                image = Image.open(BytesIO(image_data))
-                image_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
-
-                # Save processed image (already cropped and optimized by CSV processor)
-                os.makedirs('images', exist_ok=True)
-                image_path = f'images/{person_id}.png'
-                cv2.imwrite(image_path, image_cv)
-
-                # Insert person to database
-                db_result = db.insert_into_person(
-                    person_id,
-                    row['full_name'],
-                    row['title'],
-                    row['registration_number']
-                )
-
-                if 'already exist' in db_result:
-                    # Clean up image file
-                    if os.path.exists(image_path):
-                        os.remove(image_path)
-                    failed_registrations.append({
-                        'row_number': row['row_number'],
-                        'name': row['full_name'],
-                        'title': row['title'],
-                        'registration_number': row['registration_number'],
-                        'error': 'Person already exists'
-                    })
-                    continue
-
-                # Add to FAISS database incrementally
-                faiss_success = face_recognizer.add_photo_to_database(person_id, image_path)
-                if not faiss_success:
-                    # FAISS add failed - rollback database and file
-                    db.delete_data_from_person(person_id)
-                    if os.path.exists(image_path):
-                        os.remove(image_path)
-                    failed_registrations.append({
-                        'row_number': row['row_number'],
-                        'name': row['full_name'],
-                        'title': row['title'],
-                        'registration_number': row['registration_number'],
-                        'error': 'Failed to add face to recognition database (no face detected or poor quality)'
-                    })
-                    continue
-
-                # Generate thumbnail immediately
-                generate_thumbnail(person_id)
-
-                successful_registrations.append({
-                    'row_number': row['row_number'],
-                    'person_id': person_id,
-                    'name': row['full_name'],
-                    'title': row['title'],
-                    'registration_number': row['registration_number'],
-                    'has_image': True
-                })
-
-            except Exception as e:
+            # Check if registration ID already exists
+            if db.check_registration_exists(row["registration_number"]):
                 failed_registrations.append({
                     'row_number': row['row_number'],
                     'name': row['full_name'],
-                    'title': row.get('title', ''),
-                    'registration_number': row.get('registration_number', ''),
-                    'error': str(e)
+                    'title': row['title'],
+                    'registration_number': row['registration_number'],
+                    'error': f'Registration ID "{row["registration_number"]}" already exists in database'
+                })
+                continue
+
+            # Check if image URL provided
+            if not row["image_url"]:
+                skipped_no_image.append({
+                    'row_number': row['row_number'],
+                    'name': row['full_name'],
+                    'title': row['title'],
+                    'registration_number': row['registration_number'],
+                    'error': 'No image URL provided'
+                })
+                continue
+
+            rows_to_download.append(row)
+
+        # Phase 2: Download all images concurrently (supports multiple photos per person!)
+        if rows_to_download:
+            # Count total images (including multiple photos per person)
+            total_images = sum(len(row.get("image_urls", [row["image_url"]])) for row in rows_to_download)
+            print(f"🚀 Downloading {total_images} images for {len(rows_to_download)} people concurrently...")
+
+            # Create download tasks for ALL images (including multiple per person)
+            download_tasks = []
+            task_metadata = []  # Track which person and photo number each task belongs to
+
+            for row in rows_to_download:
+                image_urls = row.get("image_urls", [row["image_url"]])
+                for photo_num, image_url in enumerate(image_urls, start=1):
+                    download_tasks.append(processor.download_image(image_url))
+                    # Store only hashable data (not the dict itself!)
+                    task_metadata.append((
+                        row['registration_number'],
+                        row['row_number'],
+                        row['full_name'],
+                        row['title'],
+                        photo_num
+                    ))
+
+            # Execute all downloads simultaneously
+            download_results = await asyncio.gather(*download_tasks, return_exceptions=True)
+
+            # Phase 3: Process downloaded images and save to disk (supports multiple photos!)
+            # Group results by person
+            person_photos = {}  # registration_number -> list of (photo_num, image_data)
+            person_info = {}    # registration_number -> (person_id, row_number, full_name, title)
+
+            for (reg_num, row_num, full_name, title, photo_num), download_result in zip(task_metadata, download_results):
+                # Generate or retrieve person_id
+                if reg_num not in person_info:
+                    person_id = str(uuid.uuid4())
+                    person_info[reg_num] = (person_id, row_num, full_name, title)
+                    person_photos[reg_num] = []
+                else:
+                    person_id = person_info[reg_num][0]
+
+                # Handle download result
+                if isinstance(download_result, Exception):
+                    print(f"⚠️ Photo {photo_num} download failed for {full_name}: {download_result}")
+                    continue
+
+                image_data, error = download_result
+                if error:
+                    print(f"⚠️ Photo {photo_num} error for {full_name}: {error}")
+                    continue
+
+                # Store successful download
+                person_photos[reg_num].append((photo_num, image_data))
+
+            # Process each person with their photos
+            for reg_num, photos in person_photos.items():
+                person_id, row_num, full_name, title = person_info[reg_num]
+
+                if not photos:
+                    # No successful downloads for this person
+                    failed_registrations.append({
+                        'row_number': row_num,
+                        'name': full_name,
+                        'title': title,
+                        'registration_number': reg_num,
+                        'error': 'All image downloads failed'
+                    })
+                    continue
+
+                photo_paths = []
+
+                try:
+                    # Insert person to database first
+                    db_result = db.insert_into_person(
+                        person_id,
+                        full_name,
+                        title,
+                        reg_num
+                    )
+
+                    if 'already exist' in db_result:
+                        failed_registrations.append({
+                            'row_number': row_num,
+                            'name': full_name,
+                            'title': title,
+                            'registration_number': reg_num,
+                            'error': 'Person already exists'
+                        })
+                        continue
+
+                    # Save all photos for this person
+                    os.makedirs('images', exist_ok=True)
+                    photo_paths = []
+
+                    for photo_num, image_data in photos:
+                        # Convert bytes to image
+                        image = Image.open(BytesIO(image_data))
+                        image_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+
+                        # Save with photo number for ensemble voting
+                        image_path = f'images/{person_id}%{photo_num}.png'
+                        cv2.imwrite(image_path, image_cv)
+                        photo_paths.append(image_path)
+
+                    # Add all photos to batch processing queue
+                    for image_path in photo_paths:
+                        persons_for_batch.append((person_id, image_path))
+
+                    # Store metadata once per person
+                    if person_id not in person_metadata:
+                        person_metadata[person_id] = {
+                            'row_number': row_num,
+                            'name': full_name,
+                            'title': title,
+                            'registration_number': reg_num,
+                            'photo_count': len(photo_paths)
+                        }
+
+                    print(f"✅ Prepared {len(photo_paths)} photo(s) for {full_name} (ensemble voting)")
+
+                except Exception as e:
+                    # Rollback on error
+                    if person_id:
+                        db.delete_data_from_person(person_id)
+                        for image_path in photo_paths:
+                            if os.path.exists(image_path):
+                                os.remove(image_path)
+
+                    failed_registrations.append({
+                        'row_number': row_num,
+                        'name': full_name,
+                        'title': title,
+                        'registration_number': reg_num,
+                        'error': f'Exception during processing: {str(e)}'
+                    })
+
+        # Phase 4: Batch process all face embeddings and add to FAISS
+        if persons_for_batch:
+            unique_people = len(set(pid for pid, _ in persons_for_batch))
+            print(f"🚀 Starting batch face registration for {len(persons_for_batch)} photos from {unique_people} people...")
+            batch_results = face_recognizer.add_photos_to_database_batch(persons_for_batch)
+
+            # Process batch results
+            for success_item in batch_results['successful']:
+                person_id = success_item['person_id']
+                metadata = person_metadata[person_id]
+
+                # Generate thumbnail
+                generate_thumbnail(person_id)
+
+                successful_registrations.append({
+                    'row_number': metadata['row_number'],
+                    'person_id': person_id,
+                    'name': metadata['name'],
+                    'title': metadata['title'],
+                    'registration_number': metadata['registration_number'],
+                    'has_image': True
+                })
+
+            # Handle batch failures - rollback DB and clean up files
+            for fail_item in batch_results['failed']:
+                person_id = fail_item['person_id']
+                metadata = person_metadata[person_id]
+                image_path = fail_item['image_path']
+
+                # Rollback: remove from database and delete image file
+                db.delete_data_from_person(person_id)
+                if os.path.exists(image_path):
+                    os.remove(image_path)
+
+                failed_registrations.append({
+                    'row_number': metadata['row_number'],
+                    'name': metadata['name'],
+                    'title': metadata['title'],
+                    'registration_number': metadata['registration_number'],
+                    'error': fail_item.get('error', 'Failed to add face to recognition database')
                 })
 
         # Close the aiohttp session
@@ -2320,13 +2556,33 @@ async def add_additional_photo(person_id: str, request: AdditionalPhotoUpload, a
                 'message': 'Multiple faces detected. Please use an image with only one face.'
             }
 
-        # Generate simple identifier for additional photos
-        existing_photos = [f for f in os.listdir('images') if f.startswith(f'{person_id}%') or f == f'{person_id}.png']
-        photo_number = len(existing_photos)
-
-        # Save additional photo with simple numbering
+        # Normalize existing photos to %N format if needed
         os.makedirs('images', exist_ok=True)
-        image_filename = f'{person_id}%{photo_number}.png'
+        legacy_photo = f'images/{person_id}.png'
+        if os.path.exists(legacy_photo):
+            # Rename legacy format to %1 format for consistency
+            new_name = f'images/{person_id}%1.png'
+            if not os.path.exists(new_name):  # Safety check
+                os.rename(legacy_photo, new_name)
+                print(f"Normalized legacy photo: {person_id}.png → {person_id}%1.png")
+
+        # Find the highest numbered photo to determine next number
+        existing_photos = [f for f in os.listdir('images') if f.startswith(f'{person_id}%') and f.endswith('.png')]
+        if existing_photos:
+            # Extract numbers from filenames like "person_id%2.png"
+            numbers = []
+            for photo in existing_photos:
+                try:
+                    num = int(photo.split('%')[1].replace('.png', ''))
+                    numbers.append(num)
+                except:
+                    pass
+            next_number = max(numbers) + 1 if numbers else 1
+        else:
+            next_number = 1
+
+        # Save additional photo with proper numbering
+        image_filename = f'{person_id}%{next_number}.png'
         image_path = f'images/{image_filename}'
         cv2.imwrite(image_path, image_cv)
 
@@ -2348,7 +2604,7 @@ async def add_additional_photo(person_id: str, request: AdditionalPhotoUpload, a
             'success': True,
             'message': 'Additional photo added successfully',
             'person_id': person_id,
-            'total_photos': photo_number + 1
+            'total_photos': next_number
         }
 
     except Exception as e:
@@ -2357,52 +2613,217 @@ async def add_additional_photo(person_id: str, request: AdditionalPhotoUpload, a
             'message': f'Failed to add additional photo: {str(e)}'
         }
 
+@app.get("/api/people/{person_id}/photos")
+async def get_person_photos(person_id: str, admin_id: str = Depends(get_current_admin)):
+    """Get all photo URLs for a specific person"""
+    try:
+        # Verify person exists
+        person_name = db.get_person_name(person_id)
+        if not person_name:
+            return {
+                'success': False,
+                'message': 'Person not found'
+            }
+
+        # Collect all photo files for this person
+        photos = []
+        if os.path.exists('images'):
+            for filename in os.listdir('images'):
+                # Match both formats: person_id.png (legacy) and person_id%N.png (multi-photo)
+                if (filename.startswith(f'{person_id}.png') or filename.startswith(f'{person_id}%')) and filename.endswith('.png'):
+                    photo_path = f'images/{filename}'
+                    if os.path.exists(photo_path):
+                        file_mtime = int(os.path.getmtime(photo_path))
+                        # Extract photo number for sorting
+                        if '%' in filename:
+                            try:
+                                photo_number = int(filename.split('%')[1].replace('.png', ''))
+                            except:
+                                photo_number = 0
+                        else:
+                            photo_number = 1  # Legacy format is treated as photo #1
+
+                        photos.append({
+                            'filename': filename,
+                            'url': f'/api/people/{person_id}/photo/{filename}?t={file_mtime}',
+                            'photo_number': photo_number,
+                            'is_primary': filename == f'{person_id}.png' or filename == f'{person_id}%1.png'
+                        })
+
+        # Sort photos by number
+        photos.sort(key=lambda x: x['photo_number'])
+
+        return {
+            'success': True,
+            'person_id': person_id,
+            'person_name': person_name,
+            'photos': photos,
+            'total': len(photos)
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/people/{person_id}/photo/{filename}")
+async def get_person_photo_file(person_id: str, filename: str, admin_id: str = Depends(get_current_admin)):
+    """Serve a specific photo file for a person"""
+    try:
+        # Security: Verify the filename belongs to this person
+        if not (filename.startswith(f'{person_id}.png') or filename.startswith(f'{person_id}%')):
+            raise HTTPException(status_code=403, detail="Unauthorized access to photo")
+
+        # Security: Prevent directory traversal
+        if '..' in filename or '/' in filename:
+            raise HTTPException(status_code=403, detail="Invalid filename")
+
+        photo_path = f'images/{filename}'
+        if not os.path.exists(photo_path):
+            raise HTTPException(status_code=404, detail="Photo not found")
+
+        return FileResponse(photo_path, media_type="image/png")
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/people/{person_id}/photos/{filename}")
+async def delete_person_photo(person_id: str, filename: str, admin_id: str = Depends(get_current_admin)):
+    """Delete a specific photo for a person and refresh FAISS database"""
+    try:
+        # Verify person exists
+        person_name = db.get_person_name(person_id)
+        if not person_name:
+            return {
+                'success': False,
+                'message': 'Person not found'
+            }
+
+        # Security: Verify the filename belongs to this person
+        if not (filename.startswith(f'{person_id}.png') or filename.startswith(f'{person_id}%')):
+            return {
+                'success': False,
+                'message': 'Unauthorized: Photo does not belong to this person'
+            }
+
+        # Security: Prevent directory traversal
+        if '..' in filename or '/' in filename:
+            return {
+                'success': False,
+                'message': 'Invalid filename'
+            }
+
+        # Check if photo exists
+        photo_path = f'images/{filename}'
+        if not os.path.exists(photo_path):
+            return {
+                'success': False,
+                'message': 'Photo not found'
+            }
+
+        # Prevent deletion of primary photo (first uploaded photo)
+        # Primary photo is either person_id.png or person_id%1.png
+        is_primary = filename == f'{person_id}.png' or filename == f'{person_id}%1.png'
+        if is_primary:
+            return {
+                'success': False,
+                'message': 'Cannot delete the primary photo. Each person must have at least one recognizable photo.'
+            }
+
+        # Count total photos before deletion
+        existing_photos = []
+        if os.path.exists('images'):
+            for f in os.listdir('images'):
+                if (f.startswith(f'{person_id}.png') or f.startswith(f'{person_id}%')) and f.endswith('.png'):
+                    existing_photos.append(f)
+
+        # Remove from FAISS database first (more efficient than rebuilding from disk)
+        try:
+            print(f"🗑️ Removing photo from FAISS database: {filename}")
+            faiss_removed = face_recognizer.remove_photo_from_database(person_id, filename)
+            if faiss_removed:
+                print(f"✅ Photo removed from FAISS database efficiently")
+            else:
+                print(f"⚠️ Photo not found in FAISS database (may have been out of sync)")
+        except Exception as e:
+            print(f"⚠️ Error removing from FAISS database: {e}")
+            # Continue with file deletion even if FAISS removal fails
+
+        # Delete the photo file from disk
+        try:
+            os.remove(photo_path)
+            print(f"✅ Deleted photo file: {filename}")
+        except Exception as e:
+            return {
+                'success': False,
+                'message': f'Failed to delete photo file: {str(e)}'
+            }
+
+        # Calculate remaining photos
+        remaining_photos = [f for f in existing_photos if f != filename]
+
+        return {
+            'success': True,
+            'message': 'Photo deleted successfully and FAISS database updated',
+            'person_id': person_id,
+            'deleted_photo': filename,
+            'remaining_photos': len(remaining_photos)
+        }
+
+    except Exception as e:
+        return {
+            'success': False,
+            'message': f'Failed to delete photo: {str(e)}'
+        }
+
 @app.delete("/api/people/{person_id}")
 async def delete_person(person_id: str, admin_id: str = Depends(get_current_admin)):
     """Delete a person and all their photos"""
     try:
-        # Delete from database first
-        result = db.delete_data_from_person(person_id)
-        if result:
-            # Delete all photo files for this person
-            deleted_photos = []
-            if os.path.exists('images'):
-                for filename in os.listdir('images'):
-                    if filename.startswith(f'{person_id}.png') or filename.startswith(f'{person_id}%'):
-                        file_path = os.path.join('images', filename)
-                        try:
-                            os.remove(file_path)
-                            deleted_photos.append(filename)
-                        except Exception as e:
-                            print(f"Error deleting photo {filename}: {e}")
+        # Verify person exists in database first
+        person_name = db.get_person_name(person_id)
+        if not person_name:
+            return {
+                'success': False,
+                'message': 'Person not found in database'
+            }
 
-            # Delete thumbnail if it exists
-            if os.path.exists('images/thumbnails'):
-                for filename in os.listdir('images/thumbnails'):
-                    if filename.startswith(f'{person_id}_'):
-                        thumbnail_path = os.path.join('images/thumbnails', filename)
-                        try:
-                            os.remove(thumbnail_path)
-                        except Exception as e:
-                            print(f"Error deleting thumbnail {filename}: {e}")
+        # Remove from FAISS database and delete image files
+        # (remove_person handles: image files, FAISS index, person mapping, cache)
+        try:
+            face_recognizer.remove_person(person_id)
+            faiss_message = ' and removed from recognition database'
+        except Exception as e:
+            print(f"⚠️ Error in remove_person: {e}")
+            import traceback
+            traceback.print_exc()
+            # Continue with deletion even if FAISS removal fails
+            faiss_message = ' (warning: FAISS removal had issues)'
 
-            # Efficiently remove from FAISS database without full rebuild
-            try:
-                faiss_removed = face_recognizer.remove_person(person_id)
-                faiss_message = ' and removed from recognition database'
-            except Exception as e:
-                print(f"⚠️ Error in remove_person: {e}")
-                import traceback
-                traceback.print_exc()
-                # Don't fail the whole deletion if FAISS removal fails
-                faiss_removed = False
-                faiss_message = ' (warning: FAISS removal had issues, but person deleted)'
+        # Delete thumbnails (not handled by remove_person)
+        deleted_thumbnails = 0
+        if os.path.exists('images/thumbnails'):
+            for filename in os.listdir('images/thumbnails'):
+                if filename.startswith(f'{person_id}_'):
+                    thumbnail_path = os.path.join('images/thumbnails', filename)
+                    try:
+                        os.remove(thumbnail_path)
+                        deleted_thumbnails += 1
+                    except Exception as e:
+                        print(f"⚠️ Error deleting thumbnail {filename}: {e}")
 
-            message = f'Person deleted successfully'
-            if deleted_photos:
-                message += f' (removed {len(deleted_photos)} photos)'
-            message += faiss_message  # Always add FAISS status (success or warning)
+        # Delete from attendance database
+        # Note: delete_data_from_person tries to delete the image file, but we already did that
+        # So we ignore its return value and verify deletion by checking if person still exists
+        try:
+            db.delete_data_from_person(person_id)
+        except Exception as e:
+            print(f"⚠️ Error deleting from database: {e}")
 
+        # Verify person was deleted by checking if they still exist
+        person_still_exists = db.get_person_name(person_id)
+        if not person_still_exists:
+            message = f'Person "{person_name}" deleted successfully{faiss_message}'
             return {
                 'success': True,
                 'message': message
@@ -2500,9 +2921,12 @@ async def delete_all_people(admin_id: str = Depends(get_current_admin)):
 async def get_person_image(person_id: str):
     """Get a person's thumbnail image - optimized for list views"""
     try:
+        # Support both single-photo and multi-photo formats
         image_path = f'images/{person_id}.png'
         if not os.path.exists(image_path):
-            raise HTTPException(status_code=404, detail="Person image not found")
+            image_path = f'images/{person_id}%1.png'
+            if not os.path.exists(image_path):
+                raise HTTPException(status_code=404, detail="Person image not found")
 
         # Fixed thumbnail size for consistency
         size = 150
@@ -2757,11 +3181,11 @@ async def get_mediapipe_presets(admin_id: str = Depends(get_current_admin)):
             },
             'large_groups': {
                 'name': '👥 Large Groups (5+ people)',
-                'description': 'Optimized for crowds and group detection with balanced performance',
+                'description': 'Optimized for crowds with batch processing - handles 20+ faces efficiently',
                 'settings': {
                     'detection_confidence': 0.25,  # Slightly higher for crowd stability
                     'tracking_confidence': 0.5,    # Balanced for multiple faces
-                    'max_faces': 20,               # Handle larger groups
+                    'max_faces': 20,               # Efficient with batch processing
                     'refine_landmarks': True,       # Keep quality landmarks
                     'unlimited_faces': False,
                     'recognition_threshold': 0.35   # Slightly lower for crowd flexibility

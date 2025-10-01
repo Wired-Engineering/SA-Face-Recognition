@@ -292,6 +292,16 @@ class ApiService {
     });
   }
 
+  async getPersonPhotos(personId) {
+    return this.request(`/api/people/${personId}/photos`);
+  }
+
+  async deletePersonPhoto(personId, filename) {
+    return this.request(`/api/people/${personId}/photos/${filename}`, {
+      method: 'DELETE',
+    });
+  }
+
   // Face recognition methods
   async detectFaces(imageData) {
     return this.request('/api/recognition/detect', {

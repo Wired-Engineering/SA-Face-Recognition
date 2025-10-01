@@ -23,6 +23,9 @@ import {
   Flex,
   Badge,
   FileInput,
+  SimpleGrid,
+  ActionIcon,
+  Tooltip,
 } from '@mantine/core';
 import {
   IconUser,
@@ -76,6 +79,31 @@ export function SettingsPage({ onSaveSettings }) {
   const [peopleLoading, setPeopleLoading] = useState(false);
   const [uploadingPhotos, setUploadingPhotos] = useState({});
   const [searchQuery, setSearchQuery] = useState('');
+
+  // Photo gallery expansion state
+  const [expandedPersonId, setExpandedPersonId] = useState(null);
+  const [personPhotos, setPersonPhotos] = useState({});
+  const [photosLoading, setPhotosLoading] = useState({});
+  const [deletingPhoto, setDeletingPhoto] = useState(null);
+
+  // Close expanded photos when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (event) => {
+      // Check if we have an expanded card and if click is outside all person cards
+      if (expandedPersonId) {
+        const clickedCard = event.target.closest('[data-person-card]');
+        // If clicked outside all cards, or clicked on a different card, close the expanded one
+        if (!clickedCard || clickedCard.getAttribute('data-person-id') !== expandedPersonId) {
+          setExpandedPersonId(null);
+        }
+      }
+    };
+
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, [expandedPersonId]);
 
   // Face detection settings state
   const [detectionSettings, setDetectionSettings] = useState({
@@ -768,6 +796,93 @@ export function SettingsPage({ onSaveSettings }) {
     }
   };
 
+  const handleTogglePhotos = async (person) => {
+    // If already expanded, collapse it
+    if (expandedPersonId === person.id) {
+      setExpandedPersonId(null);
+      return;
+    }
+
+    // Expand this person
+    setExpandedPersonId(person.id);
+
+    // If photos already loaded, don't fetch again
+    if (personPhotos[person.id]) {
+      return;
+    }
+
+    // Fetch photos
+    setPhotosLoading(prev => ({ ...prev, [person.id]: true }));
+
+    try {
+      const result = await apiService.getPersonPhotos(person.id);
+
+      if (result.success) {
+        // Fetch images with authentication and convert to blob URLs
+        const photosWithBlobUrls = await Promise.all(
+          (result.photos || []).map(async (photo) => {
+            const blobUrl = await apiService.fetchImageWithAuth(photo.url);
+            return {
+              ...photo,
+              blobUrl: blobUrl || photo.url
+            };
+          })
+        );
+        setPersonPhotos(prev => ({ ...prev, [person.id]: photosWithBlobUrls }));
+      } else {
+        setError(result.message || 'Failed to load photos');
+      }
+    } catch (error) {
+      setError('Failed to load photos: ' + error.message);
+      console.error('Load photos error:', error);
+    } finally {
+      setPhotosLoading(prev => ({ ...prev, [person.id]: false }));
+    }
+  };
+
+  const handleDeletePhoto = async (personId, filename) => {
+    if (!window.confirm(`Are you sure you want to delete this photo? This will update the FAISS database.`)) {
+      return;
+    }
+
+    setDeletingPhoto(filename);
+
+    try {
+      const result = await apiService.deletePersonPhoto(personId, filename);
+
+      if (result.success) {
+        setSuccess('Photo deleted successfully and FAISS database updated!');
+
+        // Refresh the photo gallery with blob URLs
+        const updatedResult = await apiService.getPersonPhotos(personId);
+        if (updatedResult.success) {
+          const photosWithBlobUrls = await Promise.all(
+            (updatedResult.photos || []).map(async (photo) => {
+              const blobUrl = await apiService.fetchImageWithAuth(photo.url);
+              return {
+                ...photo,
+                blobUrl: blobUrl || photo.url
+              };
+            })
+          );
+          setPersonPhotos(prev => ({ ...prev, [personId]: photosWithBlobUrls }));
+        }
+
+        // Refresh the people list to update photo count
+        await loadPeopleData();
+
+        setTimeout(() => setSuccess(''), 3000);
+      } else {
+        setError(result.message || 'Failed to delete photo');
+      }
+    } catch (error) {
+      setError('Failed to delete photo: ' + error.message);
+      console.error('Delete photo error:', error);
+    } finally {
+      setDeletingPhoto(null);
+    }
+  };
+
   return (
     <Box style={{ width: '100%', minHeight: '100%' }}>
       <Box style={{ padding: '24px' }}>
@@ -1457,7 +1572,13 @@ export function SettingsPage({ onSaveSettings }) {
                     return (
                       <Stack gap="xs">
                         {filteredPeople.map((person) => (
-                          <Card key={person.id} withBorder p="md">
+                          <Card
+                            key={person.id}
+                            withBorder
+                            p="md"
+                            data-person-card
+                            data-person-id={person.id}
+                          >
                             <Group justify="space-between" align="center">
                               <Group>
                                 {person.has_image ? (
@@ -1510,6 +1631,11 @@ export function SettingsPage({ onSaveSettings }) {
                                       variant="dark"
                                       color={person.total_photos > 1 ? "green" : "blue"}
                                       leftSection={<IconPhoto size={10} />}
+                                      style={{ cursor: 'pointer' }}
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        handleTogglePhotos(person);
+                                      }}
                                     >
                                       {person.total_photos} photo{person.total_photos !== 1 ? 's' : ''} {person.additional_photos_count > 0 && (
                                       <Badge
@@ -1521,13 +1647,11 @@ export function SettingsPage({ onSaveSettings }) {
                                       </Badge>
                                     )}
                                     </Badge>
-
-
                                   </Group>
                                 </Stack>
                               </Group>
 
-                              <Stack gap="xs">
+                              <Stack gap="xs" onClick={(e) => e.stopPropagation()}>
                                 {/* Add Photo Upload */}
                                 <FileInput
                                   placeholder="Add photo"
@@ -1571,6 +1695,85 @@ export function SettingsPage({ onSaveSettings }) {
                                 </Button>
                               </Stack>
                             </Group>
+
+                            {/* Expandable Photo Gallery */}
+                            {expandedPersonId === person.id && (
+                              <Box className="photo-gallery-content" mt="md" style={{ borderTop: '1px solid #dee2e6', paddingTop: '12px' }}>
+                                {photosLoading[person.id] ? (
+                                  <Box style={{ position: 'relative', minHeight: '100px' }}>
+                                    <LoadingOverlay visible={true} />
+                                  </Box>
+                                ) : personPhotos[person.id]?.length > 0 ? (
+                                  <Stack gap="xs">
+                                    <Text size="sm" fw={500}>All Photos:</Text>
+                                    <SimpleGrid cols={3} spacing="sm">
+                                      {personPhotos[person.id].map((photo) => (
+                                        <Box key={photo.filename} style={{ position: 'relative' }}>
+                                          <Box style={{
+                                            width: '100%',
+                                            height: '120px',
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            justifyContent: 'center',
+                                            backgroundColor: '#f8f9fa',
+                                            borderRadius: '4px',
+                                            overflow: 'hidden'
+                                          }}>
+                                            <Image
+                                              src={photo.blobUrl}
+                                              alt={`${person.name} - Photo ${photo.photo_number}`}
+                                              style={{
+                                                maxWidth: '100%',
+                                                maxHeight: '100%',
+                                                objectFit: 'contain'
+                                              }}
+                                            />
+                                          </Box>
+                                          {photo.is_primary && (
+                                            <Badge
+                                              size="xs"
+                                              color="blue"
+                                              variant="filled"
+                                              style={{
+                                                position: 'absolute',
+                                                top: '4px',
+                                                left: '4px'
+                                              }}
+                                            >
+                                              Primary
+                                            </Badge>
+                                          )}
+                                          <Group justify="space-between" mt={4}>
+                                            <Text size="xs" c="dimmed">
+                                              #{photo.photo_number}
+                                            </Text>
+                                            <Tooltip label={photo.is_primary ? "Cannot delete primary" : "Delete photo"}>
+                                              <ActionIcon
+                                                color="red"
+                                                variant="filled"
+                                                size="xs"
+                                                onClick={() => handleDeletePhoto(person.id, photo.filename)}
+                                                loading={deletingPhoto === photo.filename}
+                                                disabled={photo.is_primary || deletingPhoto !== null}
+                                              >
+                                                <IconTrash size={12} />
+                                              </ActionIcon>
+                                            </Tooltip>
+                                          </Group>
+                                        </Box>
+                                      ))}
+                                    </SimpleGrid>
+                                    <Text size="xs" c="dimmed" ta="center" mt="xs">
+                                      Primary photo cannot be deleted. Deleting a photo efficiently updates FAISS database.
+                                    </Text>
+                                  </Stack>
+                                ) : (
+                                  <Text c="dimmed" size="sm" ta="center" py="md">
+                                    No photos found
+                                  </Text>
+                                )}
+                              </Box>
+                            )}
                           </Card>
                         ))}
                       </Stack>

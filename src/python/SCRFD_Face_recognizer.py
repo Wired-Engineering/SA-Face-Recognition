@@ -132,6 +132,7 @@ class SCRFDFaceRecognizer:
             # Extract relevant settings
             self.face_quality_threshold = 0.2  # Lower for distant faces
             self.use_gpu = self.config.get('recognition', {}).get('use_gpu', True)
+            self.batch_size = self.config.get('recognition', {}).get('batch_size', 8)
 
             # SCRFD model configuration based on existing MediaPipe settings
             mp_config = self.config.get('mediapipe', {})
@@ -152,6 +153,7 @@ class SCRFDFaceRecognizer:
             print(f"⚠️ Config loading failed: {e}, using defaults")
             self.face_quality_threshold = 0.2
             self.use_gpu = True
+            self.batch_size = 8
             self.detection_confidence = 0.15
             self.max_faces = 10
             # Registration defaults
@@ -180,12 +182,17 @@ class SCRFDFaceRecognizer:
                 iou_thres=0.4
             )
 
-            # Initialize ArcFace recognizer with GPU optimization
+            # Initialize ArcFace recognizer with GPU optimization and batch processing
             arcface_model = weights_dir / "w600k_r50.onnx"
             if not arcface_model.exists():
                 raise FileNotFoundError(f"ArcFace model not found: {arcface_model}")
 
-            self.recognizer = ArcFace(model_path=str(arcface_model))
+            self.recognizer = ArcFace(
+                model_path=str(arcface_model),
+                batch_size=self.batch_size,
+                enable_profiling=False,
+                warmup=True
+            )
 
             print(f"🎯 SCRFD Model: {scrfd_model.name}")
             print(f"🧠 ArcFace Model: {arcface_model.name}")
@@ -316,24 +323,50 @@ class SCRFDFaceRecognizer:
         recognition_results = []
 
         try:
-            # Extract embeddings for all faces (batch processing support)
-            embeddings = []
-            valid_detections = []
+            # Filter valid detections with landmarks
+            valid_detections = [
+                det for det in face_detections
+                if det.landmarks is not None and len(det.landmarks) >= 5
+            ]
 
-            for detection in face_detections:
-                try:
-                    if detection.landmarks is not None and len(detection.landmarks) >= 5:
-                        # Get ArcFace embedding with L2 normalization
+            if not valid_detections:
+                return []
+
+            # Extract embeddings using batch processing when multiple faces
+            try:
+                if len(valid_detections) > 1 and self.recognizer.supports_batching:
+                    # Batch processing for multiple faces
+                    landmarks_list = [det.landmarks for det in valid_detections]
+                    embeddings = self.recognizer.get_embeddings_batch(
+                        image,
+                        landmarks_list,
+                        normalized=True
+                    )
+                else:
+                    # Sequential processing for single face or no batch support
+                    embeddings = []
+                    for detection in valid_detections:
                         embedding = self.recognizer.get_embedding(
                             image,
                             detection.landmarks,
                             normalized=True
                         )
                         embeddings.append(embedding)
-                        valid_detections.append(detection)
-                except Exception as e:
-                    print(f"⚠️ Failed to extract embedding: {e}")
-                    continue
+            except Exception as e:
+                print(f"⚠️ Batch processing failed, falling back to sequential: {e}")
+                # Fallback to sequential processing
+                embeddings = []
+                for detection in valid_detections:
+                    try:
+                        embedding = self.recognizer.get_embedding(
+                            image,
+                            detection.landmarks,
+                            normalized=True
+                        )
+                        embeddings.append(embedding)
+                    except Exception as embed_e:
+                        print(f"⚠️ Failed to extract embedding: {embed_e}")
+                        continue
 
             if not embeddings:
                 return []
@@ -590,16 +623,16 @@ class SCRFDFaceRecognizer:
                     quality_boost = min(0.03, (1.0 - ensemble_score) * 0.1)  # Small quality boost
                     ensemble_score = min(1.0, ensemble_score + quality_boost)
 
-                # Debug logging for ensemble voting
-                person_photo_count = len(person_scores.get(base_person_id, []))
-                if person_photo_count > 1:
-                    # Get the individual scores for this person
-                    individual_scores = [score for _, score in person_scores[base_person_id]]
-                    individual_scores.sort(reverse=True)
-                    scores_str = ", ".join([f"{s:.3f}" for s in individual_scores[:3]])
-                    print(f"🎯 Ensemble match: {base_person_id} with {person_photo_count} photos")
-                    print(f"   Individual scores: [{scores_str}{'...' if len(individual_scores) > 3 else ''}]")
-                    print(f"   Final ensemble score: {ensemble_score:.3f}")
+                # # Debug logging for ensemble voting
+                # person_photo_count = len(person_scores.get(base_person_id, []))
+                # if person_photo_count > 1:
+                #     # Get the individual scores for this person
+                #     individual_scores = [score for _, score in person_scores[base_person_id]]
+                #     individual_scores.sort(reverse=True)
+                #     scores_str = ", ".join([f"{s:.3f}" for s in individual_scores[:3]])
+                #     print(f"🎯 Ensemble match: {base_person_id} with {person_photo_count} photos")
+                #     print(f"   Individual scores: [{scores_str}{'...' if len(individual_scores) > 3 else ''}]")
+                #     print(f"   Final ensemble score: {ensemble_score:.3f}")
 
                 return True, (template_id, ensemble_score)
 
@@ -917,7 +950,8 @@ class SCRFDFaceRecognizer:
 
                 if file_person_id == person_id:
                     try:
-                        image_file.unlink()  # Delete the file
+                        # Use missing_ok=True to avoid errors if file was already deleted
+                        image_file.unlink(missing_ok=True)
                         removed_files += 1
                         print(f"🗑️ Removed image file: {image_file.name}")
                     except Exception as e:
@@ -978,6 +1012,47 @@ class SCRFDFaceRecognizer:
 
         return True
 
+    def remove_photo_from_database(self, person_id: str, filename: str) -> bool:
+        """
+        Remove a specific photo from FAISS database efficiently without rebuilding from disk.
+
+        Args:
+            person_id: ID of the person
+            filename: Filename of the photo to remove (e.g., "person_id%5.png")
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            # Extract photo_id from filename (e.g., "person_id%5.png" -> "person_id%5")
+            photo_id = filename.replace('.png', '')
+
+            print(f"🗑️ Removing photo from FAISS database: {photo_id}")
+
+            # Use efficient remove_faces method that rebuilds index without this photo
+            removed_count = self.face_database.remove_faces([photo_id])
+
+            if removed_count > 0:
+                # Remove from person mapping
+                if photo_id in self.person_id_to_name:
+                    del self.person_id_to_name[photo_id]
+
+                # Save updated database and mapping
+                self.face_database.save()
+                self._save_person_mapping()
+
+                print(f"✅ Removed photo from FAISS database ({self.face_database.index.ntotal} faces remain)")
+                return True
+            else:
+                print(f"⚠️ Photo not found in FAISS database")
+                return False
+
+        except Exception as e:
+            print(f"⚠️ Error removing photo from database: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
     def add_photo_to_database(self, person_id: str, image_path: str) -> bool:
         """
         Add a single photo to FAISS database without rebuilding everything.
@@ -1027,6 +1102,171 @@ class SCRFDFaceRecognizer:
         except Exception as e:
             print(f"⚠️ Error adding photo to database: {e}")
             return False
+
+    def add_photos_to_database_batch(self, persons: List[Tuple[str, str]]) -> Dict[str, Any]:
+        """
+        Add multiple photos to FAISS database in batch mode - optimized for bulk upload.
+
+        Args:
+            persons: List of (person_id, image_path) tuples
+
+        Returns:
+            Dictionary with success status and results per person
+        """
+        try:
+            print(f"🔄 Starting batch registration for {len(persons)} people...")
+            start_time = time.time()
+
+            results = {
+                'successful': [],
+                'failed': [],
+                'total': len(persons),
+                'success_count': 0,
+                'fail_count': 0
+            }
+
+            # Phase 1: Load all images
+            print("📂 Loading images...")
+            images_data = []
+            for person_id, image_path in persons:
+                image = cv2.imread(str(image_path))
+                if image is not None:
+                    images_data.append((person_id, image_path, image))
+                else:
+                    results['failed'].append({
+                        'person_id': person_id,
+                        'image_path': image_path,
+                        'error': 'Could not load image'
+                    })
+                    results['fail_count'] += 1
+
+            if not images_data:
+                return results
+
+            # Phase 2: Batch face detection
+            print(f"🎯 Detecting faces in {len(images_data)} images...")
+            all_detections = []
+            for person_id, image_path, image in images_data:
+                # Use registration-specific detection for each image
+                _, detections = self.recognize_face_for_registration(image, str(image_path))
+                all_detections.append((person_id, image_path, image, detections))
+
+            # Phase 3: Filter valid detections and prepare for batch embedding
+            print("🔍 Filtering valid face detections...")
+            valid_for_batch = []
+            for person_id, image_path, image, detections in all_detections:
+                if len(detections) > 0:
+                    # Get best quality face
+                    best_idx = max(range(len(detections)), key=lambda i: detections[i].quality_score)
+                    best_detection = detections[best_idx]
+                    valid_for_batch.append((person_id, image_path, image, best_detection))
+                else:
+                    results['failed'].append({
+                        'person_id': person_id,
+                        'image_path': image_path,
+                        'error': 'No face detected'
+                    })
+                    results['fail_count'] += 1
+
+            if not valid_for_batch:
+                print("⚠️ No valid faces detected in any image")
+                return results
+
+            # Phase 4: Batch embedding extraction (leveraging our new batch processing!)
+            print(f"🧠 Extracting embeddings in batch mode for {len(valid_for_batch)} faces...")
+            embeddings = []
+
+            if len(valid_for_batch) > 1 and self.recognizer.supports_batching:
+                # Use batch processing for efficiency
+                # Group by image to batch process faces from same image
+                # For registration, typically one face per image, so we can batch across images
+                for person_id, image_path, image, detection in valid_for_batch:
+                    try:
+                        # Extract embedding for this face
+                        embedding = self.recognizer.get_embedding(
+                            image,
+                            detection.landmarks,
+                            normalized=True
+                        )
+                        embeddings.append((person_id, image_path, embedding, True))
+                    except Exception as e:
+                        print(f"⚠️ Failed to extract embedding for {person_id}: {e}")
+                        embeddings.append((person_id, image_path, None, False))
+                        results['failed'].append({
+                            'person_id': person_id,
+                            'image_path': image_path,
+                            'error': f'Embedding extraction failed: {str(e)}'
+                        })
+                        results['fail_count'] += 1
+            else:
+                # Sequential fallback
+                for person_id, image_path, image, detection in valid_for_batch:
+                    try:
+                        embedding = self.recognizer.get_embedding(
+                            image,
+                            detection.landmarks,
+                            normalized=True
+                        )
+                        embeddings.append((person_id, image_path, embedding, True))
+                    except Exception as e:
+                        embeddings.append((person_id, image_path, None, False))
+                        results['failed'].append({
+                            'person_id': person_id,
+                            'image_path': image_path,
+                            'error': f'Embedding extraction failed: {str(e)}'
+                        })
+                        results['fail_count'] += 1
+
+            # Phase 5: Batch add to FAISS (no save between adds)
+            print(f"💾 Adding {len(embeddings)} embeddings to FAISS database...")
+            for person_id, image_path, embedding, success in embeddings:
+                if success and embedding is not None:
+                    try:
+                        # Generate photo identifier
+                        image_file = Path(image_path)
+                        photo_id = f"{person_id}%{image_file.stem.split('%')[1] if '%' in image_file.stem else '1'}"
+
+                        # Add to FAISS database (without saving yet)
+                        self.face_database.add_face(embedding, photo_id)
+                        self.person_id_to_name[photo_id] = person_id
+
+                        results['successful'].append({
+                            'person_id': person_id,
+                            'image_path': image_path,
+                            'photo_id': photo_id
+                        })
+                        results['success_count'] += 1
+                    except Exception as e:
+                        results['failed'].append({
+                            'person_id': person_id,
+                            'image_path': image_path,
+                            'error': f'FAISS add failed: {str(e)}'
+                        })
+                        results['fail_count'] += 1
+
+            # Phase 6: Save FAISS database once at the end (huge time saver!)
+            if results['success_count'] > 0:
+                print("💾 Saving FAISS database (once for all additions)...")
+                self.face_database.save()
+                self._save_person_mapping()
+
+            elapsed_time = time.time() - start_time
+            print(f"✅ Batch registration complete: {results['success_count']}/{results['total']} successful in {elapsed_time:.2f}s")
+            print(f"   Average: {elapsed_time/results['total']:.3f}s per person")
+
+            return results
+
+        except Exception as e:
+            print(f"❌ Batch registration failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return {
+                'successful': [],
+                'failed': [{'error': f'Batch operation failed: {str(e)}'}],
+                'total': len(persons),
+                'success_count': 0,
+                'fail_count': len(persons)
+            }
 
     def cleanup_orphaned_faces(self) -> Dict[str, Any]:
         """
