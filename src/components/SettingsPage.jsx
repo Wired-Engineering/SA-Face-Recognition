@@ -68,6 +68,7 @@ export function SettingsPage({ onSaveSettings }) {
   const [backgroundImagePreview, setBackgroundImagePreview] = useState(null);
   const [fontFamily, setFontFamily] = useState('Inter');
   const [fontSize, setFontSize] = useState('medium');
+  const [bubbleSize, setBubbleSize] = useState('medium');
 
   // Camera settings state
   const [cameraDevices, setCameraDevices] = useState([]);
@@ -196,6 +197,7 @@ export function SettingsPage({ onSaveSettings }) {
           setUseBackgroundImage(displaySettings.use_background_image || false);
           setFontFamily(displaySettings.font_family || 'Inter');
           setFontSize(displaySettings.font_size || 'medium');
+          setBubbleSize(displaySettings.bubble_size || 'medium');
 
           // If there's a background image on the server, show the image URL
           if (displaySettings.has_background_image) {
@@ -409,6 +411,7 @@ export function SettingsPage({ onSaveSettings }) {
       backgroundImage: backgroundImagePreview,
       fontFamily,
       fontSize,
+      bubbleSize,
     };
 
     try {
@@ -421,7 +424,8 @@ export function SettingsPage({ onSaveSettings }) {
         useBackgroundImage,
         null, // Don't send image data
         fontFamily,
-        fontSize
+        fontSize,
+        bubbleSize
       );
 
       if (result.success) {
@@ -460,7 +464,8 @@ export function SettingsPage({ onSaveSettings }) {
       useBackgroundImage,
       backgroundImage: backgroundImagePreview,
       fontFamily,
-      fontSize
+      fontSize,
+      bubbleSize
     };
     testWelcomePopup(currentSettings);
     setTestPopupOpen(true);
@@ -490,7 +495,8 @@ export function SettingsPage({ onSaveSettings }) {
             useBackgroundImage: true,
             backgroundImage: result.image_url,
             fontFamily,
-            fontSize
+            fontSize,
+            bubbleSize
           };
           welcomePopupService.updateSettings(settings);
           welcomePopupService.sendSettingsUpdate();
@@ -523,7 +529,8 @@ export function SettingsPage({ onSaveSettings }) {
             useBackgroundImage: false,
             backgroundImage: null,
             fontFamily,
-            fontSize
+            fontSize,
+            bubbleSize
           };
           welcomePopupService.updateSettings(settings);
           welcomePopupService.sendSettingsUpdate();
@@ -1005,7 +1012,7 @@ export function SettingsPage({ onSaveSettings }) {
 
               <NumberInput
                 label="Circle Persistence Timer (seconds)"
-                description="How long name circles remain visible after person leaves detection frame"
+                description="How long name circles remain on the welcome screen after person leaves detection frame"
                 placeholder="Enter timer value"
                 value={displayTimer}
                 onChange={setDisplayTimer}
@@ -1160,7 +1167,39 @@ export function SettingsPage({ onSaveSettings }) {
                 </Box>
               </Group>
 
-              <Divider my="sm" label="Font Settings" labelPosition="left" />
+              <Divider my="sm" label="Bubble & Text Settings" labelPosition="left" />
+
+              <Group grow>
+                <Select
+                  label="Bubble Size"
+                  placeholder="Choose bubble size"
+                  description="Overall size of name bubbles (text scales proportionally)"
+                  value={bubbleSize}
+                  onChange={setBubbleSize}
+                  data={[
+                    { value: 'small', label: 'Small (Compact)' },
+                    { value: 'medium', label: 'Medium (Standard)' },
+                    { value: 'large', label: 'Large (Prominent)' },
+                    { value: 'xlarge', label: 'Extra Large (Bold)' }
+                  ]}
+                  leftSection={<IconPhoto size={16} />}
+                />
+
+                <Select
+                  label="Text Size"
+                  placeholder="Choose text size"
+                  description="Text size within bubbles (scales with bubble size)"
+                  value={fontSize}
+                  onChange={setFontSize}
+                  data={[
+                    { value: 'small', label: 'Small (Compact)' },
+                    { value: 'medium', label: 'Medium (Standard)' },
+                    { value: 'large', label: 'Large (Prominent)' },
+                    { value: 'xlarge', label: 'Extra Large (Bold)' }
+                  ]}
+                  leftSection={<IconPhoto size={16} />}
+                />
+              </Group>
 
               <Group grow>
                 <Select
@@ -1198,20 +1237,6 @@ export function SettingsPage({ onSaveSettings }) {
                       {option.label}
                     </div>
                   )}
-                  leftSection={<IconPhoto size={16} />}
-                />
-
-                <Select
-                  label="Font Size"
-                  placeholder="Choose size"
-                  value={fontSize}
-                  onChange={setFontSize}
-                  data={[
-                    { value: 'small', label: 'Small (Compact)' },
-                    { value: 'medium', label: 'Medium (Standard)' },
-                    { value: 'large', label: 'Large (Prominent)' },
-                    { value: 'xlarge', label: 'Extra Large (Bold)' }
-                  ]}
                   leftSection={<IconPhoto size={16} />}
                 />
               </Group>

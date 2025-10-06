@@ -70,6 +70,7 @@ PUBLIC_ENDPOINTS = {
 # This allows browser <img> tags to load images without auth headers
 PUBLIC_IMAGE_PATTERNS = [
     "/api/display/background-image",  # Background image
+    "/api/rtsp/stream-with-overlay",  # RTSP MJPEG stream
 ]
 
 def is_image_endpoint(path: str) -> bool:
@@ -153,6 +154,7 @@ async def authenticate_requests(request: Request, call_next):
 
     # Skip authentication for public endpoints
     if path in PUBLIC_ENDPOINTS or path.startswith("/api/docs") or path.startswith("/static"):
+        print(f"✅ Skipping auth for public endpoint: {path}")
         response = await call_next(request)
         return response
 
@@ -165,7 +167,7 @@ async def authenticate_requests(request: Request, call_next):
     auth_header = request.headers.get("authorization")
     if not auth_header:
         # Note: In React dev mode (Strict Mode), effects run twice - this may cause duplicate requests
-        print(f"⚠️  No auth header for {path} (may be React Strict Mode double-mount)")
+        print(f"⚠️  No auth header for {path} (PUBLIC_ENDPOINTS check: {path in PUBLIC_ENDPOINTS})")
         from fastapi.responses import JSONResponse
         return JSONResponse(
             status_code=401,
@@ -362,7 +364,7 @@ def should_broadcast_recognition(person_name: str, current_time: float, cooldown
     if should_broadcast:
         last_detected_name = person_name
         last_recognition_time = current_time
-        print(f"🎯 Broadcasting recognition for {person_name} (time since last: {time_since_last:.1f}s)")
+       # print(f"🎯 Broadcasting recognition for {person_name} (time since last: {time_since_last:.1f}s)")
 
         # Signal SSE clients of recognition change
         signal_recognition_change()
@@ -789,7 +791,8 @@ async def register_welcome_screen(sid, data):
             'cloud_color': display_config.get('cloud_color', '#4ECDC4'),
             'use_background_image': display_config.get('use_background_image', False),
             'font_family': display_config.get('font_family', 'Inter'),
-            'font_size': display_config.get('font_size', 'medium')
+            'font_size': display_config.get('font_size', 'medium'),
+            'bubble_size': display_config.get('bubble_size', 'medium')
         }
 
         print(f"📋 Sending current display settings to welcome screen {sid}")
@@ -1248,16 +1251,26 @@ async def process_rtsp_with_ffmpeg_overlay(rtsp_url, output_queue, stop_event):
         frame_count = 0
         detection_results_cache = []
         pending_futures = {}  # Track pending detection tasks
+        consecutive_failures = 0
+        max_consecutive_failures = 100  # Exit after 100 consecutive frame read failures
 
         # Keep detection running as long as it's marked active
         while not stop_event.is_set() and get_independent_detection_active():
             # Read frame in thread to avoid blocking
             ret, frame = await loop.run_in_executor(None, cap.read)
             if not ret:
-                print("⚠️ Failed to read frame from RTSP stream")
-                await asyncio.sleep(0.01)  # Reduced delay
+                consecutive_failures += 1
+                print(f"⚠️ Failed to read frame from RTSP stream (attempt {consecutive_failures}/{max_consecutive_failures})")
+
+                if consecutive_failures >= max_consecutive_failures:
+                    print(f"❌ Too many consecutive failures ({consecutive_failures}), stopping RTSP stream")
+                    break
+
+                await asyncio.sleep(0.1)  # Wait longer between retries
                 continue
 
+            # Reset failure counter on successful read
+            consecutive_failures = 0
             frame_count += 1
 
             # Process every 2nd frame for better performance while maintaining responsiveness
@@ -1451,6 +1464,7 @@ class DisplaySettings(BaseModel):
     background_image: Optional[str] = None
     font_family: Optional[str] = "Inter"
     font_size: Optional[str] = "medium"
+    bubble_size: Optional[str] = "medium"
 
 class DetectionSettings(BaseModel):
     detection_confidence: Optional[float] = 0.5
@@ -2896,7 +2910,8 @@ async def get_display_settings():
             'has_background_image': bool(display_config.get('background_image') and
                                        os.path.exists(display_config.get('background_image', ''))),
             'font_family': display_config.get('font_family', 'Inter'),
-            'font_size': display_config.get('font_size', 'medium')
+            'font_size': display_config.get('font_size', 'medium'),
+            'bubble_size': display_config.get('bubble_size', 'medium')
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -2913,7 +2928,8 @@ async def update_display_settings(request: DisplaySettings, admin_id: str = Depe
             use_background_image=request.use_background_image,
             background_image=request.background_image,
             font_family=request.font_family,
-            font_size=request.font_size
+            font_size=request.font_size,
+            bubble_size=request.bubble_size
         )
 
         if success:
@@ -2926,7 +2942,8 @@ async def update_display_settings(request: DisplaySettings, admin_id: str = Depe
                     'cloud_color': request.cloud_color,
                     'use_background_image': request.use_background_image,
                     'font_family': request.font_family,
-                    'font_size': request.font_size
+                    'font_size': request.font_size,
+                    'bubble_size': request.bubble_size
                 }
 
                 print(f"📋 Broadcasting updated display settings to {len(welcome_screens)} welcome screens")
@@ -3235,6 +3252,12 @@ async def rtsp_stream_with_overlay(request: Request):
 
     rtsp_url = camera_config['rtsp_url']
 
+    # Automatically start detection if not already active
+    if not get_independent_detection_active():
+        print(f"🎯 Auto-starting detection for RTSP stream")
+        set_independent_detection_active(True, owner_sid="rtsp_stream")
+        face_recognizer.start_detection()
+
     # Create unique stream ID for this request
     stream_id = f"ffmpeg_{id(request)}"
     ffmpeg_streams[stream_id] = True
@@ -3250,12 +3273,28 @@ async def rtsp_stream_with_overlay(request: Request):
         process_rtsp_with_ffmpeg_overlay(rtsp_url, frame_queue, stop_event)
     )
 
+    # Wait for first frame to be available (with timeout)
+    print(f"⏳ Waiting for first frame from RTSP stream...")
+    frame_wait_start = time.time()
+    first_frame_timeout = 10  # seconds
+    while frame_queue.empty() and (time.time() - frame_wait_start) < first_frame_timeout:
+        await asyncio.sleep(0.1)
+
+    if frame_queue.empty():
+        stop_event.set()
+        if stream_id in ffmpeg_streams:
+            del ffmpeg_streams[stream_id]
+        print(f"❌ Timeout waiting for first frame from RTSP stream")
+        raise HTTPException(status_code=500, detail="RTSP stream failed to produce frames. Check camera connection and URL.")
+
+    print(f"✅ First frame received, starting stream...")
+
     def generate_frames():
         try:
             while ffmpeg_streams.get(stream_id, False) and get_independent_detection_active():
                 try:
                     # Get frame from queue with minimal timeout for responsiveness
-                    frame_data = frame_queue.get(timeout=0.01)
+                    frame_data = frame_queue.get(timeout=0.1)
 
                     # Yield frame in multipart format
                     yield (b'--frame\r\n'
@@ -3293,6 +3332,12 @@ async def webcam_stream_with_overlay(request: Request):
     if source not in ['webcam', 'device', 'default']:
         raise HTTPException(status_code=400, detail="Webcam, device, or default not configured as source")
 
+    # Automatically start detection if not already active
+    if not get_independent_detection_active():
+        print(f"🎯 Auto-starting detection for webcam stream")
+        set_independent_detection_active(True, owner_sid="webcam_stream")
+        face_recognizer.start_detection()
+
     # Create queue for frames
     frame_queue = queue.Queue(maxsize=10)
 
@@ -3305,12 +3350,27 @@ async def webcam_stream_with_overlay(request: Request):
         process_webcam_with_overlay(frame_queue, stream_id)
     )
 
+    # Wait for first frame to be available (with timeout)
+    print(f"⏳ Waiting for first frame from webcam...")
+    frame_wait_start = time.time()
+    first_frame_timeout = 5  # seconds (shorter for webcam)
+    while frame_queue.empty() and (time.time() - frame_wait_start) < first_frame_timeout:
+        await asyncio.sleep(0.1)
+
+    if frame_queue.empty():
+        if stream_id in webcam_streams:
+            del webcam_streams[stream_id]
+        print(f"❌ Timeout waiting for first frame from webcam")
+        raise HTTPException(status_code=500, detail="Webcam failed to produce frames. Check camera permissions and availability.")
+
+    print(f"✅ First frame received, starting stream...")
+
     def generate_frames():
         try:
             while webcam_streams.get(stream_id, False) and get_independent_detection_active():
                 try:
                     # Get frame from queue with minimal timeout
-                    frame_data = frame_queue.get(timeout=0.01)
+                    frame_data = frame_queue.get(timeout=0.1)
 
                     # Yield frame in multipart format
                     yield (b'--frame\r\n'
@@ -3397,15 +3457,25 @@ async def process_webcam_with_overlay(output_queue, stream_id):
 
         detection_results_cache = []
         frame_count = 0
+        consecutive_failures = 0
+        max_consecutive_failures = 100  # Exit after 100 consecutive frame read failures
 
         while webcam_streams.get(stream_id, False) and get_independent_detection_active():
             # Read frame in thread to avoid blocking
             ret, frame = await loop.run_in_executor(None, cap.read)
             if not ret:
-                # Only sleep on failure
-                await asyncio.sleep(0.01)
+                consecutive_failures += 1
+                print(f"⚠️ Failed to read frame from webcam (attempt {consecutive_failures}/{max_consecutive_failures})")
+
+                if consecutive_failures >= max_consecutive_failures:
+                    print(f"❌ Too many consecutive failures ({consecutive_failures}), stopping webcam stream")
+                    break
+
+                await asyncio.sleep(0.1)  # Wait longer between retries
                 continue
 
+            # Reset failure counter on successful read
+            consecutive_failures = 0
             frame_count += 1
 
             try:

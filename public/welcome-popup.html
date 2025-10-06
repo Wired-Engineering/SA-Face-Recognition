@@ -278,6 +278,7 @@
                 this.fadeOut = false;
                 this.alpha = 1;
                 this.fontSize = settings.fontSize || 'medium';
+                this.bubbleSize = settings.bubbleSize || 'medium';
                 this.circleImage = circleImage; // Store the SVG image
 
                 // Calculate text dimensions and circle size
@@ -311,12 +312,21 @@
                     xlarge: { name: 30, title: 22 }
                 };
 
+                // Bubble size multipliers for font scaling
+                const bubbleSizeMultipliers = {
+                    small: 0.75,
+                    medium: 1.0,
+                    large: 1.3,
+                    xlarge: 1.6
+                };
+
                 const baseSize = baseFontSizes[this.fontSize] || baseFontSizes.medium;
+                const bubbleMultiplier = bubbleSizeMultipliers[this.bubbleSize] || 1.0;
                 const fontFamily = this.settings.fontFamily || 'Inter';
 
-                // Set font sizes
-                this.nameFontSize = baseSize.name;
-                this.titleFontSize = baseSize.title;
+                // Set font sizes with bubble size scaling
+                this.nameFontSize = Math.round(baseSize.name * bubbleMultiplier);
+                this.titleFontSize = Math.round(baseSize.title * bubbleMultiplier);
 
                 // Measure actual text dimensions
                 this.ctx.save();
@@ -348,7 +358,16 @@
                 // Calculate the diagonal of the text box (ensures text always fits)
                 const textDiagonal = Math.sqrt(this.textWidth * this.textWidth + this.textHeight * this.textHeight);
 
-                // Base padding that scales with font size
+                // Bubble size multipliers for radius scaling
+                const bubbleSizeMultipliers = {
+                    small: 0.75,
+                    medium: 1.0,
+                    large: 1.3,
+                    xlarge: 1.6
+                };
+                const bubbleMultiplier = bubbleSizeMultipliers[this.bubbleSize] || 1.0;
+
+                // Base padding that scales with font size (NOT bubble size - we'll scale everything at the end)
                 const paddingScale = {
                     small: 25,
                     medium: 30,
@@ -361,20 +380,22 @@
                 // Using diagonal/2 ensures even rotated text would fit
                 const baseRadius = (textDiagonal / 2) + padding;
 
-                // Set minimum and maximum radius bounds
+                // Set minimum and maximum radius bounds (NOT scaled - we'll scale the final radius)
                 const minRadius = 40; // Minimum circle size
                 const maxRadius = 150; // Maximum circle size to prevent huge bubbles
 
                 // Apply bounds
-                this.radius = Math.max(minRadius, Math.min(maxRadius, baseRadius));
+                let radius = Math.max(minRadius, Math.min(maxRadius, baseRadius));
 
-                // Add some randomness for variety (±10% only to maintain proportions)
-                const randomFactor = 0.9 + Math.random() * 0.2; // 0.9 to 1.1
-                this.radius *= randomFactor;
-                this.radius = Math.round(this.radius);
+                // Apply bubble size multiplier to the final radius
+                radius = Math.round(radius * bubbleMultiplier);
 
-                // Store a safe text area for fitting
-                this.safeTextRadius = this.radius - padding;
+                // Add some randomness for variety (±5% only to maintain proportions)
+                const randomFactor = 0.95 + Math.random() * 0.1; // 0.95 to 1.05
+                this.radius = Math.round(radius * randomFactor);
+
+                // Store a safe text area for fitting (also scaled by bubble size)
+                this.safeTextRadius = this.radius - Math.round(padding * bubbleMultiplier);
             }
 
             update() {
@@ -541,7 +562,8 @@
                     useBackgroundImage: false,
                     backgroundImage: null,
                     fontFamily: 'Inter',
-                    fontSize: 'medium'
+                    fontSize: 'medium',
+                    bubbleSize: 'medium'
                 };
                 this.isPersistent = false;
                 this.isKioskMode = false;
@@ -702,7 +724,8 @@
 
             processRecognitionQueue() {
                 const now = Date.now();
-                const queueTimeout = 3000; // 3 seconds - fade out after not detected
+                // Use timer from settings (convert seconds to milliseconds)
+                const queueTimeout = (this.settings.timer || 5) * 1000;
                 const displayDelay = 1000; // 1 second delay before showing circle (to accumulate multiple people)
 
                 // Clean up people who have left the frame
@@ -1049,6 +1072,9 @@
                 if (urlParams.has('fontSize')) {
                     this.settings.fontSize = urlParams.get('fontSize');
                 }
+                if (urlParams.has('bubbleSize')) {
+                    this.settings.bubbleSize = urlParams.get('bubbleSize');
+                }
 
                 // Fetch latest settings from the backend API
                 try {
@@ -1066,6 +1092,7 @@
                             this.settings.useBackgroundImage = data.use_background_image || false;
                             this.settings.fontFamily = data.font_family || this.settings.fontFamily;
                             this.settings.fontSize = data.font_size || this.settings.fontSize;
+                            this.settings.bubbleSize = data.bubble_size || this.settings.bubbleSize;
 
                             // If background image is enabled and exists on server, fetch it
                             if (data.use_background_image && data.has_background_image) {
@@ -1097,9 +1124,25 @@
                     if (event.origin !== window.location.origin) return;
 
                     if (event.data.type === 'settings_update') {
-                        this.settings = { ...this.settings, ...event.data.settings };
+                        // Check if bubble size or font size changed (requires circle recreation)
+                        const newSettings = event.data.settings;
+                        const bubbleSizeChanged = newSettings.bubbleSize && newSettings.bubbleSize !== this.settings.bubbleSize;
+                        const fontSizeChanged = newSettings.fontSize && newSettings.fontSize !== this.settings.fontSize;
+
+                        this.settings = { ...this.settings, ...newSettings };
                         this.applySettings();
                         console.log('📝 Settings updated from parent window');
+
+                        // If bubble or font size changed, clear existing circles so they get recreated with new sizes
+                        if (bubbleSizeChanged || fontSizeChanged) {
+                            console.log('🔄 Bubble/font size changed - clearing circles for recreation');
+                            for (const [personId, circle] of this.circles) {
+                                if (circle.body) {
+                                    this.world.destroyBody(circle.body);
+                                }
+                            }
+                            this.circles.clear();
+                        }
                     } else if (event.data.type === 'enable_kiosk_mode') {
                         this.enableKioskMode();
                         console.log('🖥️ Kiosk mode enabled from parent window');
@@ -1360,9 +1403,25 @@
 
                     this.socket.on('display_settings_updated', (settings) => {
                         console.log('📋 Received updated display settings:', settings);
+
+                        // Check if bubble size or font size changed (requires circle recreation)
+                        const bubbleSizeChanged = settings.bubble_size && settings.bubble_size !== this.settings.bubbleSize;
+                        const fontSizeChanged = settings.font_size && settings.font_size !== this.settings.fontSize;
+
                         // Update current settings with new values
                         this.settings = { ...this.settings, ...settings };
                         this.applySettings();
+
+                        // If bubble or font size changed, clear existing circles so they get recreated with new sizes
+                        if (bubbleSizeChanged || fontSizeChanged) {
+                            console.log('🔄 Bubble/font size changed - clearing circles for recreation');
+                            for (const [personId, circle] of this.circles) {
+                                if (circle.body) {
+                                    this.world.destroyBody(circle.body);
+                                }
+                            }
+                            this.circles.clear();
+                        }
                     });
 
                     this.socket.on('connect_error', (error) => {

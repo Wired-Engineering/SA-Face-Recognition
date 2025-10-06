@@ -375,7 +375,7 @@ class ApiService {
     return this.request('/api/display/settings');
   }
 
-  async updateDisplaySettings(timer, backgroundColor, fontColor, cloudColor, useBackgroundImage, backgroundImage, fontFamily, fontSize) {
+  async updateDisplaySettings(timer, backgroundColor, fontColor, cloudColor, useBackgroundImage, backgroundImage, fontFamily, fontSize, bubbleSize) {
     return this.request('/api/display/settings', {
       method: 'POST',
       body: JSON.stringify({
@@ -387,6 +387,7 @@ class ApiService {
         background_image: backgroundImage,
         font_family: fontFamily,
         font_size: fontSize,
+        bubble_size: bubbleSize,
       }),
     });
   }

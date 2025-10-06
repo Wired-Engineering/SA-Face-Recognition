@@ -95,7 +95,7 @@ class ConfigManager:
 
     def set_display_config(self, timer: int = None, background_color: str = None, font_color: str = None,
                           cloud_color: str = None, use_background_image: bool = None, background_image: str = None,
-                          font_family: str = None, font_size: str = None) -> bool:
+                          font_family: str = None, font_size: str = None, bubble_size: str = None) -> bool:
         """Set display configuration"""
         display_config = self.get_display_config()
         if timer is not None:
@@ -114,6 +114,8 @@ class ConfigManager:
             display_config['font_family'] = font_family
         if font_size is not None:
             display_config['font_size'] = font_size
+        if bubble_size is not None:
+            display_config['bubble_size'] = bubble_size
         return self.update_section('display', display_config)
 
 
@@ -179,7 +181,8 @@ class ConfigManager:
                 'use_background_image': False,
                 'background_image': None,
                 'font_family': 'Inter',
-                'font_size': 'medium'
+                'font_size': 'medium',
+                'bubble_size': 'medium'
             },
             'recognition': {
                 'use_gpu': True,

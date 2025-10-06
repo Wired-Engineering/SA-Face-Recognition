@@ -53,10 +53,14 @@ def get_provider_options() -> Tuple[List[Tuple[str, Dict]], List[str]]:
         provider_names.append('ROCMExecutionProvider')
         logger.info("✓ ROCm AMD GPU acceleration enabled")
 
-    # CoreML (Apple Silicon) - minimal options for compatibility
+    # CoreML (Apple Silicon)
     if "CoreMLExecutionProvider" in available_providers:
-        # CoreML has limited configurable options, use defaults for best compatibility
-        providers_with_options.append(('CoreMLExecutionProvider', {}))
+        coreml_options = {
+            "MLComputeUnits": "ALL",
+            "ModelFormat": "MLProgram",
+            "EnableOnSubgraphs": 1,
+        }
+        providers_with_options.append(('CoreMLExecutionProvider', coreml_options))
         provider_names.append('CoreMLExecutionProvider')
         logger.info("✓ CoreML Apple Silicon acceleration enabled")
 
