@@ -46,8 +46,23 @@ FROM builder-base AS builder-cuda
 # OpenVINO builder - extends base
 FROM builder-base AS builder-openvino
 
-# ROCm builder - extends base
-FROM builder-base AS builder-rocm
+# ROCm builder - use ROCm complete base image
+FROM rocm/dev-ubuntu-24.04:7.0-complete AS builder-rocm
+
+# Install Python 3.12 (native to Ubuntu 24.04)
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    python3.12 \
+    python3.12-venv \
+    python3-pip \
+    && ln -sf /usr/bin/python3.12 /usr/bin/python3 \
+    && ln -sf /usr/bin/python3 /usr/bin/python \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set ROCm environment variables
+ENV ROCM_HOME=/opt/rocm \
+    LD_LIBRARY_PATH=/opt/rocm/lib:${LD_LIBRARY_PATH} \
+    PATH=/opt/rocm/bin:${PATH}
 
 # Select appropriate builder based on DEVICE arg
 FROM builder-${DEVICE} AS builder
@@ -77,8 +92,8 @@ RUN pip3 install --no-cache-dir --upgrade pip && \
 # Production stages - minimal runtime images for each device type
 # ============================================================================
 
-# CPU production - Ubuntu 24.04 with Python 3.12
-FROM ubuntu:24.04 AS prod-cpu
+# Base production stage with Python 3.12
+FROM ubuntu:24.04 AS prod-base
 
 # Install Python 3.12 (native to Ubuntu 24.04)
 RUN apt-get update && \
@@ -89,6 +104,9 @@ RUN apt-get update && \
     && ln -sf /usr/bin/python3.12 /usr/bin/python3 \
     && ln -sf /usr/bin/python3 /usr/bin/python \
     && rm -rf /var/lib/apt/lists/*
+
+# CPU production - extends base
+FROM prod-base AS prod-cpu
 
 # CUDA production - NVIDIA CUDA runtime (Ubuntu 24.04)
 # Note: cudnn-runtime base already includes libcudnn9-cuda-12
@@ -104,18 +122,8 @@ RUN apt-get update && \
     && ln -sf /usr/bin/python3 /usr/bin/python \
     && rm -rf /var/lib/apt/lists/*
 
-# OpenVINO production - Ubuntu 24.04 + Python 3.12 + Intel OpenCL runtime
-FROM ubuntu:24.04 AS prod-openvino
-
-# Install Python 3.12 (native to Ubuntu 24.04)
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-    python3.12 \
-    python3.12-venv \
-    python3-pip \
-    && ln -sf /usr/bin/python3.12 /usr/bin/python3 \
-    && ln -sf /usr/bin/python3 /usr/bin/python \
-    && rm -rf /var/lib/apt/lists/*
+# OpenVINO production - extends base + Intel OpenCL runtime
+FROM prod-base AS prod-openvino
 
 # Install Intel OpenCL runtime
 RUN apt-get update && \
@@ -131,10 +139,10 @@ RUN apt-get update && \
     && apt-get remove wget -yqq \
     && rm -rf /var/lib/apt/lists/*
 
-# ROCm production - ROCm 7.0 dev image
-FROM rocm/dev-ubuntu-24.04:7.0 AS prod-rocm
+# ROCm production - ROCm complete dev image (includes all runtime libraries)
+FROM rocm/dev-ubuntu-24.04:7.0-complete AS prod-rocm
 
-# Install Python 3.12 (native to Ubuntu 24.04)
+# Install Python 3.12
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     python3.12 \
@@ -143,6 +151,11 @@ RUN apt-get update && \
     && ln -sf /usr/bin/python3.12 /usr/bin/python3 \
     && ln -sf /usr/bin/python3 /usr/bin/python \
     && rm -rf /var/lib/apt/lists/*
+
+# Set ROCm environment variables
+ENV ROCM_HOME=/opt/rocm \
+    LD_LIBRARY_PATH=/opt/rocm/lib:${LD_LIBRARY_PATH} \
+    PATH=/opt/rocm/bin:${PATH}
 
 # ============================================================================
 # Final production stage - select based on DEVICE arg
@@ -171,10 +184,13 @@ WORKDIR /app
 COPY --from=builder /opt/venv /opt/venv
 
 # Set environment to use virtual environment
+# Preserve ROCm library paths if using ROCm device
 ENV VIRTUAL_ENV=/opt/venv \
     PATH="/opt/venv/bin:$PATH" \
     PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    LD_LIBRARY_PATH="/opt/rocm/lib:${LD_LIBRARY_PATH}" \
+    ROCM_HOME=/opt/rocm
 
 # Copy Python source code
 COPY src/python/ ./src/python/
