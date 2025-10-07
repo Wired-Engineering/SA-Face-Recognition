@@ -20,50 +20,6 @@ else
 fi
 echo ""
 
-# Database Migration Check
-echo "🗄️  Database Migration Check:"
-echo "============================"
-cd /app
-
-# Check if SQLite database exists and needs migration
-if [ -f "src/python/system/Attendance.db" ]; then
-    echo "📊 SQLite database found - checking for old schema..."
-
-    # Run schema migration (idempotent - safe to run multiple times)
-    if python migrate_schema.py <<EOF 2>&1
-yes
-EOF
-    then
-        echo "✅ Schema migration completed successfully"
-    else
-        echo "⚠️  Schema migration had warnings (this may be normal if already migrated)"
-    fi
-
-    # Check if PostgreSQL is configured for data migration
-    if [ -n "$DEV_DATABASE_URL" ] || [ -n "$DATABASE_URL" ]; then
-        DB_ENV_VAR="${DEV_DATABASE_URL:-$DATABASE_URL}"
-        echo "🔌 PostgreSQL URL detected - checking data migration..."
-
-        # Run data migration (skips duplicates, safe to run multiple times)
-        # Option 3 = drop SQLite FR_REGISTRATIONS table after migration
-        if python migrate_data_to_postgres.py <<EOF 2>&1
-yes
-3
-EOF
-        then
-            echo "✅ Database migration to PostgreSQL complete"
-        else
-            echo "⚠️  PostgreSQL migration failed - will use SQLite"
-            echo "   Application will continue to start..."
-        fi
-    else
-        echo "ℹ️  No PostgreSQL URL set - using SQLite only"
-    fi
-else
-    echo "ℹ️  No existing database - will be created on first run"
-fi
-echo ""
-
 # GPU Hardware Detection and Diagnostics
 echo "🔍 GPU Hardware Detection:"
 echo "=========================="

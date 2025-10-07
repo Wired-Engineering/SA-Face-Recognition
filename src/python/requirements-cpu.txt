@@ -2,4 +2,3 @@
 
 # CPU-optimized inference
 onnxruntime==1.20.1
-faiss-cpu==1.9.0

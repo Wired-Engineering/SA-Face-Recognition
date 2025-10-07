@@ -2,4 +2,3 @@
 
 # ROCm-accelerated inference (built for ROCm 7.0)
 https://repo.radeon.com/rocm/manylinux/rocm-rel-7.0/onnxruntime_rocm-1.22.1-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
-faiss-cpu==1.12.0

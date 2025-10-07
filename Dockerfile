@@ -195,9 +195,6 @@ ENV VIRTUAL_ENV=/opt/venv \
 # Copy Python source code
 COPY src/python/ ./src/python/
 
-# Copy migration scripts
-COPY migrate_schema.py migrate_data_to_postgres.py ./
-
 # Copy built frontend files to nginx
 COPY --from=build /app/dist /var/www/html
 

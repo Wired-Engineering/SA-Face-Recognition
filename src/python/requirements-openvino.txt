@@ -2,4 +2,3 @@
 
 # OpenVINO-accelerated inference
 onnxruntime-openvino==1.22.0
-faiss-cpu==1.12.0

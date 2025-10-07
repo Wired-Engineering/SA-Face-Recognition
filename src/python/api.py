@@ -1542,19 +1542,24 @@ async def change_admin_password(request: AdminPasswordChange, admin_id: str = De
 async def get_people(admin_id: str = Depends(get_current_admin)):
     """Get all registered people with complete information"""
     try:
-        person_ids = db.get_all_registration_ids()
+        person_ids = db.get_all_registration_ids_list()
         people = []
         skipped_count = 0
 
-        for idx, person_id in enumerate(person_ids):
-            person_name = db.get_person_name(person_id)
-            person_title = db.get_person_title(person_id)
-            person_registration = db.get_registration_id(person_id)
+        # Use batch lookup for better performance (single query instead of 3 per person)
+        person_data_batch = db.get_person_data_batch(person_ids)
 
-            # Skip people with missing names
-            if not person_name:
+        for idx, person_id in enumerate(person_ids):
+            person_data = person_data_batch.get(person_id)
+
+            # Skip people with missing data
+            if not person_data or not person_data.get('name'):
                 skipped_count += 1
                 continue
+
+            person_name = person_data['name']
+            person_title = person_data.get('title', '')
+            person_registration = person_data.get('registration_id', '')
 
             # Check if reference image exists (support both single and multi-photo formats)
             image_path = f'images/{person_id}.png'
@@ -1725,7 +1730,7 @@ async def get_test_cycle_stream():
             while True:
                 try:
                     # Get all people from database
-                    person_ids = db.get_all_registration_ids()
+                    person_ids = db.get_all_registration_ids_list()
                     all_people = []
 
                     for person_id in person_ids:
@@ -2327,7 +2332,7 @@ async def delete_person(person_id: str, admin_id: str = Depends(get_current_admi
 async def delete_all_people(admin_id: str = Depends(get_current_admin)):
     """Delete all people from the database"""
     try:
-        person_ids = db.get_all_registration_ids()
+        person_ids = db.get_all_registration_ids_list()
         deleted_count = 0
         failed_deletions = []
         deleted_photos = []

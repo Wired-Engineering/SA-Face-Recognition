@@ -2,4 +2,3 @@
 
 # CUDA-accelerated inference
 onnxruntime-gpu==1.23.0
-faiss-cpu==1.12.0
