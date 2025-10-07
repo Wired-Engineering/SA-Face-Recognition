@@ -30,10 +30,25 @@
             justify-content: center;
             padding: 40px;
             position: relative;
-            background-color: var(--bg-color, #E1EBFF);
+            background-size: contain;
+            background-position: center;
+            background-repeat: no-repeat;
+        }
+
+        /* Blurred background layer */
+        .welcome-container::before {
+            content: '';
+            position: absolute;
+            top: -40px;
+            left: -40px;
+            width: calc(100% + 80px);
+            height: calc(100% + 80px);
+            background-image: var(--bg-image, none);
             background-size: cover;
             background-position: center;
             background-repeat: no-repeat;
+            filter: blur(20px);
+            z-index: -1;
         }
 
         .connection-status {
@@ -1279,12 +1294,21 @@
 
                 if (this.settings.useBackgroundImage && this.settings.backgroundImage) {
                     // Use background image
+                    // Set the sharp image (contain) on the container
                     container.style.backgroundImage = `url(${this.settings.backgroundImage})`;
                     container.style.backgroundColor = 'transparent';
+                    // Set the blurred image (cover) via CSS variable for the ::before pseudo-element
+                    document.documentElement.style.setProperty('--bg-image', `url(${this.settings.backgroundImage})`);
+                    // Set body background to the chosen color (shows behind blurred layer)
+                    document.body.style.backgroundColor = this.settings.backgroundColor;
                 } else {
                     // Use solid color
                     container.style.backgroundImage = 'none';
                     container.style.backgroundColor = this.settings.backgroundColor;
+                    // Clear the blurred background
+                    document.documentElement.style.setProperty('--bg-image', 'none');
+                    // Set body background to match
+                    document.body.style.backgroundColor = this.settings.backgroundColor;
                 }
 
                 document.documentElement.style.setProperty('--bg-color', this.settings.backgroundColor);
