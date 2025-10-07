@@ -12,3 +12,5 @@ scikit-image
 onnx
 aiohttp
 sse-starlette
+psycopg2-binary  # PostgreSQL adapter for hybrid database setup
+python-dotenv  # Load .env files

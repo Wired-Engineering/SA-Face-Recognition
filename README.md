@@ -18,9 +18,9 @@ A face recognition application for welcoming guests into an area - built with Re
          │              └─────────────────┘              │
          │                                               │
     ┌─────────────┐                              ┌─────────────┐
-    │ Browser     │                              │ SQLite DB + │
-    │ WebCamera   │                              │ AI Models   │
-    │ Media API   │                              │ Face Data   │
+    │ Browser     │                              │ PostgreSQL/ │
+    │ WebCamera   │                              │  SQLite DB  │
+    │ Media API   │                              │ + AI Models │
     └─────────────┘                              └─────────────┘
 ```
 
@@ -43,13 +43,20 @@ A face recognition application for welcoming guests into an area - built with Re
 
 2. **Install Python dependencies (Linux/Mac)**
    ```bash
+   pip3 install -r src/python/requirements.txt
    cd src/python
-   pip3 install -r requirements.txt
    sh download_weights.sh
    cd ../..
    ```
 
-3. **Start all services**
+3. **Configure database (optional)**
+   ```bash
+   # For local development, SQLite is used by default (system/Attendance.db)
+   # For Replit/production, set DATABASE_URL environment variable
+   # See .env.example for configuration options
+   ```
+
+4. **Start all services**
    ```bash
    pnpm start
    ```
@@ -89,6 +96,73 @@ The system uses pre-trained ONNX models for optimal performance:
 Default admin: `admin` / `1234`
 
 ## 🔧 Configuration
+
+### Database Settings - Hybrid Architecture
+
+The system uses a **HYBRID** database setup for security and flexibility:
+
+**Database File**: `system/Attendance.db` (SQLite)
+
+**Tables**:
+| Table | Local (SQLite) | Cloud (PostgreSQL) | Contains |
+|-------|---------------|-------------------|----------|
+| **CREDENTIALS** | Always ✅ | Never ❌ | Admin login credentials |
+| **FR_REGISTRATIONS** | Default ✅ | Optional (when DATABASE_URL set) | Person registrations with ID, Name, Title, Registration_id |
+
+**Configuration**:
+- **Local Development**: Leave `DATABASE_URL` unset → all tables use SQLite
+- **Replit/Production**: Set `DATABASE_URL` → FR_REGISTRATIONS table moves to PostgreSQL
+- **Connection Pooling**: Enabled for PostgreSQL FR_REGISTRATIONS table (1-10 connections)
+- **Security**: Admin credentials never leave local machine
+
+See `.env.example` and `DATABASE_MIGRATION.md` for detailed configuration and migration guide.
+
+### Database Migration
+
+When migrating from SQLite-only to PostgreSQL, use these migration scripts:
+
+1. **Schema Migration** (migrate_schema.py)
+   ```bash
+   python migrate_schema.py
+   ```
+   - Renames old tables: ADMIN → CREDENTIALS, PERSON → FR_REGISTRATIONS
+   - Updates column: Registration → Registration_id
+   - Only needed if you have an old SQLite database
+   - Run this FIRST before data migration
+
+2. **Data Migration** (migrate_data_to_postgres.py)
+   ```bash
+   # Set your database URL in .env first
+   # DEV_DATABASE_URL=postgresql://username:password@localhost:5432/registrations_dev
+
+   python migrate_data_to_postgres.py
+   ```
+   - Copies all FR_REGISTRATIONS data from SQLite to PostgreSQL
+   - Detects and skips duplicate records
+   - Three cleanup options: keep as backup, clear data, or drop table
+   - Run this AFTER schema migration and setting DATABASE_URL
+
+**Migration Order**:
+1. Run `migrate_schema.py` (if you have old table names)
+2. Set `DEV_DATABASE_URL` or `DATABASE_URL` in `.env`
+3. Run `migrate_data_to_postgres.py` (to copy data to cloud)
+4. Start application: `pnpm start`
+
+**Automatic Migration in Docker**:
+- Docker containers automatically run migrations on startup
+- Schema migration (PERSON → FR_REGISTRATIONS) runs if old tables detected
+- Data migration to PostgreSQL runs if DEV_DATABASE_URL or DATABASE_URL is set
+- After successful PostgreSQL migration, SQLite FR_REGISTRATIONS table is dropped
+- Safe to restart containers - migrations are idempotent (skip duplicates)
+
+**Manual Migration in Docker** (if needed):
+```bash
+# Schema migration
+docker exec -it <container_name> python migrate_schema.py
+
+# Data migration
+docker exec -it <container_name> python migrate_data_to_postgres.py
+```
 
 ### Camera Settings
 - **Webcam**: Automatically detected via browser API
@@ -133,16 +207,53 @@ curl http://localhost:8000/api/system/health
 
 ## 🚀 Production Deployment
 
-1. **Build React app**
+### Replit Deployment
+
+1. **Create PostgreSQL database for FR_REGISTRATIONS table**
+   - Use Replit Database tool to create a PostgreSQL database
+   - Recommended name: `registrations`
+   - `DATABASE_URL` will be automatically set in environment variables
+   - This will store only the FR_REGISTRATIONS table
+
+3. **Build React app**
    ```bash
    pnpm build
    ```
 
-2. **Configure environment**
+4. **Configure environment**
    ```bash
    export NODE_ENV=production
    export PYTHON_ENV=production
+   # DATABASE_URL is automatically set by Replit
    ```
+
+5. **Database tables**
+   - FR_REGISTRATIONS table created automatically in PostgreSQL
+   - CREDENTIALS table remains in SQLite (`system/Attendance.db`)
+   - Default admin credentials: `admin` / `1234` (stored locally in SQLite)
+
+### Other Platforms
+
+1. **Set database credentials (optional)**
+   ```bash
+   # To use PostgreSQL for FR_REGISTRATIONS table:
+   export DATABASE_URL=postgresql://username:password@host:port/database
+
+   # Leave unset to use SQLite for all tables (local development)
+   ```
+
+2. **Install dependencies**
+   ```bash
+   pip3 install -r src/python/requirements.txt
+   pnpm install
+   ```
+
+3. **Start services**
+   ```bash
+   pnpm start
+   ```
+
+**Note**: SQLite database file (`system/Attendance.db`) is always required for the CREDENTIALS table, even when using PostgreSQL for FR_REGISTRATIONS table.
 
 ## 📝 License
 

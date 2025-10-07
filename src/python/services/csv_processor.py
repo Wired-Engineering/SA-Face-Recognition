@@ -416,7 +416,7 @@ async def process_csv_with_progress_streaming(
                     person_id = str(uuid.uuid4())
 
                     # Insert person to database
-                    db_result = database.insert_into_person(person_id, full_name, title, reg_num)
+                    db_result = database.insert_into_registrations(person_id, full_name, title, reg_num)
 
                     if 'already exist' in db_result:
                         failed_registrations.append({
@@ -457,7 +457,7 @@ async def process_csv_with_progress_streaming(
 
                 except Exception as e:
                     if person_id:
-                        database.delete_data_from_person(person_id)
+                        database.delete_registration(person_id)
                         for path in photo_paths:
                             if os.path.exists(path):
                                 os.remove(path)
@@ -507,7 +507,7 @@ async def process_csv_with_progress_streaming(
                 image_path = fail_item['image_path']
 
                 # Rollback
-                database.delete_data_from_person(person_id)
+                database.delete_registration(person_id)
                 if os.path.exists(image_path):
                     os.remove(image_path)
 

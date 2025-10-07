@@ -23,6 +23,14 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import quote, unquote
 
+# Load .env file for local development
+from dotenv import load_dotenv
+from pathlib import Path
+
+# Find .env file in project root (two levels up from this file)
+env_path = Path(__file__).parent.parent.parent / '.env'
+load_dotenv(dotenv_path=env_path)
+
 # SocketIO imports
 import socketio
 
@@ -962,7 +970,7 @@ def process_faces_unified(faces, frame_features, scale_x=1.0, scale_y=1.0, frame
                 person_data_cache[person_id] = {
                     'name': db.get_person_name(person_id),
                     'title': db.get_person_title(person_id),
-                    'registration': db.get_person_registration(person_id)
+                    'registration': db.get_registration_id(person_id)
                 }
             except Exception:
                 person_data_cache[person_id] = {'name': 'Unknown', 'title': '', 'registration': 'N/A'}
@@ -1534,14 +1542,14 @@ async def change_admin_password(request: AdminPasswordChange, admin_id: str = De
 async def get_people(admin_id: str = Depends(get_current_admin)):
     """Get all registered people with complete information"""
     try:
-        person_ids = db.get_all_person_ids()
+        person_ids = db.get_all_registration_ids()
         people = []
         skipped_count = 0
 
         for idx, person_id in enumerate(person_ids):
             person_name = db.get_person_name(person_id)
             person_title = db.get_person_title(person_id)
-            person_registration = db.get_person_registration(person_id)
+            person_registration = db.get_registration_id(person_id)
 
             # Skip people with missing names
             if not person_name:
@@ -1623,7 +1631,7 @@ async def get_currently_recognized_stream():
                 time_since_last = current_time - data['last_seen']
                 people_list.append({
                     'name': person_name,
-                    'registration': data['registration'],
+                    'registration_id': data['registration'],
                     'last_seen': data['last_seen'],
                     'seconds_ago': time_since_last
                 })
@@ -1717,12 +1725,12 @@ async def get_test_cycle_stream():
             while True:
                 try:
                     # Get all people from database
-                    person_ids = db.get_all_person_ids()
+                    person_ids = db.get_all_registration_ids()
                     all_people = []
 
                     for person_id in person_ids:
                         person_name = db.get_person_name(person_id)
-                        person_registration = db.get_person_registration(person_id)
+                        person_registration = db.get_registration_id(person_id)
                         if person_name:
                             all_people.append({
                                 'person_name': person_name,
@@ -1753,7 +1761,7 @@ async def get_test_cycle_stream():
                         'recognized': True,
                         'people': [{
                             'name': selected_person['person_name'],
-                            'registration': selected_person['person_registration'],
+                            'registration_id': selected_person['person_registration'],
                             'last_seen': time.time(),
                             'seconds_ago': 0
                         }],
@@ -1857,7 +1865,7 @@ async def register_person(request: personRegistration, admin_id: str = Depends(g
         cropped_face = image_cv[y1:y2, x1:x2]
 
         # Save person to database (UUID ensures uniqueness, so no conflict possible)
-        db_result = db.insert_into_person(person_id, request.person_name, request.person_title, request.person_registration)
+        db_result = db.insert_into_registrations(person_id, request.person_name, request.person_title, request.person_registration)
 
         if 'already exist' in db_result:
             # This should theoretically never happen with UUID, but handle it just in case
@@ -1881,7 +1889,7 @@ async def register_person(request: personRegistration, admin_id: str = Depends(g
             # Clean up on failure
             try:
                 os.remove(image_path)
-                db.delete_data_from_person(person_id)
+                db.delete_registration(person_id)
             except:
                 pass
             return {
@@ -2289,10 +2297,10 @@ async def delete_person(person_id: str, admin_id: str = Depends(get_current_admi
                         print(f"⚠️ Error deleting thumbnail {filename}: {e}")
 
         # Delete from attendance database
-        # Note: delete_data_from_person tries to delete the image file, but we already did that
+        # Note: delete_registration tries to delete the image file, but we already did that
         # So we ignore its return value and verify deletion by checking if person still exists
         try:
-            db.delete_data_from_person(person_id)
+            db.delete_registration(person_id)
         except Exception as e:
             print(f"⚠️ Error deleting from database: {e}")
 
@@ -2319,14 +2327,14 @@ async def delete_person(person_id: str, admin_id: str = Depends(get_current_admi
 async def delete_all_people(admin_id: str = Depends(get_current_admin)):
     """Delete all people from the database"""
     try:
-        person_ids = db.get_all_person_ids()
+        person_ids = db.get_all_registration_ids()
         deleted_count = 0
         failed_deletions = []
         deleted_photos = []
 
         # Delete from database and remove photo files
         for person_id in person_ids:
-            result = db.delete_data_from_person(person_id)
+            result = db.delete_registration(person_id)
             if result:
                 deleted_count += 1
 

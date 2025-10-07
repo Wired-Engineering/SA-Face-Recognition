@@ -29,3 +29,4 @@ src/python/images/*
 src/python/weights/*.onnx
 .venv*
 __pycache__
+.env
