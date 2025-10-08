@@ -1,4 +1,3 @@
-import os
 import cv2
 import numpy as np
 
@@ -221,29 +220,3 @@ class SCRFD:
             order = order[indices + 1]
 
         return keep
-
-
-if __name__ == "__main__":
-    detector = SCRFD(model_path="./weights/det_10g.onnx")
-    cap = cv2.VideoCapture(0)
-
-    while True:
-        ret, frame = cap.read()
-        if not cap.isOpened():
-            break
-
-        boxes_list, points_list = detector.detect(frame)
-
-        for boxes, points in zip(boxes_list, points_list):
-            x1, y1, x2, y2, score = boxes.astype(np.int32)
-            draw_corners(frame, boxes)
-
-            if points_list is not None:
-                draw_keypoints(frame, points)
-
-        cv2.imshow("FaceDetection", frame)
-        if cv2.waitKey(1) & 0xFF == ord("q"):
-            break
-
-    cap.release()
-    cv2.destroyAllWindows()

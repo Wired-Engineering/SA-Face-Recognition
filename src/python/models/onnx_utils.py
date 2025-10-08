@@ -30,8 +30,18 @@ def get_provider_options() -> Tuple[List[Tuple[str, Dict]], List[str]]:
 
     logger.info(f"Available ONNX providers: {available_providers}")
 
-    # CUDA (NVIDIA GPU) - highest priority for performance
-    if "CUDAExecutionProvider" in available_providers:
+    # TensorRT (NVIDIA GPU) - highest priority for performance
+    if "TensorrtExecutionProvider" in available_providers:
+        tensorrt_options = {
+            'device_id': 0,
+            'trt_max_workspace_size': 4 * 1024 * 1024 * 1024,  # 4GB workspace
+            'trt_fp16_enable': True,  # Enable FP16 for better performance
+        }
+        providers_with_options.append(('TensorrtExecutionProvider', tensorrt_options))
+        provider_names.append('TensorrtExecutionProvider')
+        logger.info("✓ TensorRT GPU acceleration enabled (FP16 + engine caching)")
+    # CUDA (NVIDIA GPU) - fallback if TensorRT not available
+    elif "CUDAExecutionProvider" in available_providers:
         cuda_options = {
             'device_id': 0,
             'arena_extend_strategy': 'kNextPowerOfTwo',  # Memory allocation strategy
