@@ -108,18 +108,31 @@ RUN apt-get update && \
 # CPU production - extends base
 FROM prod-base AS prod-cpu
 
-# CUDA production - NVIDIA CUDA runtime (Ubuntu 24.04)
+# CUDA production - NVIDIA CUDA runtime with TensorRT (Ubuntu 24.04)
 # Note: cudnn-runtime base already includes libcudnn9-cuda-12
 FROM nvidia/cuda:12.9.1-cudnn-runtime-ubuntu24.04 AS prod-cuda
 
-# Install Python 3.12 (native to Ubuntu 24.04)
+# Install Python 3.12 and TensorRT runtime libraries
 RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    wget \
+    gnupg2 \
+    ca-certificates \
+    && wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb \
+    && dpkg -i cuda-keyring_1.1-1_all.deb \
+    && rm cuda-keyring_1.1-1_all.deb \
+    && apt-get update && \
     apt-get install -y --no-install-recommends \
     python3.12 \
     python3.12-venv \
     python3-pip \
+    libnvinfer10 \
+    libnvinfer-plugin10 \
+    libnvonnxparsers10 \
     && ln -sf /usr/bin/python3.12 /usr/bin/python3 \
     && ln -sf /usr/bin/python3 /usr/bin/python \
+    && apt-get remove -y wget gnupg2 \
+    && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
 
 # OpenVINO production - extends base + Intel OpenCL runtime
