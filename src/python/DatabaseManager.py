@@ -715,7 +715,7 @@ class MySqlite3Manager:
                     row = rows[0]
                     cpassword = row[2]
                     if upassword == cpassword:
-                        logger.info(f"Admin {id_} authenticated successfully")
+                        #logger.info(f"Admin {id_} authenticated successfully")
                         return 'Login Success'
                     else:
                         logger.warning(f"Failed login attempt for admin {id_}: wrong password")
