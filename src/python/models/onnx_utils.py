@@ -11,10 +11,29 @@ from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Any
 from logging import getLogger
 from onnx.tools.update_model_dims import update_inputs_outputs_dims
+import os
 
 logger = getLogger(__name__)
 
 __all__ = ["create_optimized_session", "add_batch_axis", "serialize_embedding", "get_provider_options"]
+
+
+def _ensure_cache_dir(cache_path: str) -> str:
+    """
+    Ensure cache directory exists, create if necessary.
+
+    Args:
+        cache_path: Path to cache directory
+
+    Returns:
+        Absolute path to cache directory
+    """
+    try:
+        os.makedirs(cache_path, exist_ok=True)
+        return os.path.abspath(cache_path)
+    except Exception as e:
+        logger.warning(f"Could not create cache directory {cache_path}: {e}")
+        return cache_path
 
 
 def get_provider_options() -> Tuple[List[Tuple[str, Dict]], List[str]]:
@@ -30,18 +49,34 @@ def get_provider_options() -> Tuple[List[Tuple[str, Dict]], List[str]]:
 
     logger.info(f"Available ONNX providers: {available_providers}")
 
-    # TensorRT (NVIDIA GPU) - highest priority for performance
+    # TensorRT RTX (NVIDIA RTX 30xx+ GPU) - highest priority for RTX GPUs
+    if "NvTensorRtRtxExecutionProvider" in available_providers:
+        tensorrt_rtx_cache = _ensure_cache_dir('./system/onnx_cache/tensorrt_rtx')
+        tensorrt_rtx_options = {
+            'device_id': 0,
+            'enable_cuda_graph': True,  # Reduce inference overhead
+            'nv_runtime_cache_path': tensorrt_rtx_cache,  # Runtime cache
+        }
+        providers_with_options.append(('NvTensorRtRtxExecutionProvider', tensorrt_rtx_options))
+        provider_names.append('NvTensorRtRtxExecutionProvider')
+        logger.info("✓ TensorRT RTX GPU acceleration enabled (RTX 30xx+, cached)")
+
+    # TensorRT (NVIDIA GPU) - high priority for all NVIDIA GPUs
     if "TensorrtExecutionProvider" in available_providers:
+        tensorrt_cache = _ensure_cache_dir('./system/onnx_cache/tensorrt')
         tensorrt_options = {
             'device_id': 0,
             'trt_max_workspace_size': 4 * 1024 * 1024 * 1024,  # 4GB workspace
             'trt_fp16_enable': True,  # Enable FP16 for better performance
+            'trt_engine_cache_enable': True,  # Cache compiled engines
+            'trt_engine_cache_path': tensorrt_cache,  # Engine cache directory
         }
         providers_with_options.append(('TensorrtExecutionProvider', tensorrt_options))
         provider_names.append('TensorrtExecutionProvider')
-        logger.info("✓ TensorRT GPU acceleration enabled (FP16 + engine caching)")
-    # CUDA (NVIDIA GPU) - fallback if TensorRT not available
-    elif "CUDAExecutionProvider" in available_providers:
+        logger.info("✓ TensorRT GPU acceleration enabled (FP16, cached)")
+
+    # CUDA (NVIDIA GPU) - fallback for all NVIDIA GPUs
+    if "CUDAExecutionProvider" in available_providers:
         cuda_options = {
             'device_id': 0,
             'arena_extend_strategy': 'kNextPowerOfTwo',  # Memory allocation strategy
@@ -65,23 +100,27 @@ def get_provider_options() -> Tuple[List[Tuple[str, Dict]], List[str]]:
 
     # CoreML (Apple Silicon)
     if "CoreMLExecutionProvider" in available_providers:
+        coreml_cache = _ensure_cache_dir('./system/onnx_cache/coreml')
         coreml_options = {
             "MLComputeUnits": "ALL",
             "ModelFormat": "MLProgram",
             "EnableOnSubgraphs": 1,
+            "ModelCacheDirectory": coreml_cache,  # Model compilation cache
         }
         providers_with_options.append(('CoreMLExecutionProvider', coreml_options))
         provider_names.append('CoreMLExecutionProvider')
-        logger.info("✓ CoreML Apple Silicon acceleration enabled")
+        logger.info("✓ CoreML Apple Silicon acceleration enabled (cached)")
 
     # OpenVINO (Intel)
     if "OpenVINOExecutionProvider" in available_providers:
+        openvino_cache = _ensure_cache_dir('./system/onnx_cache/openvino')
         openvino_options = {
             'device_type': 'CPU_FP32',  # Can be GPU_FP32, GPU_FP16, etc.
+            'cache_dir': openvino_cache,  # Model compilation cache
         }
         providers_with_options.append(('OpenVINOExecutionProvider', openvino_options))
         provider_names.append('OpenVINOExecutionProvider')
-        logger.info("✓ OpenVINO Intel acceleration enabled")
+        logger.info("✓ OpenVINO Intel acceleration enabled (cached)")
 
     # CPU fallback - always available with default options for compatibility
     providers_with_options.append(('CPUExecutionProvider', {}))

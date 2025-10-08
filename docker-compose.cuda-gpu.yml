@@ -23,7 +23,7 @@ services:
           devices:
             - driver: nvidia
               count: 1
-              capabilities: [gpu]
+              capabilities: [gpu, compute, utility]
     restart: unless-stopped
 
 volumes:
