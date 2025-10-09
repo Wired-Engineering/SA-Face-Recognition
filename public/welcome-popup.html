@@ -370,8 +370,13 @@
             }
 
             calculateCircleSize() {
-                // Calculate the diagonal of the text box (ensures text always fits)
-                const textDiagonal = Math.sqrt(this.textWidth * this.textWidth + this.textHeight * this.textHeight);
+                // Fixed base radius for each font size setting (consistent for all names)
+                const baseRadiusByFontSize = {
+                    small: 60,
+                    medium: 80,
+                    large: 100,
+                    xlarge: 120
+                };
 
                 // Bubble size multipliers for radius scaling
                 const bubbleSizeMultipliers = {
@@ -382,7 +387,13 @@
                 };
                 const bubbleMultiplier = bubbleSizeMultipliers[this.bubbleSize] || 1.0;
 
-                // Base padding that scales with font size (NOT bubble size - we'll scale everything at the end)
+                // Get the fixed base radius for this font size
+                const baseRadius = baseRadiusByFontSize[this.fontSize] || 80;
+
+                // Apply bubble size multiplier to get final radius
+                this.radius = Math.round(baseRadius * bubbleMultiplier);
+
+                // Base padding that scales with font size for text safety area
                 const paddingScale = {
                     small: 25,
                     medium: 30,
@@ -390,24 +401,6 @@
                     xlarge: 40
                 };
                 const padding = paddingScale[this.fontSize] || 30;
-
-                // Calculate radius to ensure text always fits with padding
-                // Using diagonal/2 ensures even rotated text would fit
-                const baseRadius = (textDiagonal / 2) + padding;
-
-                // Set minimum and maximum radius bounds (NOT scaled - we'll scale the final radius)
-                const minRadius = 40; // Minimum circle size
-                const maxRadius = 150; // Maximum circle size to prevent huge bubbles
-
-                // Apply bounds
-                let radius = Math.max(minRadius, Math.min(maxRadius, baseRadius));
-
-                // Apply bubble size multiplier to the final radius
-                radius = Math.round(radius * bubbleMultiplier);
-
-                // Add some randomness for variety (±5% only to maintain proportions)
-                const randomFactor = 0.95 + Math.random() * 0.1; // 0.95 to 1.05
-                this.radius = Math.round(radius * randomFactor);
 
                 // Store a safe text area for fitting (also scaled by bubble size)
                 this.safeTextRadius = this.radius - Math.round(padding * bubbleMultiplier);

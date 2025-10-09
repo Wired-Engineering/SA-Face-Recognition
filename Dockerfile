@@ -61,7 +61,7 @@ RUN apt-get update && \
 
 # Set ROCm environment variables
 ENV ROCM_HOME=/opt/rocm \
-    LD_LIBRARY_PATH=/opt/rocm/lib:${LD_LIBRARY_PATH} \
+    LD_LIBRARY_PATH=/opt/rocm/lib:${LD_LIBRARY_PATH:-} \
     PATH=/opt/rocm/bin:${PATH}
 
 # Select appropriate builder based on DEVICE arg
@@ -157,7 +157,7 @@ RUN apt-get update && \
 
 # Set ROCm environment variables
 ENV ROCM_HOME=/opt/rocm \
-    LD_LIBRARY_PATH=/opt/rocm/lib:${LD_LIBRARY_PATH} \
+    LD_LIBRARY_PATH=/opt/rocm/lib:${LD_LIBRARY_PATH:-} \
     PATH=/opt/rocm/bin:${PATH}
 
 # ============================================================================
@@ -187,13 +187,10 @@ WORKDIR /app
 COPY --from=builder /opt/venv /opt/venv
 
 # Set environment to use virtual environment
-# Preserve ROCm library paths if using ROCm device
 ENV VIRTUAL_ENV=/opt/venv \
     PATH="/opt/venv/bin:$PATH" \
     PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    LD_LIBRARY_PATH="/opt/rocm/lib:${LD_LIBRARY_PATH}" \
-    ROCM_HOME=/opt/rocm
+    PYTHONUNBUFFERED=1
 
 # Copy Python source code
 COPY src/python/ ./src/python/
