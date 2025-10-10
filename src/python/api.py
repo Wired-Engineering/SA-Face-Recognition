@@ -1148,21 +1148,31 @@ def configure_hardware_acceleration():
 
 
 def create_optimized_capture(rtsp_url, hw_backend="cpu"):
-    """Create an optimized VideoCapture with hardware acceleration (Docker-compatible)"""
+    """Create an optimized VideoCapture with hardware acceleration and ultra-low latency for RTSP"""
     cap = None
 
+    print(f"🔧 Opening RTSP stream with low-latency settings: {rtsp_url}")
+
     if hw_backend in ("cuda", "nvidia"):
-        # Try CUDA-accelerated capture
+        # Try CUDA-accelerated capture with low-latency GStreamer pipeline
         try:
-            cap = cv2.VideoCapture(rtsp_url, cv2.CAP_GSTREAMER)
-            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('H', '2', '6', '4'))
-        except:
+            # GStreamer pipeline optimized for ultra-low latency
+            gst_pipeline = (
+                f'rtspsrc location={rtsp_url} protocols=tcp latency=0 ! '
+                'rtph264depay ! h264parse ! nvh264dec ! '
+                'videoconvert ! appsink max-buffers=1 drop=true'
+            )
+            cap = cv2.VideoCapture(gst_pipeline, cv2.CAP_GSTREAMER)
+            if cap.isOpened():
+                print("✅ CUDA GStreamer pipeline initialized with low latency")
+        except Exception as e:
+            print(f"⚠️ CUDA GStreamer failed: {e}")
             pass
 
     elif hw_backend == "intel_mfx":
         # Try Intel Quick Sync Video (QSV) with Media SDK
         try:
-            print(f"🔧 Initializing Intel QuickSync capture for: {rtsp_url}")
+            print(f"🔧 Initializing Intel QuickSync capture with low latency")
             cap = cv2.VideoCapture(rtsp_url, cv2.CAP_INTEL_MFX)
             if cap.isOpened():
                 print("✅ Intel QuickSync Video capture initialized successfully")
@@ -1174,13 +1184,19 @@ def create_optimized_capture(rtsp_url, hw_backend="cpu"):
             cap = None
 
     elif hw_backend == "vaapi":
-        # Try VAAPI hardware acceleration (Linux containers)
+        # Try VAAPI hardware acceleration with low-latency GStreamer pipeline
         try:
-            # Use GStreamer with VAAPI
-            gst_pipeline = f'rtspsrc location={rtsp_url} ! rtph264depay ! h264parse ! vaapih264dec ! videoconvert ! appsink'
+            gst_pipeline = (
+                f'rtspsrc location={rtsp_url} protocols=tcp latency=0 ! '
+                'rtph264depay ! h264parse ! vaapih264dec ! '
+                'videoconvert ! appsink max-buffers=1 drop=true'
+            )
             cap = cv2.VideoCapture(gst_pipeline, cv2.CAP_GSTREAMER)
-        except:
-            # Fallback to regular FFMPEG with potential hardware acceleration
+            if cap.isOpened():
+                print("✅ VAAPI GStreamer pipeline initialized with low latency")
+        except Exception as e:
+            print(f"⚠️ VAAPI GStreamer failed: {e}, falling back to FFmpeg")
+            # Fallback to regular FFMPEG with low-latency settings
             cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
 
     elif hw_backend == "dshow":
@@ -1190,21 +1206,71 @@ def create_optimized_capture(rtsp_url, hw_backend="cpu"):
         except:
             pass
 
-    # Fallback to FFmpeg if hardware acceleration fails
+    # Fallback to FFmpeg with aggressive low-latency settings
     if cap is None or not cap.isOpened():
+        print("🔧 Using FFmpeg backend with ultra-low latency settings")
+
+        # Set FFmpeg environment variables for minimal latency
+        os.environ['OPENCV_FFMPEG_CAPTURE_OPTIONS'] = (
+            'rtsp_transport;tcp|'
+            'fflags;nobuffer|'
+            'flags;low_delay|'
+            'analyzeduration;1000000|'  # 1 second max analysis
+            'probesize;1000000|'  # 1MB probe size
+            'max_delay;0|'
+            'reorder_queue_size;0'
+        )
+
         cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
 
-    # Optimize capture settings
+    # Apply ultra-aggressive low-latency capture settings
     if cap.isOpened():
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Reduce buffer to minimize latency
-        cap.set(cv2.CAP_PROP_FPS, 30)  # Target 30 FPS
-        # Enable hardware decoding if available
+        # Critical: Minimize buffer to absolute minimum (1 frame)
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
+        # Set target FPS
+        cap.set(cv2.CAP_PROP_FPS, 30)
+
+        # Disable frame interpolation and buffering
         try:
             cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('H', '2', '6', '4'))
         except:
-            pass  # Ignore if codec setting fails
+            pass
+
+        # Additional latency reduction settings
+        try:
+            # Set minimal timeout for frame acquisition (100ms)
+            cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 5000)
+            cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 100)
+        except:
+            pass
+
+        print("✅ Low-latency capture settings applied (buffer=1, tcp transport, no buffering)")
+    else:
+        print(f"❌ Failed to open RTSP stream with all backends")
 
     return cap
+
+
+def flush_rtsp_buffer(cap, num_frames=5):
+    """
+    Flush the RTSP buffer by grabbing multiple frames and only retrieving the latest.
+    This ensures we're always processing the most recent frame, not buffered old frames.
+
+    Args:
+        cap: OpenCV VideoCapture object
+        num_frames: Number of frames to grab (flush) before retrieving
+
+    Returns:
+        (ret, frame): Latest frame from the stream
+    """
+    # Grab multiple frames without decoding to flush the buffer
+    for _ in range(num_frames):
+        if not cap.grab():
+            break
+
+    # Retrieve only the last grabbed frame
+    return cap.retrieve()
 
 
 def process_frame_threaded(frame_data):
@@ -1255,6 +1321,7 @@ async def process_rtsp_with_ffmpeg_overlay(rtsp_url, output_queue, stop_event):
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
         print(f"📺 Video properties: {width}x{height} @ {fps}fps with {hw_backend} backend")
+        print(f"🚀 Using frame buffer flushing to maintain low latency (always processing latest frame)")
 
         frame_count = 0
         detection_results_cache = []
@@ -1264,9 +1331,12 @@ async def process_rtsp_with_ffmpeg_overlay(rtsp_url, output_queue, stop_event):
 
         # Keep detection running as long as it's marked active
         while not stop_event.is_set() and get_independent_detection_active():
-            # Read frame in thread to avoid blocking
-            ret, frame = await loop.run_in_executor(None, cap.read)
-            if not ret:
+            # Flush buffer and read latest frame to avoid lag buildup
+            # Use grab()/retrieve() pattern to always get the freshest frame
+            # This grabs 3 frames and only retrieves the last one, discarding buffered frames
+            ret, frame = await loop.run_in_executor(None, flush_rtsp_buffer, cap, 3)
+
+            if not ret or frame is None:
                 consecutive_failures += 1
                 print(f"⚠️ Failed to read frame from RTSP stream (attempt {consecutive_failures}/{max_consecutive_failures})")
 
