@@ -1729,9 +1729,11 @@ async def get_currently_recognized_stream():
             }
 
     async def event_stream():
-        """SSE event generator"""
+        """SSE event generator with keep-alive heartbeat"""
         global recognition_data_changed
         last_sent_data = None
+        last_heartbeat_time = time.time()
+        heartbeat_interval = 15  # Send heartbeat every 15 seconds to prevent connection timeout
 
         try:
             # Send initial data immediately
@@ -1745,8 +1747,15 @@ async def get_currently_recognized_stream():
                     # Check every 100ms for changes (more responsive)
                     await asyncio.sleep(0.1)
 
-                    # Only check data if the flag indicates a change, or for periodic heartbeat
-                    should_check = recognition_data_changed or (int(time.time() * 10) % 50 == 0)  # Every 5 seconds heartbeat
+                    current_time = time.time()
+
+                    # Send heartbeat comment to keep connection alive (SSE standard)
+                    if current_time - last_heartbeat_time >= heartbeat_interval:
+                        yield f": heartbeat {int(current_time)}\n\n"
+                        last_heartbeat_time = current_time
+
+                    # Only check data if the flag indicates a change, or for periodic refresh
+                    should_check = recognition_data_changed or (int(time.time() * 10) % 50 == 0)  # Every 5 seconds refresh
 
                     if should_check:
                         # Reset the flag
