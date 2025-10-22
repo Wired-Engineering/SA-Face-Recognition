@@ -317,13 +317,15 @@ class ApiService {
     return this.request('/api/camera/settings');
   }
 
-  async updateCameraSettings(source = 'default', deviceId = null, rtspUrl = null) {
+  async updateCameraSettings(source = 'default', deviceId = null, rtspUrl = null, resolutionWidth = null, resolutionHeight = null) {
     return this.request('/api/camera/settings', {
       method: 'POST',
       body: JSON.stringify({
         source: source,
         device_id: deviceId,
         rtsp_url: rtspUrl,
+        resolution_width: resolutionWidth,
+        resolution_height: resolutionHeight,
       }),
     });
   }
@@ -621,6 +623,79 @@ export const webcamUtils = {
     } catch (error) {
       console.error('Error getting video devices:', error);
       return [];
+    }
+  },
+
+  // Get available resolutions for a specific camera device
+  async getAvailableResolutions(deviceId = null) {
+    try {
+      console.log('🔍 Querying available resolutions for camera:', deviceId || 'default');
+
+      // Common resolutions to test (from lowest to highest)
+      const resolutionsToTest = [
+        { width: 320, height: 240, label: 'QVGA (320x240)' },
+        { width: 640, height: 480, label: 'VGA (640x480)' },
+        { width: 800, height: 600, label: 'SVGA (800x600)' },
+        { width: 1024, height: 576, label: 'Wide VGA (1024x576)' },
+        { width: 1280, height: 720, label: 'HD (1280x720)' },
+        { width: 1920, height: 1080, label: 'Full HD (1920x1080)' },
+        { width: 2560, height: 1440, label: '2K (2560x1440)' },
+        { width: 3840, height: 2160, label: '4K (3840x2160)' },
+      ];
+
+      const supportedResolutions = [];
+
+      // Test each resolution
+      for (const resolution of resolutionsToTest) {
+        try {
+          const constraints = {
+            video: {
+              width: { exact: resolution.width },
+              height: { exact: resolution.height },
+            },
+            audio: false
+          };
+
+          // Add device ID constraint if provided
+          if (deviceId) {
+            constraints.video.deviceId = { exact: deviceId };
+          }
+
+          // Try to get user media with this resolution
+          const stream = await navigator.mediaDevices.getUserMedia(constraints);
+
+          // Get actual settings from the track
+          const track = stream.getVideoTracks()[0];
+          const settings = track.getSettings();
+
+          // Stop the stream immediately
+          stream.getTracks().forEach(track => track.stop());
+
+          // Verify we got the exact resolution we requested
+          if (settings.width === resolution.width && settings.height === resolution.height) {
+            supportedResolutions.push({
+              width: resolution.width,
+              height: resolution.height,
+              label: resolution.label,
+              value: `${resolution.width}x${resolution.height}`
+            });
+            console.log(`✅ Resolution supported: ${resolution.label}`);
+          }
+        } catch (error) {
+          // Resolution not supported, skip silently
+          console.log(`❌ Resolution not supported: ${resolution.label}`);
+        }
+      }
+
+      console.log(`📊 Found ${supportedResolutions.length} supported resolutions`);
+      return supportedResolutions;
+    } catch (error) {
+      console.error('Error querying camera resolutions:', error);
+      // Return default resolutions as fallback
+      return [
+        { width: 640, height: 480, label: 'VGA (640x480)', value: '640x480' },
+        { width: 1280, height: 720, label: 'HD (1280x720)', value: '1280x720' }
+      ];
     }
   },
 };

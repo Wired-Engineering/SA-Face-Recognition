@@ -215,9 +215,9 @@ export function DetectionPage({ onDetection }) {
     }
   }, [isConnected, emit]);
   // Browser webcam capture and frame processing
-  const startBrowserWebcam = useCallback(async (deviceId = null) => {
+  const startBrowserWebcam = useCallback(async (deviceId = null, width = 640, height = 480) => {
     try {
-      console.log('📹 Starting browser webcam capture...', deviceId ? `Device: ${deviceId}` : 'Default device');
+      console.log('📹 Starting browser webcam capture...', deviceId ? `Device: ${deviceId}` : 'Default device', `Resolution: ${width}x${height}`);
 
       // Check if getUserMedia is available
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
@@ -242,11 +242,11 @@ export function DetectionPage({ onDetection }) {
         console.log('📹 Permissions API not supported, proceeding with getUserMedia');
       }
 
-      // Build constraints based on device selection
+      // Build constraints based on device selection and resolution
       const constraints = {
         video: {
-          width: { ideal: 640 },
-          height: { ideal: 480 },
+          width: { ideal: width },
+          height: { ideal: height },
           frameRate: { ideal: 30 }
         },
         audio: false
@@ -561,7 +561,12 @@ export function DetectionPage({ onDetection }) {
             console.log('📹 Using specific device ID:', deviceIdToUse);
           }
 
-          await startBrowserWebcam(deviceIdToUse);
+          // Get resolution from settings (default to VGA if not set or null)
+          const resolutionWidth = cameraSettings.resolution_width ?? 640;
+          const resolutionHeight = cameraSettings.resolution_height ?? 480;
+          console.log(`📹 Using resolution: ${resolutionWidth}x${resolutionHeight}`);
+
+          await startBrowserWebcam(deviceIdToUse, resolutionWidth, resolutionHeight);
           return;
         }
       }

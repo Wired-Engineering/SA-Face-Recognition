@@ -50,6 +50,21 @@ import {
 import apiService, { webcamUtils } from '../services/api';
 import welcomePopupService, { testWelcomePopup, closeWelcomePopup, isWelcomePopupOpen } from '../services/welcomePopup';
 
+// Helper function to get resolution label from width and height
+const getResolutionLabel = (width, height) => {
+  const resolutionMap = {
+    '320x240': 'QVGA (320x240)',
+    '640x480': 'VGA (640x480)',
+    '800x600': 'SVGA (800x600)',
+    '1024x576': 'Wide VGA (1024x576)',
+    '1280x720': 'HD (1280x720)',
+    '1920x1080': 'Full HD (1920x1080)',
+    '2560x1440': '2K (2560x1440)',
+    '3840x2160': '4K (3840x2160)',
+  };
+  return resolutionMap[`${width}x${height}`] || `${width}x${height}`;
+};
+
 export function SettingsPage({ onSaveSettings }) {
   const theme = useMantineTheme();
   // Admin settings state
@@ -74,6 +89,9 @@ export function SettingsPage({ onSaveSettings }) {
   const [cameraDevices, setCameraDevices] = useState([]);
   const [selectedCamera, setSelectedCamera] = useState('default');
   const [rtspUrl, setRtspUrl] = useState('');
+  const [availableResolutions, setAvailableResolutions] = useState([]);
+  const [selectedResolution, setSelectedResolution] = useState('640x480');
+  const [resolutionLoading, setResolutionLoading] = useState(false);
 
   // Data management state
   const [people, setPeople] = useState([]);
@@ -184,6 +202,27 @@ export function SettingsPage({ onSaveSettings }) {
             } else {
               setSelectedCamera(cameraSettings.source || 'default');
             }
+
+            // Load saved resolution (only for non-RTSP sources)
+            if (cameraSettings.source !== 'rtsp') {
+              const width = cameraSettings.resolution_width || 640;
+              const height = cameraSettings.resolution_height || 480;
+              const resolutionValue = `${width}x${height}`;
+              setSelectedResolution(resolutionValue);
+
+              // Add the saved resolution to available resolutions so dropdown can display it
+              const resolutionLabel = getResolutionLabel(width, height);
+              setAvailableResolutions([{
+                width,
+                height,
+                label: resolutionLabel,
+                value: resolutionValue
+              }]);
+            } else {
+              // For RTSP, clear resolution state
+              setSelectedResolution('640x480'); // Default for when switching back to webcam
+              setAvailableResolutions([]);
+            }
           }
         }
 
@@ -217,6 +256,15 @@ export function SettingsPage({ onSaveSettings }) {
     };
     loadCamerasAndSettings();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Auto-query resolutions when camera selection changes
+  useEffect(() => {
+    // Only auto-query for browser webcams, not RTSP
+    if (selectedCamera && selectedCamera !== 'rtsp' && cameraDevices.length > 0) {
+      console.log('📹 Camera changed, auto-querying resolutions...');
+      handleQueryResolutions();
+    }
+  }, [selectedCamera]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const loadPeopleData = async () => {
     try {
@@ -653,6 +701,57 @@ export function SettingsPage({ onSaveSettings }) {
     }
   };
 
+  const handleQueryResolutions = async (showSuccessMessage = false) => {
+    if (selectedCamera === 'rtsp') {
+      // RTSP cameras don't need resolution selection - handled by backend
+      setAvailableResolutions([]);
+      return;
+    }
+
+    setResolutionLoading(true);
+    if (showSuccessMessage) {
+      setError('');
+    }
+
+    try {
+      let deviceIdToQuery = null;
+
+      // Determine which device to query
+      if (selectedCamera.startsWith('camera_')) {
+        const cameraIndex = parseInt(selectedCamera.replace('camera_', ''));
+        if (cameraIndex < cameraDevices.length) {
+          deviceIdToQuery = cameraDevices[cameraIndex].deviceId;
+        }
+      }
+
+      console.log('🔍 Querying resolutions for device:', deviceIdToQuery || 'default');
+      const resolutions = await webcamUtils.getAvailableResolutions(deviceIdToQuery);
+
+      setAvailableResolutions(resolutions);
+
+      // If current selection is not in available list, select the first one
+      if (resolutions.length > 0) {
+        const currentResolutionExists = resolutions.some(r => r.value === selectedResolution);
+        if (!currentResolutionExists) {
+          setSelectedResolution(resolutions[0].value);
+        }
+      }
+
+      // Only show success message if manually triggered
+      if (showSuccessMessage) {
+        setSuccess(`Found ${resolutions.length} supported resolutions for this camera`);
+      }
+    } catch (error) {
+      console.error('Resolution query error:', error);
+      // Only show error if manually triggered
+      if (showSuccessMessage) {
+        setError('Failed to query camera resolutions: ' + error.message);
+      }
+    } finally {
+      setResolutionLoading(false);
+    }
+  };
+
   const handleSaveCamera = async () => {
     setCameraLoading(true);
     setError('');
@@ -664,6 +763,9 @@ export function SettingsPage({ onSaveSettings }) {
       let deviceId = null;
       let rtspUrlToSave = null;
 
+      let resWidth = null;
+      let resHeight = null;
+
       if (selectedCamera === 'rtsp') {
         source = 'rtsp';
         rtspUrlToSave = rtspUrl;
@@ -672,8 +774,13 @@ export function SettingsPage({ onSaveSettings }) {
           setError('Please enter an RTSP URL before saving');
           return;
         }
+        // RTSP cameras don't use browser resolution constraints - set to null
+        resWidth = null;
+        resHeight = null;
       } else if (selectedCamera === 'default') {
         source = 'default';
+        // Parse resolution from selectedResolution for browser webcams
+        [resWidth, resHeight] = selectedResolution.split('x').map(Number);
       } else if (selectedCamera.startsWith('camera_')) {
         // It's a camera index - get the actual device ID from our stored devices
         source = 'device';
@@ -681,6 +788,8 @@ export function SettingsPage({ onSaveSettings }) {
         if (cameraIndex < cameraDevices.length) {
           deviceId = cameraDevices[cameraIndex].deviceId; // Use actual browser device ID
           console.log(`Saving camera ${cameraIndex}: device ID = ${deviceId}`);
+          // Parse resolution from selectedResolution for browser webcams
+          [resWidth, resHeight] = selectedResolution.split('x').map(Number);
         } else {
           setError('Selected camera not found in available devices');
           return;
@@ -688,9 +797,10 @@ export function SettingsPage({ onSaveSettings }) {
       } else {
         // Fallback to default
         source = 'default';
+        [resWidth, resHeight] = selectedResolution.split('x').map(Number);
       }
 
-      const result = await apiService.updateCameraSettings(source, deviceId, rtspUrlToSave);
+      const result = await apiService.updateCameraSettings(source, deviceId, rtspUrlToSave, resWidth, resHeight);
 
       if (result.success) {
         setSuccess('Camera settings saved successfully!');
@@ -1300,6 +1410,45 @@ export function SettingsPage({ onSaveSettings }) {
                   onChange={(event) => setRtspUrl(event.currentTarget.value)}
                   leftSection={<IconCamera size={16} />}
                 />
+              )}
+
+              {/* Resolution selector - only for browser webcams, not RTSP */}
+              {selectedCamera !== 'rtsp' && (
+                <Stack gap="xs">
+                  <Group align="flex-end" gap="md">
+                    <Select
+                      label="Camera Resolution"
+                      placeholder={resolutionLoading ? "Detecting resolutions..." : "Select resolution"}
+                      value={selectedResolution}
+                      onChange={setSelectedResolution}
+                      data={availableResolutions.map(res => ({
+                        value: res.value,
+                        label: res.label
+                      }))}
+                      disabled={resolutionLoading}
+                      style={{ flex: 1 }}
+                      leftSection={<IconCamera size={16} />}
+                    />
+                    <Button
+                      onClick={() => handleQueryResolutions(true)}
+                      loading={resolutionLoading}
+                      variant="outline"
+                      color="signature"
+                      loaderProps={{ color: 'signature' }}
+                      disabled={selectedCamera === 'rtsp'}
+                      title="Refresh available resolutions"
+                    >
+                      {resolutionLoading ? 'Querying...' : 'Refresh'}
+                    </Button>
+                  </Group>
+                  <Text size="xs" c="dimmed">
+                    {resolutionLoading
+                      ? 'Detecting supported resolutions...'
+                      : availableResolutions.length > 0
+                      ? `${availableResolutions.length} resolution(s) available for this camera`
+                      : 'Resolutions will be detected automatically when you select a camera'}
+                  </Text>
+                </Stack>
               )}
 
               <Text size="sm" c="dimmed">

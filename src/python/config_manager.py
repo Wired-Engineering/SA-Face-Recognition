@@ -80,12 +80,15 @@ class ConfigManager:
         """Get camera configuration"""
         return self.config.get('camera', {})
 
-    def set_camera_config(self, source: str, device_id: Optional[str] = None, rtsp_url: Optional[str] = None) -> bool:
+    def set_camera_config(self, source: str, device_id: Optional[str] = None, rtsp_url: Optional[str] = None,
+                          resolution_width: Optional[int] = None, resolution_height: Optional[int] = None) -> bool:
         """Set camera configuration - default, webcam, device, and rtsp supported"""
         camera_config = {
             'source': source,
             'device_id': device_id,
-            'rtsp_url': rtsp_url
+            'rtsp_url': rtsp_url,
+            'resolution_width': resolution_width,  # None for RTSP, integer for browser webcams
+            'resolution_height': resolution_height  # None for RTSP, integer for browser webcams
         }
         return self.update_section('camera', camera_config)
 
@@ -172,6 +175,8 @@ class ConfigManager:
                 'source': 'default',
                 'device_id': None,
                 'rtsp_url': None,
+                'resolution_width': 640,  # Default VGA width
+                'resolution_height': 480   # Default VGA height
             },
             'display': {
                 'timer': 5,

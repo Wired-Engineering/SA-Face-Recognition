@@ -1532,6 +1532,8 @@ class CameraSettings(BaseModel):
     source: Optional[str] = "default"  # default, webcam, device, and rtsp supported
     device_id: Optional[str] = None  # For webcam/device: device index (0, 1, 2...) or device ID string
     rtsp_url: Optional[str] = None
+    resolution_width: Optional[int] = None  # Camera resolution width (None for RTSP, integer for browser webcams)
+    resolution_height: Optional[int] = None  # Camera resolution height (None for RTSP, integer for browser webcams)
 
 class DisplaySettings(BaseModel):
     timer: Optional[int] = 5
@@ -2637,11 +2639,27 @@ async def get_camera_settings(admin_id: str = Depends(get_current_admin)):
     # Config updated to use webcam source
     try:
         camera_config = config_manager.get_camera_config()
+
+        # Get resolution from config, use 640x480 default only if not set and not RTSP
+        source = camera_config.get('source', 'webcam')
+        resolution_width = camera_config.get('resolution_width')
+        resolution_height = camera_config.get('resolution_height')
+
+        # For browser webcams without resolution set, default to VGA
+        # For RTSP, keep as None (resolution determined by stream)
+        if source != 'rtsp':
+            if resolution_width is None:
+                resolution_width = 640
+            if resolution_height is None:
+                resolution_height = 480
+
         return {
             'success': True,
-            'source': camera_config.get('source', 'webcam'),
+            'source': source,
             'device_id': camera_config.get('device_id'),
-            'rtsp_url': camera_config.get('rtsp_url')
+            'rtsp_url': camera_config.get('rtsp_url'),
+            'resolution_width': resolution_width,
+            'resolution_height': resolution_height
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -2654,7 +2672,9 @@ async def update_camera_settings(request: CameraSettings, admin_id: str = Depend
         success = config_manager.set_camera_config(
             source=request.source,
             device_id=request.device_id,
-            rtsp_url=request.rtsp_url
+            rtsp_url=request.rtsp_url,
+            resolution_width=request.resolution_width,
+            resolution_height=request.resolution_height
         )
 
         # Also save to legacy pickle file if RTSP
