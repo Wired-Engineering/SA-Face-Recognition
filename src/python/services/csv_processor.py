@@ -174,9 +174,11 @@ class CSVProcessor:
             # Crop the face with padding
             cropped_face = image_cv[y1:y2, x1:x2]
 
-            # Convert back to bytes
-            _, buffer = cv2.imencode('.jpg', cropped_face)
-            return buffer.tobytes(), True, ""
+            # Convert back to bytes using PIL
+            pil_cropped = Image.fromarray(cv2.cvtColor(cropped_face, cv2.COLOR_BGR2RGB))
+            buffer_io = BytesIO()
+            pil_cropped.save(buffer_io, format='JPEG', quality=95)
+            return buffer_io.getvalue(), True, ""
 
         except Exception as e:
             error_msg = f"Error cropping face: {str(e)}"
@@ -436,9 +438,10 @@ async def process_csv_with_progress_streaming(
                         image = Image.open(BytesIO(image_data))
                         image_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
 
-                        # Save with photo number for ensemble
+                        # Save with photo number for ensemble using PIL
                         image_path = f'images/{person_id}%{photo_num}.png'
-                        cv2.imwrite(image_path, image_cv)
+                        pil_image = Image.fromarray(cv2.cvtColor(image_cv, cv2.COLOR_BGR2RGB))
+                        pil_image.save(image_path, format='PNG')
                         photo_paths.append(image_path)
 
                     # Add all photos to batch queue

@@ -39,6 +39,7 @@ from utils import get_current_datetime_other_format
 from SCRFD_Face_recognizer import SCRFDFaceRecognizer as FaceRecognizer
 from config_manager import config_manager
 from services.csv_processor import process_csv_with_progress_streaming
+from video_capture_av import PyAVCapture, flush_rtsp_buffer, get_hardware_config
 
 # Basic Authentication
 security = HTTPBasic()
@@ -876,12 +877,13 @@ async def process_frame_binary(sid, data):
         # Get binary frame data
         frame_bytes = data['frame']
 
-        # Convert binary data to numpy array
-        nparr = np.frombuffer(frame_bytes, np.uint8)
-        cv_frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-
-        if cv_frame is None:
-            print(f"❌ Failed to decode frame for {sid}")
+        # Convert binary data to numpy array using PIL
+        try:
+            frame_io = BytesIO(frame_bytes)
+            pil_frame = Image.open(frame_io)
+            cv_frame = cv2.cvtColor(np.array(pil_frame), cv2.COLOR_RGB2BGR)
+        except Exception as e:
+            print(f"❌ Failed to decode frame for {sid}: {e}")
             return
 
         # Run face detection
@@ -1108,169 +1110,35 @@ def draw_detection_overlays_on_frame(frame, faces):
 
 
 def configure_hardware_acceleration():
-    """Configure OpenCV backend based on entrypoint GPU detection"""
-    import os
+    """Configure hardware backend based on entrypoint GPU detection.
 
-    # Check if GPU acceleration was detected by entrypoint script
-    enable_gpu = os.getenv('ENABLE_GPU_ACCELERATION', '').lower() in ('true', '1', 'yes')
-
-    if not enable_gpu:
-        print("💻 Using CPU-only processing (default for production stability)")
-        print("💡 To enable GPU acceleration: set ENABLE_GPU_ACCELERATION=true")
-        cv2.ocl.setUseOpenCL(False)
-        return "cpu"
-
-    # Use GPU backend type detected by entrypoint (nvidia, vaapi, etc.)
-    backend_type = os.getenv('GPU_BACKEND_TYPE', 'cpu').lower()
-
-    # Enable OpenCL for OpenCV operations (works with NVIDIA/Intel/AMD)
-    if cv2.ocl.haveOpenCL():
-        cv2.ocl.setUseOpenCL(True)
-        print(f"✅ OpenCL enabled for OpenCV operations (device: {cv2.ocl.Device.getDefault().name()})")
-    else:
-        print("ℹ️ OpenCL not available - OpenCV will use CPU")
-
-    if backend_type == 'nvidia':
-        print("🚀 Using NVIDIA GPU backend (detected by entrypoint)")
-        print("ℹ️ ONNX models: CUDAExecutionProvider")
-        print("ℹ️ OpenCV preprocessing: OpenCL (if available)")
-        return "nvidia"
-    elif backend_type == 'vaapi':
-        print("🚀 Using VAAPI backend for Intel/AMD GPU (detected by entrypoint)")
-        return "vaapi"
-    elif backend_type == 'intel_mfx':
-        print("🚀 Using Intel QuickSync Video (MFX) backend (detected by entrypoint)")
-        return "intel_mfx"
-    else:
-        print(f"⚠️ Unknown GPU backend type: {backend_type}, falling back to CPU")
-        cv2.ocl.setUseOpenCL(False)
-        return "cpu"
+    Uses get_hardware_config() from video_capture_av module for consistent
+    hardware acceleration across video capture and model inference.
+    """
+    backend_type, _ = get_hardware_config()
+    return backend_type
 
 
 def create_optimized_capture(rtsp_url, hw_backend="cpu"):
-    """Create an optimized VideoCapture with hardware acceleration and ultra-low latency for RTSP"""
-    cap = None
+    """Create an optimized VideoCapture with hardware acceleration and ultra-low latency for RTSP.
 
-    print(f"🔧 Opening RTSP stream with low-latency settings: {rtsp_url}")
-
-    if hw_backend in ("cuda", "nvidia"):
-        # Try CUDA-accelerated capture with low-latency GStreamer pipeline
-        try:
-            # GStreamer pipeline optimized for ultra-low latency
-            gst_pipeline = (
-                f'rtspsrc location={rtsp_url} protocols=tcp latency=0 ! '
-                'rtph264depay ! h264parse ! nvh264dec ! '
-                'videoconvert ! appsink max-buffers=1 drop=true'
-            )
-            cap = cv2.VideoCapture(gst_pipeline, cv2.CAP_GSTREAMER)
-            if cap.isOpened():
-                print("✅ CUDA GStreamer pipeline initialized with low latency")
-        except Exception as e:
-            print(f"⚠️ CUDA GStreamer failed: {e}")
-            pass
-
-    elif hw_backend == "intel_mfx":
-        # Try Intel Quick Sync Video (QSV) with Media SDK
-        try:
-            print(f"🔧 Initializing Intel QuickSync capture with low latency")
-            cap = cv2.VideoCapture(rtsp_url, cv2.CAP_INTEL_MFX)
-            if cap.isOpened():
-                print("✅ Intel QuickSync Video capture initialized successfully")
-            else:
-                print("⚠️ Intel QuickSync capture failed to open, falling back to FFmpeg")
-                cap = None
-        except Exception as e:
-            print(f"❌ Intel QuickSync initialization failed: {e}")
-            cap = None
-
-    elif hw_backend == "vaapi":
-        # Try VAAPI hardware acceleration with low-latency GStreamer pipeline
-        try:
-            gst_pipeline = (
-                f'rtspsrc location={rtsp_url} protocols=tcp latency=0 ! '
-                'rtph264depay ! h264parse ! vaapih264dec ! '
-                'videoconvert ! appsink max-buffers=1 drop=true'
-            )
-            cap = cv2.VideoCapture(gst_pipeline, cv2.CAP_GSTREAMER)
-            if cap.isOpened():
-                print("✅ VAAPI GStreamer pipeline initialized with low latency")
-        except Exception as e:
-            print(f"⚠️ VAAPI GStreamer failed: {e}, falling back to FFmpeg")
-            # Fallback to regular FFMPEG with low-latency settings
-            cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
-
-    elif hw_backend == "dshow":
-        # Try DirectShow with hardware acceleration
-        try:
-            cap = cv2.VideoCapture(rtsp_url, cv2.CAP_DSHOW)
-        except:
-            pass
-
-    # Fallback to FFmpeg with aggressive low-latency settings
-    if cap is None or not cap.isOpened():
-        print("🔧 Using FFmpeg backend with ultra-low latency settings")
-
-        # Set FFmpeg environment variables for minimal latency
-        os.environ['OPENCV_FFMPEG_CAPTURE_OPTIONS'] = (
-            'rtsp_transport;tcp|'
-            'fflags;nobuffer|'
-            'flags;low_delay|'
-            'analyzeduration;1000000|'  # 1 second max analysis
-            'probesize;1000000|'  # 1MB probe size
-            'max_delay;0|'
-            'reorder_queue_size;0'
-        )
-
-        cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
-
-    # Apply ultra-aggressive low-latency capture settings
-    if cap.isOpened():
-        # Critical: Minimize buffer to absolute minimum (1 frame)
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-
-        # Set target FPS
-        cap.set(cv2.CAP_PROP_FPS, 30)
-
-        # Disable frame interpolation and buffering
-        try:
-            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('H', '2', '6', '4'))
-        except:
-            pass
-
-        # Additional latency reduction settings
-        try:
-            # Set minimal timeout for frame acquisition (100ms)
-            cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 5000)
-            cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 100)
-        except:
-            pass
-
-        print("✅ Low-latency capture settings applied (buffer=1, tcp transport, no buffering)")
-    else:
-        print(f"❌ Failed to open RTSP stream with all backends")
-
-    return cap
-
-
-def flush_rtsp_buffer(cap, num_frames=5):
+    Now uses PyAV with hardware acceleration instead of OpenCV.
     """
-    Flush the RTSP buffer by grabbing multiple frames and only retrieving the latest.
-    This ensures we're always processing the most recent frame, not buffered old frames.
+    print(f"🔧 Opening RTSP stream with PyAV hardware acceleration: {rtsp_url}")
 
-    Args:
-        cap: OpenCV VideoCapture object
-        num_frames: Number of frames to grab (flush) before retrieving
+    try:
+        # Use PyAV with auto-detected hardware backend
+        cap = PyAVCapture(rtsp_url, hw_backend=hw_backend, buffer_size=1)
 
-    Returns:
-        (ret, frame): Latest frame from the stream
-    """
-    # Grab multiple frames without decoding to flush the buffer
-    for _ in range(num_frames):
-        if not cap.grab():
-            break
-
-    # Retrieve only the last grabbed frame
-    return cap.retrieve()
+        if cap.isOpened():
+            print("✅ PyAV video capture initialized with hardware acceleration")
+            return cap
+        else:
+            print(f"❌ Failed to open RTSP stream with PyAV")
+            return cap
+    except Exception as e:
+        print(f"❌ PyAV initialization failed: {e}")
+        raise
 
 
 def process_frame_threaded(frame_data):
@@ -1434,12 +1302,11 @@ async def process_rtsp_with_ffmpeg_overlay(rtsp_url, output_queue, stop_event):
             if detection_results_cache:
                 frame = draw_detection_overlays_on_frame(frame, detection_results_cache)
 
-            # Hardware-accelerated encoding if available
-            encode_params = [cv2.IMWRITE_JPEG_QUALITY, 90]  # Higher quality for better stream
-            if hw_backend in ["cuda", "intel_mfx", "vaapi"]:
-                encode_params.extend([cv2.IMWRITE_JPEG_OPTIMIZE, 1])
-
-            _, buffer = cv2.imencode('.jpg', frame, encode_params)
+            # Encode frame to JPEG using PIL
+            pil_image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+            buffer_io = BytesIO()
+            pil_image.save(buffer_io, format='JPEG', quality=90, optimize=True)
+            buffer_bytes = buffer_io.getvalue()
 
             # Dynamic frame rate limiting based on processing load
             processing_load = len(pending_futures) / 6.0  # Normalize to 0-1
@@ -1449,7 +1316,7 @@ async def process_rtsp_with_ffmpeg_overlay(rtsp_url, output_queue, stop_event):
             # Put frame in output queue (non-blocking)
             if not output_queue.full():
                 try:
-                    output_queue.put_nowait(buffer.tobytes())
+                    output_queue.put_nowait(buffer_bytes)
                 except queue.Full:
                     pass  # Skip frame if queue is full
 
@@ -1477,7 +1344,7 @@ async def process_rtsp_with_ffmpeg_overlay(rtsp_url, output_queue, stop_event):
 def test_single_camera(index):
     """Test a single camera index"""
     try:
-        cap = cv2.VideoCapture(index)
+        cap = PyAVCapture(str(index))
         if cap.isOpened():
             ret, frame = cap.read()
             cap.release()
@@ -1963,7 +1830,8 @@ async def register_person(request: personRegistration, admin_id: str = Depends(g
         # Save cropped face image (consistent with bulk upload)
         os.makedirs('images', exist_ok=True)
         image_path = f'images/{person_id}.png'
-        cv2.imwrite(image_path, cropped_face)
+        pil_cropped = Image.fromarray(cv2.cvtColor(cropped_face, cv2.COLOR_BGR2RGB))
+        pil_cropped.save(image_path, 'PNG')
 
         # Generate thumbnail for faster loading in UI
         generate_thumbnail(person_id)
@@ -2145,7 +2013,8 @@ async def add_additional_photo(person_id: str, request: AdditionalPhotoUpload, a
         # Save cropped face image with proper numbering (consistent with initial registration)
         image_filename = f'{person_id}%{next_number}.png'
         image_path = f'images/{image_filename}'
-        cv2.imwrite(image_path, cropped_face)
+        pil_cropped = Image.fromarray(cv2.cvtColor(cropped_face, cv2.COLOR_BGR2RGB))
+        pil_cropped.save(image_path, 'PNG')
 
         # Efficiently add pre-cropped photo to FAISS database (skips redundant face detection)
         success = face_recognizer.add_pre_cropped_photo_to_database(person_id, image_path)
@@ -2953,7 +2822,7 @@ async def test_camera(request: CameraSettings, admin_id: str = Depends(get_curre
             }
 
         # Test the camera
-        cap = cv2.VideoCapture(source)
+        cap = PyAVCapture(str(source))
 
         try:
             if cap.isOpened():
@@ -3528,7 +3397,7 @@ async def process_webcam_with_overlay(output_queue, stream_id):
                 # Test cameras 0-9 to find available ones
                 for i in range(10):
                     try:
-                        test_cap = cv2.VideoCapture(i, cv2.CAP_AVFOUNDATION)
+                        test_cap = PyAVCapture(str(i))
                         if test_cap.isOpened():
                             ret, _ = test_cap.read()
                             if ret:
@@ -3548,13 +3417,8 @@ async def process_webcam_with_overlay(output_queue, stream_id):
             print(f"📹 Using default webcam (index 0)")
 
         # Initialize capture in thread to avoid blocking
-        # Use AVFoundation backend for better macOS compatibility (like original PyQt5)
         loop = asyncio.get_event_loop()
-        cap = await loop.run_in_executor(None, cv2.VideoCapture, camera_index, cv2.CAP_AVFOUNDATION)
-        await loop.run_in_executor(None, cap.set, cv2.CAP_PROP_BUFFERSIZE, 1)
-        await loop.run_in_executor(None, cap.set, cv2.CAP_PROP_FRAME_WIDTH, 640)
-        await loop.run_in_executor(None, cap.set, cv2.CAP_PROP_FRAME_HEIGHT, 480)
-        await loop.run_in_executor(None, cap.set, cv2.CAP_PROP_FPS, 30)
+        cap = await loop.run_in_executor(None, PyAVCapture, str(camera_index))
 
         if not cap.isOpened():
             print(f"❌ Failed to open webcam")
@@ -3698,13 +3562,16 @@ async def process_webcam_with_overlay(output_queue, stream_id):
             if detection_results_cache:
                 frame = draw_detection_overlays_on_frame(frame, detection_results_cache)
 
-            # Encode frame as JPEG
-            _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            # Encode frame as JPEG using PIL
+            pil_image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+            buffer_io = BytesIO()
+            pil_image.save(buffer_io, format='JPEG', quality=85)
+            buffer_bytes = buffer_io.getvalue()
 
             # Put frame in output queue
             if not output_queue.full():
                 try:
-                    output_queue.put_nowait(buffer.tobytes())
+                    output_queue.put_nowait(buffer_bytes)
                 except queue.Full:
                     pass  # Skip frame if queue is full
 
@@ -3751,7 +3618,7 @@ async def test_webcam(admin_id: str = Depends(get_current_admin)):
                 print(f"📹 Device ID {device_id[:12]}... not numeric, finding available camera")
                 for i in range(10):
                     try:
-                        test_cap = cv2.VideoCapture(i, cv2.CAP_AVFOUNDATION)
+                        test_cap = PyAVCapture(str(i))
                         if test_cap.isOpened():
                             ret, _ = test_cap.read()
                             if ret:
@@ -3764,8 +3631,7 @@ async def test_webcam(admin_id: str = Depends(get_current_admin)):
         else:
             print(f"📹 Testing default webcam (index 0)")
 
-        cap = cv2.VideoCapture(camera_index, cv2.CAP_AVFOUNDATION)
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        cap = PyAVCapture(str(camera_index))
 
         if not cap.isOpened():
             cap.release()
@@ -3800,8 +3666,7 @@ async def test_rtsp(admin_id: str = Depends(get_current_admin)):
     print(f"📡 Testing RTSP connection: {rtsp_url}")
 
     try:
-        cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        cap = PyAVCapture(rtsp_url)
 
         if not cap.isOpened():
             cap.release()

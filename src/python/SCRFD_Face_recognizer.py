@@ -24,6 +24,7 @@ from pathlib import Path
 from queue import Queue
 from enum import Enum
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from PIL import Image
 
 class DatabaseOperation(Enum):
     """Types of database operations that can be queued"""
@@ -881,9 +882,13 @@ class SCRFDFaceRecognizer:
                 # Extract person ID from filename (before first . or %)
                 person_id = image_file.stem.split('%')[0]
 
-                # Load and process image
-                image = cv2.imread(str(image_file))
-                if image is None:
+                # Load and process image using PIL
+                pil_image = Image.open(str(image_file))
+                image = np.array(pil_image)
+                # Convert RGB to BGR if needed
+                if len(image.shape) == 3 and image.shape[2] == 3:
+                    image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+                if image is None or image.size == 0:
                     print(f"⚠️ Could not load image: {image_file}")
                     failed_count += 1
                     continue
@@ -1068,9 +1073,13 @@ class SCRFDFaceRecognizer:
         try:
             print(f"➕ Adding photo to FAISS database: {image_path}")
 
-            # Load and process image
-            image = cv2.imread(str(image_path))
-            if image is None:
+            # Load and process image using PIL
+            pil_image = Image.open(str(image_path))
+            image = np.array(pil_image)
+            # Convert RGB to BGR if needed
+            if len(image.shape) == 3 and image.shape[2] == 3:
+                image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+            if image is None or image.size == 0:
                 print(f"⚠️ Could not load image: {image_path}")
                 return False
 
@@ -1123,9 +1132,13 @@ class SCRFDFaceRecognizer:
         try:
             print(f"➕ Adding pre-cropped photo to FAISS database: {image_path}")
 
-            # Load and process image
-            image = cv2.imread(str(image_path))
-            if image is None:
+            # Load and process image using PIL
+            pil_image = Image.open(str(image_path))
+            image = np.array(pil_image)
+            # Convert RGB to BGR if needed
+            if len(image.shape) == 3 and image.shape[2] == 3:
+                image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+            if image is None or image.size == 0:
                 print(f"⚠️ Could not load image: {image_path}")
                 return False
 
@@ -1205,8 +1218,16 @@ class SCRFDFaceRecognizer:
             print("📂 Loading pre-cropped images...")
             images_data = []
             for person_id, image_path in persons:
-                image = cv2.imread(str(image_path))
-                if image is not None:
+                try:
+                    pil_image = Image.open(str(image_path))
+                    image = np.array(pil_image)
+                    # Convert RGB to BGR if needed
+                    if len(image.shape) == 3 and image.shape[2] == 3:
+                        image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+                except Exception as e:
+                    image = None
+
+                if image is not None and image.size > 0:
                     images_data.append((person_id, image_path, image))
                 else:
                     results['failed'].append({

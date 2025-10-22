@@ -15,3 +15,4 @@ sse-starlette
 faiss-cpu==1.9.0
 psycopg2-binary  # PostgreSQL adapter for hybrid database setup
 python-dotenv  # Load .env files
+av>=11.0.0  # PyAV for hardware-accelerated video processing
